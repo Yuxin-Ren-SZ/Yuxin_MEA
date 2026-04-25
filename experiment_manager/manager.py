@@ -1,0 +1,276 @@
+from __future__ import annotations
+
+import dataclasses
+import logging
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any
+
+from .cache_store import BaseCacheStore, JsonCacheStore
+from .recording_entry import RecordingEntry
+
+logger = logging.getLogger(__name__)
+
+_DATE_PATTERN = re.compile(r"^\d{6}$")
+
+# Operator dispatch for get_by()
+_OPS: dict[str, Any] = {
+    "==":          lambda a, b: a == b,
+    "!=":          lambda a, b: a != b,
+    "<":           lambda a, b: a < b,
+    "<=":          lambda a, b: a <= b,
+    ">":           lambda a, b: a > b,
+    ">=":          lambda a, b: a >= b,
+    "contain":     lambda a, b: b in a,
+    "not contain": lambda a, b: b not in a,
+}
+
+_VALID_KEYS = {f.name for f in dataclasses.fields(RecordingEntry)}
+
+
+class ExperimentManager:
+    """Discovers and caches MEA recordings under a data root directory.
+
+    Supports two data_root layouts:
+      - Root level:   data_root / SampleID / Date / PlateID / ScanType / RunID
+      - Sample level: data_root / Date / PlateID / ScanType / RunID
+                      (SampleID is inferred from data_root.name)
+
+    On each startup only the Date-level directories are checked against the cache;
+    deeper scanning only runs for newly discovered (SampleID, Date) pairs.
+    """
+
+    def __init__(
+        self,
+        data_root:    Path,
+        analysis_dir: Path,
+        max_workers:  int | None = None,
+        cache_store:  BaseCacheStore | None = None,
+    ) -> None:
+        self._data_root    = Path(data_root)
+        self._analysis_dir = Path(analysis_dir)
+        self._max_workers  = max_workers
+        self._store        = cache_store or JsonCacheStore(self._analysis_dir)
+        self._cache: dict[str, RecordingEntry] = {}
+
+        self._initialise()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    @property
+    def recordings(self) -> list[RecordingEntry]:
+        return list(self._cache.values())
+
+    def get_by(self, key: str, value: Any, method: str) -> list[RecordingEntry]:
+        """Filter recordings by a metadata field.
+
+        Args:
+            key:    A field name of RecordingEntry (e.g. 'scan_type', 'file_size').
+            value:  The value to compare against.
+            method: One of '==', '!=', '<', '<=', '>', '>=', 'contain', 'not contain'.
+
+        Raises:
+            ValueError: If key is not a valid RecordingEntry field or method is unknown.
+        """
+        if key not in _VALID_KEYS:
+            raise ValueError(
+                f"Unknown key {key!r}. Valid keys: {sorted(_VALID_KEYS)}"
+            )
+        if method not in _OPS:
+            raise ValueError(
+                f"Unknown method {method!r}. Valid methods: {sorted(_OPS)}"
+            )
+        op = _OPS[method]
+        return [r for r in self._cache.values() if op(getattr(r, key), value)]
+
+    def refresh(self) -> None:
+        """Clear the cache and re-scan all directories from scratch."""
+        logger.info("Refreshing cache — full rescan of %s", self._data_root)
+        self._cache.clear()
+        self._scan_all()
+        self._store.save(self._cache)
+        logger.info("Refresh complete. %d recordings cached.", len(self._cache))
+
+    # ------------------------------------------------------------------
+    # Internal initialisation
+    # ------------------------------------------------------------------
+
+    def _initialise(self) -> None:
+        self._cache = self._store.load()
+        logger.info(
+            "Loaded %d entries from cache. Checking for new Date directories...",
+            len(self._cache),
+        )
+
+        root_level = self._detect_root_level()
+        disk_date_keys = self._collect_disk_date_keys(root_level)
+        cached_date_keys = {
+            (e.sample_id, e.date) for e in self._cache.values()
+        }
+
+        missing = cached_date_keys - disk_date_keys
+        for sample_id, date in sorted(missing):
+            logger.warning(
+                "Cached Date directory no longer on disk: %s/%s", sample_id, date
+            )
+
+        new_keys = disk_date_keys - cached_date_keys
+        if not new_keys:
+            logger.info("No new Date directories found.")
+            return
+
+        logger.info("Found %d new Date director(ies). Scanning...", len(new_keys))
+        new_entries = self._scan_date_keys(new_keys, root_level)
+
+        for entry in new_entries:
+            self._cache[entry.cache_key] = entry
+
+        self._store.save(self._cache)
+        logger.info(
+            "Scan complete. Added %d new recordings (%d total).",
+            len(new_entries),
+            len(self._cache),
+        )
+
+    def _scan_all(self) -> None:
+        """Full rescan used by refresh()."""
+        root_level = self._detect_root_level()
+        all_date_keys = self._collect_disk_date_keys(root_level)
+        entries = self._scan_date_keys(all_date_keys, root_level)
+        for entry in entries:
+            self._cache[entry.cache_key] = entry
+
+    # ------------------------------------------------------------------
+    # Root-level detection
+    # ------------------------------------------------------------------
+
+    def _detect_root_level(self) -> str:
+        """Return 'sample' if data_root's children are Date dirs, else 'root'."""
+        try:
+            children = [p.name for p in self._data_root.iterdir() if p.is_dir()]
+        except OSError as exc:
+            logger.error("Cannot list data_root %s: %s", self._data_root, exc)
+            return "root"
+
+        for name in children[:10]:  # sample first few to avoid scanning entire NAS
+            if _DATE_PATTERN.match(name):
+                logger.debug(
+                    "Detected sample-level data_root (SampleID = %s)",
+                    self._data_root.name,
+                )
+                return "sample"
+        return "root"
+
+    # ------------------------------------------------------------------
+    # Date-key collection
+    # ------------------------------------------------------------------
+
+    def _collect_disk_date_keys(self, root_level: str) -> set[tuple[str, str]]:
+        """Return (sample_id, date) pairs visible on disk."""
+        keys: set[tuple[str, str]] = set()
+
+        if root_level == "sample":
+            sample_id = self._data_root.name
+            for date_dir in self._iter_dirs(self._data_root):
+                if _DATE_PATTERN.match(date_dir.name):
+                    keys.add((sample_id, date_dir.name))
+        else:
+            for sample_dir in self._iter_dirs(self._data_root):
+                for date_dir in self._iter_dirs(sample_dir):
+                    if _DATE_PATTERN.match(date_dir.name):
+                        keys.add((sample_dir.name, date_dir.name))
+
+        return keys
+
+    # ------------------------------------------------------------------
+    # Threaded scanning
+    # ------------------------------------------------------------------
+
+    def _scan_date_keys(
+        self,
+        date_keys: set[tuple[str, str]],
+        root_level: str,
+    ) -> list[RecordingEntry]:
+        """Scan each (sample_id, date) pair concurrently and return all entries."""
+        results: list[RecordingEntry] = []
+
+        def make_date_dir(sample_id: str, date: str) -> Path:
+            if root_level == "sample":
+                return self._data_root / date
+            return self._data_root / sample_id / date
+
+        with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
+            futures = {
+                pool.submit(
+                    self._scan_date_dir,
+                    sample_id,
+                    make_date_dir(sample_id, date),
+                    root_level,
+                ): (sample_id, date)
+                for sample_id, date in date_keys
+            }
+            for future in as_completed(futures):
+                sample_id, date = futures[future]
+                try:
+                    entries = future.result()
+                    results.extend(entries)
+                    logger.debug(
+                        "Scanned %s/%s — %d recording(s) found.",
+                        sample_id, date, len(entries),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Error scanning %s/%s: %s", sample_id, date, exc, exc_info=True
+                    )
+
+        return results
+
+    def _scan_date_dir(
+        self,
+        sample_id: str,
+        date_dir: Path,
+        root_level: str,
+    ) -> list[RecordingEntry]:
+        """Walk a Date directory and return one RecordingEntry per valid run."""
+        entries: list[RecordingEntry] = []
+        discovered_at = time.time()
+        sample_id_override = sample_id if root_level == "sample" else None
+
+        for plate_dir in self._iter_dirs(date_dir):
+            for scan_dir in self._iter_dirs(plate_dir):
+                for run_dir in self._iter_dirs(scan_dir):
+                    data_file = run_dir / "data.raw.h5"
+                    if not data_file.is_file():
+                        continue
+                    try:
+                        entry = RecordingEntry.from_path(
+                            data_path=data_file,
+                            data_root=self._data_root,
+                            sample_id_override=sample_id_override,
+                            discovered_at=discovered_at,
+                        )
+                        entries.append(entry)
+                    except (ValueError, OSError) as exc:
+                        logger.warning(
+                            "Skipping %s: %s", data_file, exc
+                        )
+
+        return entries
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _iter_dirs(parent: Path):
+        """Yield immediate subdirectories of parent, ignoring permission errors."""
+        try:
+            for p in parent.iterdir():
+                if p.is_dir():
+                    yield p
+        except OSError as exc:
+            logger.warning("Cannot list directory %s: %s", parent, exc)
