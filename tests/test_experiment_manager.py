@@ -497,6 +497,32 @@ class TestExperimentManagerIntegration:
         manager2 = ExperimentManager(temp_data_root, temp_analysis_dir)
         assert len(manager2.recordings) == 2
 
+    def test_manual_data_dir_generates_cache(self):
+        """Test cache generation against a manually specified data directory."""
+        data_root_value = os.environ.get("EXPERIMENT_MANAGER_TEST_DATA_ROOT")
+        if not data_root_value:
+            pytest.skip(
+                "Set EXPERIMENT_MANAGER_TEST_DATA_ROOT to a real data directory to run this test."
+            )
+
+        data_root = Path(data_root_value).expanduser()
+        if not data_root.is_dir():
+            pytest.fail(
+                f"EXPERIMENT_MANAGER_TEST_DATA_ROOT is not a directory: {data_root}"
+            )
+
+        analysis_dir = Path(__file__).parent / "../temp"
+        cache_file = analysis_dir / "experiment_cache.json"
+        if cache_file.exists():
+            cache_file.unlink()
+
+        manager = ExperimentManager(data_root, analysis_dir)
+        loaded_cache = JsonCacheStore(analysis_dir).load()
+
+        assert cache_file.exists()
+        assert len(loaded_cache) == len(manager.recordings)
+        assert set(loaded_cache) == {entry.cache_key for entry in manager.recordings}
+
 
 # ==============================================================================
 # Run Tests
