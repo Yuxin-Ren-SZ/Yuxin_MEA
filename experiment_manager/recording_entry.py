@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 # Relative to a root-level data_root: SampleID/Date/PlateID/ScanType/RunID
 _ROOT_REGEX = re.compile(
@@ -24,6 +25,25 @@ _SAMPLE_REGEX = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Well entry (mutable — metadata is populated lazily from mxassay.metadata)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WellEntry:
+    """Per-well metadata for a single well within a data.raw.h5 recording.
+
+    Metadata is initially empty and populated later when mxassay.metadata
+    parsing is implemented (groups, density, assay type, chip ID, etc.).
+    """
+    well_id:  str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Recording entry (immutable recording-level fields + mutable wells dict)
+# ---------------------------------------------------------------------------
+
 @dataclass(frozen=True)
 class RecordingEntry:
     sample_id:     str
@@ -35,6 +55,10 @@ class RecordingEntry:
     file_size:     int    # bytes
     mtime:         float  # POSIX timestamp of data.raw.h5
     discovered_at: float  # POSIX timestamp when first scanned by the manager
+
+    # Wells discovered under this recording. frozen=True prevents reassigning
+    # this attribute, but dict contents can be mutated as wells are registered.
+    wells: dict[str, WellEntry] = field(default_factory=dict)
 
     @property
     def cache_key(self) -> str:

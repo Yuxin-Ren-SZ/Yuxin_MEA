@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .cache_store import BaseCacheStore, JsonCacheStore
-from .recording_entry import RecordingEntry
+from .metadata_extractor import BaseMetadataExtractor, DummyMetadataExtractor
+from .recording_entry import RecordingEntry, WellEntry
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +45,17 @@ class ExperimentManager:
 
     def __init__(
         self,
-        data_root:    Path,
-        analysis_dir: Path,
-        max_workers:  int | None = None,
-        cache_store:  BaseCacheStore | None = None,
+        data_root:          Path,
+        analysis_dir:       Path,
+        max_workers:        int | None = None,
+        cache_store:        BaseCacheStore | None = None,
+        metadata_extractor: BaseMetadataExtractor | None = None,
     ) -> None:
-        self._data_root    = Path(data_root)
-        self._analysis_dir = Path(analysis_dir)
-        self._max_workers  = max_workers
-        self._store        = cache_store or JsonCacheStore(self._analysis_dir)
+        self._data_root          = Path(data_root)
+        self._analysis_dir       = Path(analysis_dir)
+        self._max_workers        = max_workers
+        self._store              = cache_store or JsonCacheStore(self._analysis_dir)
+        self._metadata_extractor = metadata_extractor or DummyMetadataExtractor()
         self._cache: dict[str, RecordingEntry] = {}
 
         self._initialise()
@@ -86,6 +89,74 @@ class ExperimentManager:
             )
         op = _OPS[method]
         return [r for r in self._cache.values() if op(getattr(r, key), value)]
+
+    # ------------------------------------------------------------------
+    # Well management
+    # ------------------------------------------------------------------
+
+    def get_wells(self, recording_key: str) -> dict[str, WellEntry]:
+        """Return the wells dict for a recording, or {} if the key is unknown."""
+        entry = self._cache.get(recording_key)
+        return entry.wells if entry is not None else {}
+
+    def register_well(
+        self,
+        recording_key: str,
+        well_id: str,
+        metadata: dict | None = None,
+    ) -> WellEntry:
+        """Add or update a well under a recording entry and persist the cache.
+
+        If the well already exists its metadata is merged (new keys override
+        existing ones; existing keys not in metadata are preserved).
+
+        Args:
+            recording_key: Must match an existing RecordingEntry.cache_key.
+            well_id:        e.g. "well000".
+            metadata:       Per-well data (groups, density, assay type, …).
+                            Defaults to {}.
+
+        Raises:
+            KeyError: If recording_key is not found in the cache.
+        """
+        entry = self._cache.get(recording_key)
+        if entry is None:
+            raise KeyError(
+                f"Recording {recording_key!r} not found in cache. "
+                "Ensure ExperimentManager has scanned the data root first."
+            )
+        incoming = metadata or {}
+        if well_id in entry.wells:
+            entry.wells[well_id].metadata.update(incoming)
+        else:
+            entry.wells[well_id] = WellEntry(well_id=well_id, metadata=dict(incoming))
+
+        self._store.save(self._cache)
+        logger.debug("Registered well %s under %s.", well_id, recording_key)
+        return entry.wells[well_id]
+
+    def update_well_metadata(
+        self,
+        recording_key: str,
+        well_id: str,
+        metadata: dict,
+    ) -> None:
+        """Merge new metadata into an existing well and persist.
+
+        Raises:
+            KeyError: If recording_key or well_id is not found in the cache.
+        """
+        entry = self._cache.get(recording_key)
+        if entry is None:
+            raise KeyError(f"Recording {recording_key!r} not found in cache.")
+        if well_id not in entry.wells:
+            raise KeyError(
+                f"Well {well_id!r} not registered under {recording_key!r}. "
+                "Call register_well() first."
+            )
+        entry.wells[well_id].metadata.update(metadata)
+        self._store.save(self._cache)
+        logger.debug("Updated metadata for well %s/%s.", recording_key, well_id)
 
     def refresh(self) -> None:
         """Clear the cache and re-scan all directories from scratch."""
@@ -253,6 +324,7 @@ class ExperimentManager:
                             sample_id_override=sample_id_override,
                             discovered_at=discovered_at,
                         )
+                        self._populate_wells(entry, run_dir)
                         entries.append(entry)
                     except (ValueError, OSError) as exc:
                         logger.warning(
@@ -264,6 +336,27 @@ class ExperimentManager:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _populate_wells(self, entry: RecordingEntry, run_dir: Path) -> None:
+        """Call the metadata extractor and merge results into entry.wells.
+
+        Existing wells are updated (metadata merged); new wells are created.
+        Logs a warning if the extractor raises, but does not abort the scan.
+        """
+        metadata_path = run_dir / "mxassay.metadata"
+        try:
+            well_list = self._metadata_extractor.get(metadata_path)
+        except Exception as exc:
+            logger.warning(
+                "Metadata extraction failed for %s: %s", metadata_path, exc
+            )
+            return
+
+        for wm in well_list:
+            if wm.well_id in entry.wells:
+                entry.wells[wm.well_id].metadata.update(wm.fields)
+            else:
+                entry.wells[wm.well_id] = WellEntry(well_id=wm.well_id, metadata=dict(wm.fields))
 
     @staticmethod
     def _iter_dirs(parent: Path):
