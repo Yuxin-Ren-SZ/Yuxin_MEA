@@ -29,9 +29,12 @@ class TestMetadataExtractorManualReview:
         output_paths = []
 
         for metadata_path in metadata_paths:
-            wells = extractor.get(metadata_path)
+            recording_metadata = extractor.get(metadata_path)
             extracted = {
-                well.well_id: well.fields for well in wells
+                "fields": recording_metadata.fields,
+                "wells": {
+                    well.well_id: well.fields for well in recording_metadata.wells
+                },
             }
             relative_path = metadata_path.relative_to(data_root)
             output_path = (output_dir / relative_path).with_suffix(".json")

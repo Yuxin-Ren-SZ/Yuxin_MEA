@@ -11,7 +11,8 @@ import pytest
 
 from experiment_manager.cache_store import JsonCacheStore
 from experiment_manager.manager import ExperimentManager
-from experiment_manager.recording_entry import RecordingEntry
+from experiment_manager.metadata_extractor import RecordingMetadata, WellMetadata
+from experiment_manager.recording_entry import RecordingEntry, WellEntry
 
 
 # ==============================================================================
@@ -154,6 +155,12 @@ class TestJsonCacheStore:
         """Test saving and loading cache entries."""
         store = JsonCacheStore(temp_analysis_dir)
         entry = sample_recording_entry
+        entry.metadata["runid"] = "001"
+        entry.metadata["chipid"] = "chip-123"
+        entry.wells["well000"] = WellEntry(
+            well_id="well000",
+            metadata={"groupname": "control", "density": 10000.0},
+        )
 
         # Save
         cache_dict = {entry.cache_key: entry}
@@ -167,6 +174,8 @@ class TestJsonCacheStore:
         assert loaded_entry.sample_id == entry.sample_id
         assert loaded_entry.date == entry.date
         assert loaded_entry.file_size == entry.file_size
+        assert loaded_entry.metadata == entry.metadata
+        assert loaded_entry.wells["well000"].metadata == entry.wells["well000"].metadata
 
     def test_cache_file_location(self, temp_analysis_dir):
         """Test that cache file is created at correct location."""
@@ -201,6 +210,28 @@ class TestJsonCacheStore:
 class TestExperimentManager:
     """Test the ExperimentManager class."""
 
+    class StubMetadataExtractor:
+        """Deterministic extractor used to verify metadata population."""
+
+        def get(self, metadata_path: Path) -> RecordingMetadata:
+            return RecordingMetadata(
+                fields={
+                    "metadata_path": str(metadata_path),
+                    "chipid": "chip-123",
+                    "runid": "001",
+                },
+                wells=[
+                    WellMetadata(
+                        well_id="well000",
+                        fields={"groupname": "control", "density": 10000.0},
+                    ),
+                    WellMetadata(
+                        well_id="well001",
+                        fields={"groupname": "treatment", "density": 15000.0},
+                    ),
+                ],
+            )
+
     def test_initialization_with_empty_data_root(self, temp_data_root, temp_analysis_dir):
         """Test initializing manager with empty data root."""
         manager = ExperimentManager(temp_data_root, temp_analysis_dir)
@@ -220,6 +251,32 @@ class TestExperimentManager:
         recordings = manager.recordings
         assert len(recordings) == 1
         assert recordings[0].sample_id == "SampleA"
+
+    def test_recording_metadata_and_wells_populated(
+        self, temp_data_root, temp_analysis_dir
+    ):
+        """Test that extractor output populates recording metadata and wells."""
+        data_dir = (
+            temp_data_root / "SampleA" / "240415" / "PlateX" / "ScanType1" / "001"
+        )
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "data.raw.h5").write_bytes(b"test_data")
+
+        manager = ExperimentManager(
+            temp_data_root,
+            temp_analysis_dir,
+            metadata_extractor=self.StubMetadataExtractor(),
+        )
+
+        entry = manager.recordings[0]
+        assert entry.metadata["chipid"] == "chip-123"
+        assert entry.metadata["runid"] == "001"
+        assert entry.metadata["metadata_path"].endswith(
+            "SampleA/240415/PlateX/ScanType1/001/mxassay.metadata"
+        )
+        assert set(entry.wells) == {"well000", "well001"}
+        assert entry.wells["well000"].metadata["groupname"] == "control"
+        assert entry.wells["well001"].metadata["density"] == 15000.0
 
     def test_get_by_equals(self, temp_data_root, temp_analysis_dir):
         """Test filtering recordings with == operator."""
@@ -400,13 +457,22 @@ class TestExperimentManager:
         data_file = data_dir / "data.raw.h5"
         data_file.write_bytes(b"test_data")
 
-        manager1 = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager1 = ExperimentManager(
+            temp_data_root,
+            temp_analysis_dir,
+            metadata_extractor=self.StubMetadataExtractor(),
+        )
         assert len(manager1.recordings) == 1
 
         # Create second manager instance - should load from cache
         manager2 = ExperimentManager(temp_data_root, temp_analysis_dir)
         assert len(manager2.recordings) == 1
         assert manager2.recordings[0].sample_id == manager1.recordings[0].sample_id
+        assert manager2.recordings[0].metadata == manager1.recordings[0].metadata
+        assert manager2.recordings[0].wells["well000"].metadata == {
+            "groupname": "control",
+            "density": 10000.0,
+        }
 
     def test_date_format_validation(self, temp_data_root, temp_analysis_dir):
         """Test that only 6-digit dates are recognized."""

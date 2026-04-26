@@ -3,6 +3,7 @@ from .metadata_extractor import (
     BaseMetadataExtractor,
     DummyMetadataExtractor,
     MxassayMetadataExtractor,
+    RecordingMetadata,
     WellMetadata,
 )
 from .recording_entry import RecordingEntry, WellEntry
@@ -15,4 +16,5 @@ __all__ = [
     "BaseMetadataExtractor",
     "DummyMetadataExtractor",
     "MxassayMetadataExtractor",
+    "RecordingMetadata",
 ]

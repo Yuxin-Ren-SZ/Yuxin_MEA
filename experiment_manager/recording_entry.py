@@ -56,8 +56,11 @@ class RecordingEntry:
     mtime:         float  # POSIX timestamp of data.raw.h5
     discovered_at: float  # POSIX timestamp when first scanned by the manager
 
-    # Wells discovered under this recording. frozen=True prevents reassigning
-    # this attribute, but dict contents can be mutated as wells are registered.
+    # Recording-level fields from mxassay.metadata ([properties] + [runtime]).
+    # frozen=True prevents reassigning these attributes, but dict contents are mutable.
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    # Wells discovered under this recording.
     wells: dict[str, WellEntry] = field(default_factory=dict)
 
     @property

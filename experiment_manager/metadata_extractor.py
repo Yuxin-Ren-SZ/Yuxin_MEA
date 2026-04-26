@@ -19,7 +19,7 @@ _DECODER_INTERNAL_KEYS = frozenset({
 
 @dataclass
 class WellMetadata:
-    """All per-well fields from a single mxassay.metadata entry.
+    """All per-well fields from a single mxassay.metadata well entry.
 
     `fields` contains every key/value from the decoded well record:
     MaxWell slot fields (groupname, control, well_name, concentration, …)
@@ -30,19 +30,34 @@ class WellMetadata:
     fields:  dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class RecordingMetadata:
+    """All metadata from a single mxassay.metadata file.
+
+    `fields` is a flat merge of the [properties] and [runtime] sections —
+    recording-level fields that describe the whole run (project_title, chipid,
+    started, runid, tag, …). Keys vary by MaxWell software version.
+
+    `wells` is the per-well breakdown for selected wells only.
+    """
+    fields: dict[str, Any]     = field(default_factory=dict)
+    wells:  list[WellMetadata] = field(default_factory=list)
+
+
 class BaseMetadataExtractor(ABC):
-    """Parses mxassay.metadata and returns per-well metadata.
+    """Parses mxassay.metadata and returns both recording- and well-level metadata.
 
     Swap in a subclass without touching ExperimentManager.
     """
 
     @abstractmethod
-    def get(self, metadata_path: Path) -> list[WellMetadata]:
-        """Return metadata for selected wells in metadata_path.
+    def get(self, metadata_path: Path) -> RecordingMetadata:
+        """Parse metadata_path and return a RecordingMetadata.
 
         Args:
             metadata_path: Absolute path to the mxassay.metadata file.
-                           Implementations should return [] for missing files.
+                           Return RecordingMetadata(fields={}, wells=[]) for
+                           missing files rather than raising.
         """
 
 
@@ -54,39 +69,56 @@ def _well_to_fields(well: dict[str, Any]) -> dict[str, Any]:
 
 
 class MxassayMetadataExtractor(BaseMetadataExtractor):
-    """Reads a MaxWell/MaxLab mxassay.metadata file and returns per-well metadata.
+    """Reads a MaxWell/MaxLab mxassay.metadata file.
 
-    Only selected wells (those actually recorded) are returned. Returns []
-    when the file does not exist so scans continue in dev environments.
+    Recording-level fields: merged [properties] + [runtime] sections.
+    Well-level fields: per selected well, slot fields + annotation properties.
+    Returns RecordingMetadata(fields={}, wells=[]) when the file does not exist.
     """
 
-    def get(self, metadata_path: Path) -> list[WellMetadata]:
+    def get(self, metadata_path: Path) -> RecordingMetadata:
         if not metadata_path.exists():
-            return []
+            return RecordingMetadata()
 
-        meta = decode_mxassay_metadata(metadata_path, add_iso_times=False)
+        meta = decode_mxassay_metadata(metadata_path, add_iso_times=True)
+
+        # Recording-level: merge properties + runtime (ISO fields and
+        # actual_runtime_seconds included — computed from file data).
+        recording_fields: dict[str, Any] = {
+            **meta.get("properties", {}),
+            **meta.get("runtime", {}),
+        }
+
+        # Well-level: selected wells only.
         wells_section = meta.get("wells")
-        if not isinstance(wells_section, dict):
-            return []
+        wells: list[WellMetadata] = []
+        if isinstance(wells_section, dict):
+            wells_data: dict[int, Any] = wells_section.get("wells", {})
+            selected_ids: list[int] = wells_section.get("selected_wells") or list(wells_data)
+            wells = [
+                WellMetadata(
+                    well_id=f"well{int(wid):03d}",
+                    fields=_well_to_fields(well),
+                )
+                for wid in selected_ids
+                if (well := wells_data.get(int(wid))) is not None
+            ]
 
-        wells_data: dict[int, Any] = wells_section.get("wells", {})
-        selected_ids: list[int] = wells_section.get("selected_wells") or list(wells_data)
-
-        return [
-            WellMetadata(
-                well_id=f"well{int(wid):03d}",
-                fields=_well_to_fields(well),
-            )
-            for wid in selected_ids
-            if (well := wells_data.get(int(wid))) is not None
-        ]
+        return RecordingMetadata(fields=recording_fields, wells=wells)
 
 
 class DummyMetadataExtractor(BaseMetadataExtractor):
-    """Placeholder — ignores metadata_path and returns fixed dummy wells.
+    """Placeholder — ignores metadata_path and returns fixed dummy data.
 
-    Provides two groups at three density levels for offline development.
+    Provides plausible recording- and well-level fields for offline development.
     """
+
+    _DUMMY_RECORDING_FIELDS: dict[str, Any] = {
+        "runid":   "000000",
+        "tag":     "dummy run",
+        "chipid":  "DUMMY",
+        "progress": 100,
+    }
 
     _DUMMY_WELLS: list[WellMetadata] = [
         WellMetadata("well000", {"groupname": "control",   "density": 10_000.0}),
@@ -97,5 +129,8 @@ class DummyMetadataExtractor(BaseMetadataExtractor):
         WellMetadata("well005", {"groupname": "treatment", "density": 20_000.0}),
     ]
 
-    def get(self, metadata_path: Path) -> list[WellMetadata]:
-        return list(self._DUMMY_WELLS)
+    def get(self, metadata_path: Path) -> RecordingMetadata:
+        return RecordingMetadata(
+            fields=dict(self._DUMMY_RECORDING_FIELDS),
+            wells=list(self._DUMMY_WELLS),
+        )

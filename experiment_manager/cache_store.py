@@ -16,7 +16,7 @@ CACHE_FILENAME = "experiment_cache.json"
 _WELL_KEYS  = {"well_id", "metadata"}
 _ENTRY_KEYS = {
     "sample_id", "date", "plate_id", "scan_type", "run_id",
-    "data_path", "file_size", "mtime", "discovered_at", "wells",
+    "data_path", "file_size", "mtime", "discovered_at", "metadata", "wells",
 }
 
 
@@ -72,6 +72,7 @@ def _recording_entry_decoder(d: dict) -> RecordingEntry | WellEntry | dict:
             file_size=int(d["file_size"]),
             mtime=float(d["mtime"]),
             discovered_at=float(d["discovered_at"]),
+            metadata=d["metadata"],
             wells=d["wells"],
         )
 
@@ -130,6 +131,7 @@ def _entry_to_dict(entry: RecordingEntry) -> dict:
         "file_size":     entry.file_size,
         "mtime":         entry.mtime,
         "discovered_at": entry.discovered_at,
+        "metadata":      entry.metadata,
         "wells": {
             wid: {"well_id": we.well_id, "metadata": we.metadata}
             for wid, we in entry.wells.items()

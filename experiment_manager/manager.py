@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .cache_store import BaseCacheStore, JsonCacheStore
-from .metadata_extractor import BaseMetadataExtractor, DummyMetadataExtractor
+from .metadata_extractor import BaseMetadataExtractor, DummyMetadataExtractor, RecordingMetadata
 from .recording_entry import RecordingEntry, WellEntry
 
 logger = logging.getLogger(__name__)
@@ -324,7 +324,7 @@ class ExperimentManager:
                             sample_id_override=sample_id_override,
                             discovered_at=discovered_at,
                         )
-                        self._populate_wells(entry, run_dir)
+                        self._populate_metadata(entry, run_dir)
                         entries.append(entry)
                     except (ValueError, OSError) as exc:
                         logger.warning(
@@ -337,22 +337,22 @@ class ExperimentManager:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _populate_wells(self, entry: RecordingEntry, run_dir: Path) -> None:
-        """Call the metadata extractor and merge results into entry.wells.
+    def _populate_metadata(self, entry: RecordingEntry, run_dir: Path) -> None:
+        """Call the metadata extractor and merge results into entry.metadata and entry.wells.
 
-        Existing wells are updated (metadata merged); new wells are created.
+        Recording-level fields go into entry.metadata; per-well fields into entry.wells.
         Logs a warning if the extractor raises, but does not abort the scan.
         """
         metadata_path = run_dir / "mxassay.metadata"
         try:
-            well_list = self._metadata_extractor.get(metadata_path)
+            rec_meta: RecordingMetadata = self._metadata_extractor.get(metadata_path)
         except Exception as exc:
-            logger.warning(
-                "Metadata extraction failed for %s: %s", metadata_path, exc
-            )
+            logger.warning("Metadata extraction failed for %s: %s", metadata_path, exc)
             return
 
-        for wm in well_list:
+        entry.metadata.update(rec_meta.fields)
+
+        for wm in rec_meta.wells:
             if wm.well_id in entry.wells:
                 entry.wells[wm.well_id].metadata.update(wm.fields)
             else:
