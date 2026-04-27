@@ -47,7 +47,7 @@ class RecordingMetadata:
 class BaseMetadataExtractor(ABC):
     """Parses mxassay.metadata and returns both recording- and well-level metadata.
 
-    Swap in a subclass without touching ExperimentManager.
+    Swap in a subclass without touching DatasetManager.
     """
 
     @abstractmethod

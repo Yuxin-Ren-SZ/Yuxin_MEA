@@ -9,10 +9,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from experiment_manager.cache_store import JsonCacheStore
-from experiment_manager.manager import ExperimentManager
-from experiment_manager.metadata_extractor import RecordingMetadata, WellMetadata
-from experiment_manager.recording_entry import RecordingEntry, WellEntry
+from dataset_manager.cache_store import JsonCacheStore
+from dataset_manager.dataset_manager import DatasetManager
+from dataset_manager.metadata_extractor import RecordingMetadata, WellMetadata
+from dataset_manager.recording_entry import RecordingEntry, WellEntry
 
 
 # ==============================================================================
@@ -234,7 +234,7 @@ class TestExperimentManager:
 
     def test_initialization_with_empty_data_root(self, temp_data_root, temp_analysis_dir):
         """Test initializing manager with empty data root."""
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
         assert len(manager.recordings) == 0
 
     def test_recordings_property(self, temp_data_root, temp_analysis_dir, sample_recording_entry):
@@ -247,7 +247,7 @@ class TestExperimentManager:
         data_file = data_dir / "data.raw.h5"
         data_file.write_bytes(b"test_data_a")
 
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
         recordings = manager.recordings
         assert len(recordings) == 1
         assert recordings[0].sample_id == "SampleA"
@@ -262,7 +262,7 @@ class TestExperimentManager:
         data_dir.mkdir(parents=True, exist_ok=True)
         (data_dir / "data.raw.h5").write_bytes(b"test_data")
 
-        manager = ExperimentManager(
+        manager = DatasetManager(
             temp_data_root,
             temp_analysis_dir,
             metadata_extractor=self.StubMetadataExtractor(),
@@ -290,7 +290,7 @@ class TestExperimentManager:
                 data_file = data_dir / "data.raw.h5"
                 data_file.write_bytes(b"test_data")
 
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         # Filter by sample_id
         results = manager.get_by("sample_id", "SampleA", "==")
@@ -310,7 +310,7 @@ class TestExperimentManager:
             data_file = data_dir / "data.raw.h5"
             data_file.write_bytes(b"test_data")
 
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         results = manager.get_by("sample_id", "SampleA", "!=")
         assert len(results) == 1
@@ -327,7 +327,7 @@ class TestExperimentManager:
             data_file = data_dir / "data.raw.h5"
             data_file.write_bytes(b"test_data")
 
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         # Test <
         results = manager.get_by("date", "240415", "<")
@@ -353,7 +353,7 @@ class TestExperimentManager:
             data_file = data_dir / "data.raw.h5"
             data_file.write_bytes(b"test_data" * (i + 1))
 
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         # Test contain
         results = manager.get_by("plate_id", "Plate", "contain")
@@ -365,14 +365,14 @@ class TestExperimentManager:
 
     def test_get_by_invalid_key_raises_error(self, temp_data_root, temp_analysis_dir):
         """Test that get_by raises ValueError for invalid key."""
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         with pytest.raises(ValueError, match="Unknown key"):
             manager.get_by("invalid_key", "value", "==")
 
     def test_get_by_invalid_method_raises_error(self, temp_data_root, temp_analysis_dir):
         """Test that get_by raises ValueError for invalid method."""
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         with pytest.raises(ValueError, match="Unknown method"):
             manager.get_by("sample_id", "value", "invalid_method")
@@ -387,7 +387,7 @@ class TestExperimentManager:
         data_file = data_dir / "data.raw.h5"
         data_file.write_bytes(b"test_data_1")
 
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
         assert len(manager.recordings) == 1
 
         # Add a new recording
@@ -415,7 +415,7 @@ class TestExperimentManager:
             data_file.write_bytes(b"test_data")
 
             with tempfile.TemporaryDirectory() as analysis_dir:
-                manager = ExperimentManager(
+                manager = DatasetManager(
                     data_root, Path(analysis_dir)
                 )
                 assert len(manager.recordings) == 1
@@ -432,7 +432,7 @@ class TestExperimentManager:
         data_file = data_dir / "data.raw.h5"
         data_file.write_bytes(b"test_data")
 
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
         assert len(manager.recordings) == 1
         assert manager.recordings[0].sample_id == "SampleA"
 
@@ -444,7 +444,7 @@ class TestExperimentManager:
         )
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
         assert len(manager.recordings) == 0
 
     def test_cache_persistence_across_instances(self, temp_data_root, temp_analysis_dir):
@@ -457,7 +457,7 @@ class TestExperimentManager:
         data_file = data_dir / "data.raw.h5"
         data_file.write_bytes(b"test_data")
 
-        manager1 = ExperimentManager(
+        manager1 = DatasetManager(
             temp_data_root,
             temp_analysis_dir,
             metadata_extractor=self.StubMetadataExtractor(),
@@ -465,7 +465,7 @@ class TestExperimentManager:
         assert len(manager1.recordings) == 1
 
         # Create second manager instance - should load from cache
-        manager2 = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager2 = DatasetManager(temp_data_root, temp_analysis_dir)
         assert len(manager2.recordings) == 1
         assert manager2.recordings[0].sample_id == manager1.recordings[0].sample_id
         assert manager2.recordings[0].metadata == manager1.recordings[0].metadata
@@ -488,7 +488,7 @@ class TestExperimentManager:
         invalid_dir.mkdir(parents=True, exist_ok=True)
         (invalid_dir / "data.raw.h5").write_bytes(b"test_data")
 
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
         recordings = manager.recordings
         assert len(recordings) == 1
         assert recordings[0].date == "240415"
@@ -519,7 +519,7 @@ class TestExperimentManagerIntegration:
             data_file.write_bytes(b"test_data")
 
         # Initialize manager
-        manager = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
         assert len(manager.recordings) == 4
 
         # Test various filters
@@ -537,7 +537,7 @@ class TestExperimentManagerIntegration:
         assert cache_file.exists()
 
         # Create new manager instance and verify it loads cached data
-        manager2 = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager2 = DatasetManager(temp_data_root, temp_analysis_dir)
         assert len(manager2.recordings) == 4
 
     def test_incremental_scan_on_new_dates(self, temp_data_root, temp_analysis_dir):
@@ -549,7 +549,7 @@ class TestExperimentManagerIntegration:
         data_dir1.mkdir(parents=True, exist_ok=True)
         (data_dir1 / "data.raw.h5").write_bytes(b"test_data_1")
 
-        manager1 = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager1 = DatasetManager(temp_data_root, temp_analysis_dir)
         assert len(manager1.recordings) == 1
 
         # Add recordings with new date
@@ -560,7 +560,7 @@ class TestExperimentManagerIntegration:
         (data_dir2 / "data.raw.h5").write_bytes(b"test_data_2")
 
         # Create new manager - should find new date without re-scanning old
-        manager2 = ExperimentManager(temp_data_root, temp_analysis_dir)
+        manager2 = DatasetManager(temp_data_root, temp_analysis_dir)
         assert len(manager2.recordings) == 2
 
     def test_manual_data_dir_generates_cache(self):
@@ -582,7 +582,7 @@ class TestExperimentManagerIntegration:
         if cache_file.exists():
             cache_file.unlink()
 
-        manager = ExperimentManager(data_root, analysis_dir)
+        manager = DatasetManager(data_root, analysis_dir)
         loaded_cache = JsonCacheStore(analysis_dir).load()
 
         assert cache_file.exists()

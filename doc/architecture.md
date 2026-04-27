@@ -6,7 +6,7 @@ The MEA analysis pipeline has two independent modules:
 
 ```
 ┌─────────────────────┐         ┌─────────────────────┐
-│  ExperimentManager  │         │   PipelineManager   │
+│  DatasetManager     │         │   PipelineManager   │
 │  ─────────────────  │         │   ────────────────  │
 │  Discovers raw      │         │  Tracks per-well    │
 │  recordings on the  │         │  analysis progress  │
@@ -28,7 +28,7 @@ Both caches live in `analysis_dir`. Both modules are stdlib-only.
 
 ---
 
-## Module 1 — ExperimentManager
+## Module 1 — DatasetManager
 
 Discovers MEA recordings under a `data_root` directory, parses the canonical path
 hierarchy, reads `mxassay.metadata` for recording- and well-level info, and
@@ -53,7 +53,7 @@ children — anything matching `^\d{6}$` means sample level.
 | `metadata_extractor.py` | `BaseMetadataExtractor` + `MxassayMetadataExtractor` + `DummyMetadataExtractor` |
 | `_mxassay_decoder.py` | Private. Decodes Qt-INI mxassay.metadata files to dicts |
 | `cache_store.py` | `BaseCacheStore` + `JsonCacheStore` (atomic write) |
-| `manager.py` | `ExperimentManager` (scan, diff, cache, query) |
+| `manager.py` | `DatasetManager` (scan, diff, cache, query) |
 
 ### Data model
 
@@ -102,10 +102,10 @@ class DummyMetadataExtractor(BaseMetadataExtractor):
     """Offline-dev placeholder. Ignores the path; returns 6 dummy wells."""
 ```
 
-### `ExperimentManager` API
+### `DatasetManager` API
 
 ```python
-ExperimentManager(
+DatasetManager(
     data_root:          Path,
     analysis_dir:       Path,
     max_workers:        int | None = None,
@@ -236,7 +236,7 @@ stages nested under each entry. Same structure as the experiment cache.
 ## Linking the two managers
 
 ```python
-em = ExperimentManager(data_root, analysis_dir,
+em = DatasetManager(data_root, analysis_dir,
                        metadata_extractor=MxassayMetadataExtractor())
 pm = PipelineManager(analysis_dir)
 

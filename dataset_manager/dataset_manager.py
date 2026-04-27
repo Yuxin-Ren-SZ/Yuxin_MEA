@@ -31,7 +31,7 @@ _OPS: dict[str, Any] = {
 _VALID_KEYS = {f.name for f in dataclasses.fields(RecordingEntry)}
 
 
-class ExperimentManager:
+class DatasetManager:
     """Discovers and caches MEA recordings under a data root directory.
 
     Supports two data_root layouts:
@@ -123,7 +123,7 @@ class ExperimentManager:
         if entry is None:
             raise KeyError(
                 f"Recording {recording_key!r} not found in cache. "
-                "Ensure ExperimentManager has scanned the data root first."
+                "Ensure DatasetManager has scanned the data root first."
             )
         incoming = metadata or {}
         if well_id in entry.wells:

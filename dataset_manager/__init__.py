@@ -1,4 +1,4 @@
-from .manager import ExperimentManager
+from .dataset_manager import DatasetManager
 from .metadata_extractor import (
     BaseMetadataExtractor,
     RecordingMetadata,
@@ -7,7 +7,7 @@ from .metadata_extractor import (
 from .recording_entry import RecordingEntry, WellEntry
 
 __all__ = [
-    "ExperimentManager",
+    "DatasetManager",
     "RecordingEntry",
     "WellEntry",
     "WellMetadata",

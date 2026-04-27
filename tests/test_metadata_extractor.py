@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from experiment_manager.metadata_extractor import MxassayMetadataExtractor
+from dataset_manager.metadata_extractor import MxassayMetadataExtractor
 
 
 class TestMetadataExtractorManualReview:
