@@ -324,6 +324,7 @@ class DatasetManager:
                             sample_id_override=sample_id_override,
                             discovered_at=discovered_at,
                         )
+                        self._populate_h5_structure(entry, data_file)
                         self._populate_metadata(entry, run_dir)
                         entries.append(entry)
                     except (ValueError, OSError) as exc:
@@ -336,6 +337,43 @@ class DatasetManager:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _populate_h5_structure(self, entry: RecordingEntry, data_path: Path) -> None:
+        """Open data.raw.h5 with h5py and populate entry.h5_recordings and entry.wells.
+
+        h5_recordings is set to {rec_name: [well_ids]} — the authoritative source of
+        which (rec_name, well_id) pairs exist in the file.  Any well_id found here but
+        absent from entry.wells is added with an empty metadata dict so downstream code
+        can always use h5_recordings as the iteration source.
+        """
+        try:
+            import h5py
+        except ImportError:
+            logger.warning("h5py not available; skipping h5 structure discovery for %s", data_path)
+            return
+
+        try:
+            with h5py.File(data_path, "r") as h5f:
+                recs_group = h5f.get("recordings")
+                if recs_group is None:
+                    logger.warning("No 'recordings' group in %s", data_path)
+                    return
+                structure = {
+                    rec_name: sorted(recs_group[rec_name].keys())
+                    for rec_name in sorted(recs_group.keys())
+                }
+        except Exception as exc:
+            logger.warning("Could not read h5 structure from %s: %s", data_path, exc)
+            return
+
+        entry.h5_recordings.update(structure)
+
+        # Ensure every well_id that appears in the h5 file has a WellEntry so
+        # callers can always iterate entry.wells for biological metadata.
+        for well_ids in structure.values():
+            for well_id in well_ids:
+                if well_id not in entry.wells:
+                    entry.wells[well_id] = WellEntry(well_id=well_id)
 
     def _populate_metadata(self, entry: RecordingEntry, run_dir: Path) -> None:
         """Call the metadata extractor and merge results into entry.metadata and entry.wells.
