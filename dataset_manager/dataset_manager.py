@@ -114,13 +114,13 @@ class DatasetManager:
             and self._matches_well_filters(entry, well_filters)
         ]
 
-    def get_by(self, key: str, value: Any, method: str) -> list[RecordingEntry]:
+    def get_by(self, key: str, method: Any, value: Any) -> list[RecordingEntry]:
         """Deprecated compatibility wrapper for get_recording_by().
 
         Args:
             key:    A field name of RecordingEntry (e.g. 'scan_type', 'file_size').
-            value:  The value to compare against.
             method: One of '==', '!=', '<', '<=', '>', '>=', 'contain', 'not contain'.
+            value:  The value to compare against.
 
         Raises:
             ValueError: If key is not a valid RecordingEntry field or method is unknown.
@@ -130,6 +130,10 @@ class DatasetManager:
             DeprecationWarning,
             stacklevel=2,
         )
+        if isinstance(method, str) and method in _OPS:
+            return self.get_recording_by([(key, method, value)])
+        if isinstance(value, str) and value in _OPS:
+            return self.get_recording_by([(key, value, method)])
         return self.get_recording_by([(key, method, value)])
 
     # ------------------------------------------------------------------

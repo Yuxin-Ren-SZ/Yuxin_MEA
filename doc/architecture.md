@@ -115,7 +115,7 @@ DatasetManager(
 
 mgr.recordings                    # list[RecordingEntry]
 mgr.get_recording_by(filters)     # filter by multiple recording/well fields
-mgr.get_by(key, value, method)    # deprecated compatibility wrapper
+mgr.get_by(key, method, value)    # deprecated compatibility wrapper
 mgr.get_wells(recording_key)      # dict[str, WellEntry]
 mgr.register_well(rec_key, well_id, metadata)   # add/merge a well manually
 mgr.update_well_metadata(rec_key, well_id, metadata)

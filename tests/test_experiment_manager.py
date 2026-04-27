@@ -448,7 +448,7 @@ class TestExperimentManager:
 
         with pytest.warns(DeprecationWarning, match="get_recording_by"):
             with pytest.raises(ValueError, match="Unknown key"):
-                manager.get_by("invalid_key", "value", "==")
+                manager.get_by("invalid_key", "==", "value")
 
     def test_get_by_invalid_method_raises_error(self, temp_data_root, temp_analysis_dir):
         """Test that get_by raises ValueError for invalid method."""
@@ -489,7 +489,7 @@ class TestExperimentManager:
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         with pytest.warns(DeprecationWarning, match="get_recording_by"):
-            results = manager.get_by("scan_type", "Network", "==")
+            results = manager.get_by("scan_type", "==", "Network")
 
         assert len(results) == 1
         assert results[0].scan_type == "Network"
