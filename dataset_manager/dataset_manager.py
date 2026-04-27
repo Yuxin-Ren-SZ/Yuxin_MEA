@@ -68,13 +68,13 @@ class DatasetManager:
     def recordings(self) -> list[RecordingEntry]:
         return list(self._cache.values())
 
-    def get_by(self, key: str, value: Any, method: str) -> list[RecordingEntry]:
+    def get_by(self, key: str, method: str, value: Any) -> list[RecordingEntry]:
         """Filter recordings by a metadata field.
 
         Args:
             key:    A field name of RecordingEntry (e.g. 'scan_type', 'file_size').
-            value:  The value to compare against.
             method: One of '==', '!=', '<', '<=', '>', '>=', 'contain', 'not contain'.
+            value:  The value to compare against.
 
         Raises:
             ValueError: If key is not a valid RecordingEntry field or method is unknown.

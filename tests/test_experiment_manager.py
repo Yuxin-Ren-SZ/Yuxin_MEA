@@ -293,12 +293,12 @@ class TestExperimentManager:
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         # Filter by sample_id
-        results = manager.get_by("sample_id", "SampleA", "==")
+        results = manager.get_by("sample_id", "==", "SampleA")
         assert len(results) == 2
         assert all(r.sample_id == "SampleA" for r in results)
 
         # Filter by scan_type
-        results = manager.get_by("scan_type", "ScanType1", "==")
+        results = manager.get_by("scan_type", "==", "ScanType1")
         assert len(results) == 2
         assert all(r.scan_type == "ScanType1" for r in results)
 
@@ -312,7 +312,7 @@ class TestExperimentManager:
 
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
-        results = manager.get_by("sample_id", "SampleA", "!=")
+        results = manager.get_by("sample_id", "!=", "SampleA")
         assert len(results) == 1
         assert results[0].sample_id == "SampleB"
 
@@ -330,17 +330,17 @@ class TestExperimentManager:
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         # Test <
-        results = manager.get_by("date", "240415", "<")
+        results = manager.get_by("date", "<", "240415")
         assert len(results) == 1
         assert results[0].date == "240410"
 
         # Test >
-        results = manager.get_by("date", "240415", ">")
+        results = manager.get_by("date", ">", "240415")
         assert len(results) == 1
         assert results[0].date == "240420"
 
         # Test <=
-        results = manager.get_by("date", "240415", "<=")
+        results = manager.get_by("date", "<=", "240415")
         assert len(results) == 2
 
     def test_get_by_contain_operators(self, temp_data_root, temp_analysis_dir):
@@ -356,11 +356,11 @@ class TestExperimentManager:
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         # Test contain
-        results = manager.get_by("plate_id", "Plate", "contain")
+        results = manager.get_by("plate_id", "contain", "Plate")
         assert len(results) == 3
 
         # Test not contain
-        results = manager.get_by("plate_id", "Z", "not contain")
+        results = manager.get_by("plate_id", "not contain", "Z")
         assert len(results) == 2
 
     def test_get_by_invalid_key_raises_error(self, temp_data_root, temp_analysis_dir):
@@ -368,14 +368,14 @@ class TestExperimentManager:
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         with pytest.raises(ValueError, match="Unknown key"):
-            manager.get_by("invalid_key", "value", "==")
+            manager.get_by("invalid_key", "==", "value")
 
     def test_get_by_invalid_method_raises_error(self, temp_data_root, temp_analysis_dir):
         """Test that get_by raises ValueError for invalid method."""
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         with pytest.raises(ValueError, match="Unknown method"):
-            manager.get_by("sample_id", "value", "invalid_method")
+            manager.get_by("sample_id", "invalid_method", "value")
 
     def test_refresh_clears_and_rescans(self, temp_data_root, temp_analysis_dir):
         """Test that refresh clears cache and re-scans all directories."""
@@ -523,13 +523,13 @@ class TestExperimentManagerIntegration:
         assert len(manager.recordings) == 4
 
         # Test various filters
-        sample_a = manager.get_by("sample_id", "SampleA", "==")
+        sample_a = manager.get_by("sample_id", "==", "SampleA")
         assert len(sample_a) == 3
 
-        date_240415 = manager.get_by("date", "240415", "==")
+        date_240415 = manager.get_by("date", "==", "240415")
         assert len(date_240415) == 2
 
-        scan_type1 = manager.get_by("scan_type", "ScanType1", "==")
+        scan_type1 = manager.get_by("scan_type", "==", "ScanType1")
         assert len(scan_type1) == 3
 
         # Verify cache was saved

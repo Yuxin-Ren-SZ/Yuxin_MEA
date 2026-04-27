@@ -114,7 +114,7 @@ DatasetManager(
 )
 
 mgr.recordings                    # list[RecordingEntry]
-mgr.get_by(key, value, method)    # filter by field; method: ==, !=, <, <=, >, >=, contain, not contain
+mgr.get_by(key, method, value)    # filter by field; method: ==, !=, <, <=, >, >=, contain, not contain
 mgr.get_wells(recording_key)      # dict[str, WellEntry]
 mgr.register_well(rec_key, well_id, metadata)   # add/merge a well manually
 mgr.update_well_metadata(rec_key, well_id, metadata)
