@@ -60,8 +60,12 @@ class RecordingEntry:
     # frozen=True prevents reassigning these attributes, but dict contents are mutable.
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # Wells discovered under this recording.
+    # Wells discovered under this recording (from mxassay.metadata or h5 structure).
     wells: dict[str, WellEntry] = field(default_factory=dict)
+
+    # HDF5 recording structure: {rec_name: [well_ids]} parsed from data.raw.h5.
+    # Authoritative source for which (rec_name, well_id) pairs exist in the file.
+    h5_recordings: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def cache_key(self) -> str:

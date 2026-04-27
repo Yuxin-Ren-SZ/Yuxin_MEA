@@ -61,7 +61,8 @@ def _recording_entry_decoder(d: dict) -> RecordingEntry | WellEntry | dict:
         )
 
     if _ENTRY_KEYS <= d.keys():
-        # d["wells"] values are already WellEntry objects, decoded by the hook above
+        # d["wells"] values are already WellEntry objects, decoded by the hook above.
+        # h5_recordings uses .get() so older cache files without the field still load.
         return RecordingEntry(
             sample_id=d["sample_id"],
             date=d["date"],
@@ -74,6 +75,7 @@ def _recording_entry_decoder(d: dict) -> RecordingEntry | WellEntry | dict:
             discovered_at=float(d["discovered_at"]),
             metadata=d["metadata"],
             wells=d["wells"],
+            h5_recordings=d.get("h5_recordings", {}),
         )
 
     return d
@@ -136,4 +138,5 @@ def _entry_to_dict(entry: RecordingEntry) -> dict:
             wid: {"well_id": we.well_id, "metadata": we.metadata}
             for wid, we in entry.wells.items()
         },
+        "h5_recordings": entry.h5_recordings,
     }
