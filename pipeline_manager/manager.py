@@ -100,14 +100,22 @@ class PipelineManager:
     # Work loop
     # ------------------------------------------------------------------
 
-    def get_next_task(self, n: int = 1, type: str | None = None) -> list[WorkItem]:
+    def get_next_task(
+        self,
+        n: int = 1,
+        type: str | None = None,
+        retry_failed: bool = False,
+    ) -> list[WorkItem]:
         """Return up to n WorkItems whose dependencies are complete and status is NOT_RUN.
 
-        FAILED tasks are not returned — use refresh() to reset them first.
+        retry_failed: when True, FAILED tasks are also returned for retry without
+            requiring an explicit refresh() call first.
         type must be None (reserved for future parallelisation).
         """
         if type is not None:
             raise ValueError("type parameter is reserved and must be None.")
+
+        eligible = {TaskStatus.NOT_RUN, TaskStatus.FAILED} if retry_failed else {TaskStatus.NOT_RUN}
 
         results: list[WorkItem] = []
         for entry in self._cache.values():
@@ -116,7 +124,7 @@ class PipelineManager:
             for task_name, record in entry.tasks.items():
                 if len(results) >= n:
                     break
-                if record.status != TaskStatus.NOT_RUN:
+                if record.status not in eligible:
                     continue
                 if self._deps_complete(entry, task_name):
                     results.append(
