@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .cache_store import BaseCacheStore, JsonCacheStore
-from .metadata_extractor import BaseMetadataExtractor, DummyMetadataExtractor, RecordingMetadata
+from .metadata_extractor import BaseMetadataExtractor, MxassayMetadataExtractor, RecordingMetadata
 from .recording_entry import RecordingEntry, WellEntry
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ class ExperimentManager:
         self._analysis_dir       = Path(analysis_dir)
         self._max_workers        = max_workers
         self._store              = cache_store or JsonCacheStore(self._analysis_dir)
-        self._metadata_extractor = metadata_extractor or DummyMetadataExtractor()
+        self._metadata_extractor = metadata_extractor or MxassayMetadataExtractor()
         self._cache: dict[str, RecordingEntry] = {}
 
         self._initialise()

@@ -1,8 +1,6 @@
 from .manager import ExperimentManager
 from .metadata_extractor import (
     BaseMetadataExtractor,
-    DummyMetadataExtractor,
-    MxassayMetadataExtractor,
     RecordingMetadata,
     WellMetadata,
 )
@@ -14,7 +12,5 @@ __all__ = [
     "WellEntry",
     "WellMetadata",
     "BaseMetadataExtractor",
-    "DummyMetadataExtractor",
-    "MxassayMetadataExtractor",
     "RecordingMetadata",
 ]
