@@ -5,7 +5,13 @@ dependencies:
   - python=3.11
   - pip
   - ipykernel
+  - ipywidgets
   - jupyterlab
   - notebook
+  - pandas
   - pre-commit
   - pytest
+  - scipy
+  - h5py
+  - zarr
+  - spikeinterface
