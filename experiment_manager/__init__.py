@@ -1,4 +1,20 @@
 from .manager import ExperimentManager
-from .recording_entry import RecordingEntry
+from .metadata_extractor import (
+    BaseMetadataExtractor,
+    DummyMetadataExtractor,
+    MxassayMetadataExtractor,
+    RecordingMetadata,
+    WellMetadata,
+)
+from .recording_entry import RecordingEntry, WellEntry
 
-__all__ = ["ExperimentManager", "RecordingEntry"]
+__all__ = [
+    "ExperimentManager",
+    "RecordingEntry",
+    "WellEntry",
+    "WellMetadata",
+    "BaseMetadataExtractor",
+    "DummyMetadataExtractor",
+    "MxassayMetadataExtractor",
+    "RecordingMetadata",
+]

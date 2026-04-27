@@ -6,9 +6,18 @@ import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from .recording_entry import RecordingEntry
+from .recording_entry import RecordingEntry, WellEntry
 
 CACHE_FILENAME = "experiment_cache.json"
+
+# Sentinel key sets used by the object_hook to identify each record type.
+# WellEntry is checked first because its keys are a strict subset; checking
+# RecordingEntry first could accidentally match a future WellEntry extension.
+_WELL_KEYS  = {"well_id", "metadata"}
+_ENTRY_KEYS = {
+    "sample_id", "date", "plate_id", "scan_type", "run_id",
+    "data_path", "file_size", "mtime", "discovered_at", "metadata", "wells",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -36,13 +45,23 @@ class _RecordingEntryEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-def _recording_entry_decoder(d: dict) -> RecordingEntry | dict:
-    """object_hook: rebuild a RecordingEntry when all expected keys are present."""
-    _ENTRY_KEYS = {
-        "sample_id", "date", "plate_id", "scan_type", "run_id",
-        "data_path", "file_size", "mtime", "discovered_at",
-    }
+def _recording_entry_decoder(d: dict) -> RecordingEntry | WellEntry | dict:
+    """object_hook: reconstruct typed objects from their serialised dicts.
+
+    object_hook fires bottom-up, so WellEntry dicts inside a recording's
+    'wells' field are decoded before the RecordingEntry dict that contains them.
+    The outer wells dict (keyed by well IDs, not sentinel keys) passes through
+    as a plain dict and is received by the RecordingEntry branch already typed.
+    """
+    # WellEntry: check before RecordingEntry (fewer keys, unambiguous)
+    if _WELL_KEYS <= d.keys() and "sample_id" not in d:
+        return WellEntry(
+            well_id=d["well_id"],
+            metadata=d["metadata"],
+        )
+
     if _ENTRY_KEYS <= d.keys():
+        # d["wells"] values are already WellEntry objects, decoded by the hook above
         return RecordingEntry(
             sample_id=d["sample_id"],
             date=d["date"],
@@ -53,7 +72,10 @@ def _recording_entry_decoder(d: dict) -> RecordingEntry | dict:
             file_size=int(d["file_size"]),
             mtime=float(d["mtime"]),
             discovered_at=float(d["discovered_at"]),
+            metadata=d["metadata"],
+            wells=d["wells"],
         )
+
     return d
 
 
@@ -64,8 +86,10 @@ def _recording_entry_decoder(d: dict) -> RecordingEntry | dict:
 class JsonCacheStore(BaseCacheStore):
     """Stores the recording cache as a JSON file at analysis_dir/experiment_cache.json.
 
-    Writes are atomic (temp file + os.replace) to prevent partial-write corruption,
-    which matters when the analysis dir lives on a NAS.
+    Cache hierarchy (recording-level fields stored once; wells nested underneath):
+      recording_key → { sample_id, date, …, wells: { well_id → { well_id, metadata } } }
+
+    Writes are atomic (temp file + os.replace) to prevent partial-write corruption.
     """
 
     def __init__(self, analysis_dir: Path) -> None:
@@ -76,13 +100,11 @@ class JsonCacheStore(BaseCacheStore):
             return {}
         with self._path.open("r", encoding="utf-8") as fh:
             raw = json.load(fh, object_hook=_recording_entry_decoder)
-        # raw is a dict[str, RecordingEntry] after the object_hook runs on values
         return {k: v for k, v in raw.items() if isinstance(v, RecordingEntry)}
 
     def save(self, entries: dict[str, RecordingEntry]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {key: _entry_to_dict(entry) for key, entry in entries.items()}
-        # Atomic write: write to temp file in same dir, then rename
         fd, tmp_path = tempfile.mkstemp(
             dir=self._path.parent, prefix=".cache_tmp_", suffix=".json"
         )
@@ -109,4 +131,9 @@ def _entry_to_dict(entry: RecordingEntry) -> dict:
         "file_size":     entry.file_size,
         "mtime":         entry.mtime,
         "discovered_at": entry.discovered_at,
+        "metadata":      entry.metadata,
+        "wells": {
+            wid: {"well_id": we.well_id, "metadata": we.metadata}
+            for wid, we in entry.wells.items()
+        },
     }
