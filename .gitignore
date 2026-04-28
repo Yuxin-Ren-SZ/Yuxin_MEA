@@ -62,6 +62,13 @@ temp/
 *.npy
 *.npz
 *.pkl
+*.dat
+*.zip
+*.tar.gz
+*.out
+*.pdf
+*.xlsx
+*.xls
 
 # Images
 *.png

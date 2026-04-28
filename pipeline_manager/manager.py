@@ -47,6 +47,8 @@ class PipelineManager:
 
         self._cache: dict[str, PipelineEntry] = self._store.load()
         logger.info("Loaded %d pipeline entries from cache.", len(self._cache))
+        if self._cache:
+            self._reset_stale_tasks()
 
     # ------------------------------------------------------------------
     # Setup
@@ -271,6 +273,29 @@ class PipelineManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _reset_stale_tasks(self) -> None:
+        # TEMPORARY FIX (issue #2): On startup from cache, any task that is not
+        # COMPLETE is reset to NOT_RUN.  This recovers tasks left in RUNNING (or
+        # FAILED) when the process crashed between marking a task running and
+        # marking it complete/failed.
+        #
+        # TODO: Replace with lease/heartbeat-based recovery so that FAILED tasks
+        #       preserve their error history and in-flight tasks owned by other
+        #       live workers are not incorrectly reset.
+        changed = 0
+        for entry in self._cache.values():
+            for record in entry.tasks.values():
+                if record.status != TaskStatus.COMPLETE:
+                    record.status       = TaskStatus.NOT_RUN
+                    record.last_updated = time.time()
+                    changed += 1
+        if changed:
+            self._store.save(self._cache)
+            logger.warning(
+                "TEMPORARY FIX (issue #2): reset %d stale task(s) to NOT_RUN on startup.",
+                changed,
+            )
 
     def _make_task_record(self, task_name: str) -> TaskRecord:
         return TaskRecord(
