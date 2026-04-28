@@ -77,6 +77,7 @@ class TestRecordingEntry:
         assert entry.scan_type == "ScanType1"
         assert entry.run_id == "001"
         assert entry.data_path.name == "data.raw.h5"
+        assert not entry.data_path.is_absolute()
         assert entry.file_size > 0
         assert entry.mtime > 0
         assert entry.discovered_at > 0
@@ -231,6 +232,20 @@ class TestExperimentManager:
                     ),
                 ],
             )
+
+    def test_get_path_returns_absolute(self, temp_data_root, temp_analysis_dir):
+        """Test that get_path resolves relative data_path to an absolute path."""
+        data_dir = temp_data_root / "SampleA" / "240415" / "PlateX" / "ScanType1" / "001"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "data.raw.h5").write_bytes(b"test_data")
+
+        manager = DatasetManager(temp_data_root, temp_analysis_dir)
+        entry = manager.recordings[0]
+
+        resolved = manager.get_path(entry)
+        assert resolved.is_absolute()
+        assert resolved == temp_data_root / entry.data_path
+        assert resolved.exists()
 
     def test_initialization_with_empty_data_root(self, temp_data_root, temp_analysis_dir):
         """Test initializing manager with empty data root."""

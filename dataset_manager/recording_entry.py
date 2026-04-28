@@ -51,7 +51,7 @@ class RecordingEntry:
     plate_id:      str
     scan_type:     str
     run_id:        str    # kept as str to preserve leading zeros
-    data_path:     Path   # absolute path to data.raw.h5
+    data_path:     Path   # path relative to data_root, e.g. SampleID/Date/PlateID/ScanType/RunID/data.raw.h5
     file_size:     int    # bytes
     mtime:         float  # POSIX timestamp of data.raw.h5
     discovered_at: float  # POSIX timestamp when first scanned by the manager
@@ -82,7 +82,7 @@ class RecordingEntry:
         """Build a RecordingEntry by parsing data_path relative to data_root.
 
         Args:
-            data_path: Absolute path to data.raw.h5.
+            data_path: Absolute path to data.raw.h5 (stored as relative to data_root).
             data_root: Absolute path to the data root (root or sample level).
             sample_id_override: When data_root is at sample level, pass the
                 directory name here so the SampleID field is populated correctly.
@@ -118,7 +118,7 @@ class RecordingEntry:
             plate_id=g["PlateID"],
             scan_type=g["ScanType"],
             run_id=g["RunID"],
-            data_path=data_path,
+            data_path=data_path.relative_to(data_root),
             file_size=stat.st_size,
             mtime=stat.st_mtime,
             discovered_at=discovered_at if discovered_at is not None else time.time(),
