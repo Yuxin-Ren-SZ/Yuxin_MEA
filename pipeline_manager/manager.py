@@ -6,7 +6,9 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from .base_task import BaseAnalysisTask
 from .cache_store import BasePipelineCacheStore, JsonPipelineCacheStore
+from .config_provider import BaseConfigProvider, DummyConfigProvider
 from .pipeline_entry import PipelineEntry
 from .task_record import TaskRecord, TaskStatus
 from .work_item import WorkItem
@@ -30,11 +32,13 @@ class PipelineManager:
 
     def __init__(
         self,
-        analysis_dir: Path,
-        cache_store:  BasePipelineCacheStore | None = None,
+        analysis_dir:    Path,
+        config_provider: BaseConfigProvider | None      = None,
+        cache_store:     BasePipelineCacheStore | None  = None,
     ) -> None:
-        self._analysis_dir = Path(analysis_dir)
-        self._store        = cache_store or JsonPipelineCacheStore(self._analysis_dir)
+        self._analysis_dir    = Path(analysis_dir)
+        self._config_provider = config_provider or DummyConfigProvider()
+        self._store           = cache_store or JsonPipelineCacheStore(self._analysis_dir)
 
         # task_name → ordered list of immediate dep names
         self._forward_deps: dict[str, list[str]] = {}
@@ -76,6 +80,14 @@ class PipelineManager:
 
         self._store.save(self._cache)
         logger.debug("Registered task %r with deps %s.", name, dependencies)
+
+    def register_task(self, task_class: type[BaseAnalysisTask]) -> None:
+        """Convenience wrapper: register a BaseAnalysisTask subclass.
+
+        Extracts ``task_class.task_name`` and ``task_class.dependencies`` and
+        delegates to ``register_computation_task()``.
+        """
+        self.register_computation_task(task_class.task_name, task_class.dependencies)
 
     def add_well(self, recording_key: str, well_id: str) -> None:
         """Register a (recording, well) pair and initialise all registered tasks."""
@@ -164,6 +176,10 @@ class PipelineManager:
         record.output_path  = Path(output_path) if (
             status == TaskStatus.COMPLETE and output_path is not None
         ) else record.output_path
+        if status == TaskStatus.RUNNING:
+            record.config = self._config_provider.get_config(
+                work_item.task_name, work_item.recording_key, work_item.well_id
+            )
 
         self._store.save(self._cache)
         logger.info(
@@ -174,6 +190,23 @@ class PipelineManager:
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
+
+    def is_task_complete(self, work_item: WorkItem) -> bool:
+        """True iff the task is COMPLETE and its frozen config matches the current config.
+
+        A config mismatch (e.g. a parameter was changed in the config file) means
+        the task must be re-run even though its status is COMPLETE.
+        """
+        entry = self.get_entry(work_item.recording_key, work_item.well_id)
+        if entry is None:
+            return False
+        record = entry.tasks.get(work_item.task_name)
+        if record is None or record.status != TaskStatus.COMPLETE:
+            return False
+        current = self._config_provider.get_config(
+            work_item.task_name, work_item.recording_key, work_item.well_id
+        )
+        return record.config == current
 
     def is_all_complete(self) -> bool:
         """True iff every (recording, well) × registered task is COMPLETE."""
