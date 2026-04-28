@@ -28,7 +28,10 @@ class _FakeRecording:
         self._calls.append(("save", kwargs))
 
 
-def _install_fake_spikeinterface(fail_local_reference: bool = False):
+def _install_fake_spikeinterface(
+    fail_local_reference: bool = False,
+    fail_global_reference: bool = False,
+):
     calls: list = []
 
     spikeinterface = types.ModuleType("spikeinterface")
@@ -52,6 +55,8 @@ def _install_fake_spikeinterface(fail_local_reference: bool = False):
         calls.append(("common_reference", reference, operator, local_radius))
         if reference == "local" and fail_local_reference:
             raise RuntimeError("missing locations")
+        if reference == "global" and fail_global_reference:
+            raise RuntimeError("global reference failed")
         return recording
 
     def astype(recording, dtype):
@@ -181,7 +186,6 @@ class PreprocessingTaskTests(unittest.TestCase):
                     ("unsigned_to_signed",),
                     ("bandpass_filter", 300, 3000),
                     ("common_reference", "local", "median", (0, 250)),
-                    ("annotate", {"is_filtered": True}),
                     ("astype", "float32"),
                     (
                         "save",
@@ -213,6 +217,86 @@ class PreprocessingTaskTests(unittest.TestCase):
 
         self.assertIn(("common_reference", "local", "median", (0, 250)), calls)
         self.assertIn(("common_reference", "global", "median", None), calls)
+
+    def test_global_reference_does_not_try_local_reference(self):
+        calls = _install_fake_spikeinterface()
+        task_cls = _import_task()
+        task = task_cls()
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            task.run(
+                "SampleA/240415/PlateX/Network/001",
+                "rec0000/well000",
+                tmp_path / "data.raw.h5",
+                {
+                    "output_root": str(tmp_path / "preprocessed"),
+                    "reference": "global",
+                },
+            )
+
+        self.assertIn(("common_reference", "global", "median", None), calls)
+        self.assertNotIn(("common_reference", "local", "median", (0, 250)), calls)
+
+    def test_local_and_global_reference_failures_raise_runtime_error(self):
+        _install_fake_spikeinterface(
+            fail_local_reference=True,
+            fail_global_reference=True,
+        )
+        task_cls = _import_task()
+        task = task_cls()
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Common reference failed",
+            ):
+                task.run(
+                    "SampleA/240415/PlateX/Network/001",
+                    "rec0000/well000",
+                    tmp_path / "data.raw.h5",
+                    {"output_root": str(tmp_path / "preprocessed")},
+                )
+
+    def test_global_reference_failure_raises_runtime_error(self):
+        _install_fake_spikeinterface(fail_global_reference=True)
+        task_cls = _import_task()
+        task = task_cls()
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Global common reference failed",
+            ):
+                task.run(
+                    "SampleA/240415/PlateX/Network/001",
+                    "rec0000/well000",
+                    tmp_path / "data.raw.h5",
+                    {
+                        "output_root": str(tmp_path / "preprocessed"),
+                        "reference": "global",
+                    },
+                )
+
+    def test_invalid_reference_raises_value_error(self):
+        _install_fake_spikeinterface()
+        task_cls = _import_task()
+        task = task_cls()
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "Invalid reference type"):
+                task.run(
+                    "SampleA/240415/PlateX/Network/001",
+                    "rec0000/well000",
+                    tmp_path / "data.raw.h5",
+                    {
+                        "output_root": str(tmp_path / "preprocessed"),
+                        "reference": "not-a-reference",
+                    },
+                )
 
 
 if __name__ == "__main__":

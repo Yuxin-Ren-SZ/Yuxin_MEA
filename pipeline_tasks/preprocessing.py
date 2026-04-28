@@ -16,13 +16,13 @@ class PreprocessingTask(BaseAnalysisTask):
     @classmethod
     def default_params(cls) -> dict[str, Any]:
         return {
-            "output_root": "/path/to/preprocessed", # TODO — should this be a default at all?
+            "output_root": "./preprocessed_data",
             "bandpass_freq_min": 300,
             "bandpass_freq_max": 3000,
             "reference": "local",
             "operator": "median",
             "local_radius": [0, 250],
-            "dtype": "float32", # TODO ? Why we have this
+            "dtype": "float32",
             "n_jobs": max(1, (os.cpu_count() or 3) - 2),
             "chunk_duration": "1s",
             "progress_bar": True,
@@ -53,6 +53,50 @@ class PreprocessingTask(BaseAnalysisTask):
             / rec_name
             / well_id
             / "preprocessed.zarr"
+        )
+
+    @staticmethod
+    def _apply_common_reference(rec: Any, spre: Any, params: dict[str, Any]) -> Any:
+        reference = params["reference"]
+        operator = params["operator"]
+
+        if reference == "global":
+            try:
+                return spre.common_reference(
+                    rec,
+                    reference="global",
+                    operator=operator,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Global common reference failed: {exc}") from exc
+
+        if reference == "local":
+            try:
+                return spre.common_reference(
+                    rec,
+                    reference="local",
+                    operator=operator,
+                    local_radius=tuple(params["local_radius"]),
+                )
+            except Exception as local_exc:
+                try:
+                    referenced = spre.common_reference(
+                        rec,
+                        reference="global",
+                        operator=operator,
+                    )
+                except Exception as global_exc:
+                    raise RuntimeError(
+                        "Common reference failed: "
+                        f"local reference error: {local_exc}; "
+                        f"global fallback error: {global_exc}"
+                    ) from global_exc
+
+                # TODO(logger): warn that local CMR failed and global CMR fallback succeeded.
+                return referenced
+
+        raise ValueError(
+            f"Invalid reference type: {reference}. Expected 'local' or 'global'."
         )
 
     def run(
@@ -91,27 +135,16 @@ class PreprocessingTask(BaseAnalysisTask):
         )
         # rec.annotate(is_filtered=True)
 
-        operator = p["operator"] # TODO ? why this is not in the try block below, since it's required for both local and global referencing? Should we validate it here or just let SpikeInterface raise if it's invalid?
-        try:
-            rec = spre.common_reference(
-                rec,
-                reference=p["reference"],
-                operator=operator,
-                local_radius=tuple(p["local_radius"]),
-            )
-        except Exception:
-            rec = spre.common_reference(
-                rec,
-                reference="global",
-                operator=operator,
-            )
+        rec = self._apply_common_reference(rec, spre, p)
         # rec.annotate(is_common_referenced=True)
 
 
-        # TODO Why we have this conversion. Does Roy also have it?
-        # dtype = p.get("dtype")
-        # if dtype and rec.get_dtype() != dtype:
-        #     rec = spre.astype(rec, dtype)
+        # F. Force Float32 (Prevents Signal Crushing)
+        # Int16 scaling caused Kilosort crash on artifacts. Float32 is safer.
+        # -- Mandar M.P. Jan, 2026 --
+        dtype = p.get("dtype")
+        if dtype and rec.get_dtype() != dtype:
+            rec = spre.astype(rec, dtype)
 
         zarr_path.parent.mkdir(parents=True, exist_ok=True)
         rec.save(
