@@ -145,6 +145,10 @@ class DatasetManager:
         entry = self._cache.get(recording_key)
         return entry.wells if entry is not None else {}
 
+    def get_path(self, entry: RecordingEntry) -> Path:
+        """Return the absolute path to entry's data file under the current data root."""
+        return self._data_root / entry.data_path
+
     def register_well(
         self,
         recording_key: str,
