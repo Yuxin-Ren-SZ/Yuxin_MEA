@@ -114,11 +114,24 @@ DatasetManager(
 )
 
 mgr.recordings                    # list[RecordingEntry]
-mgr.get_by(key, value, method)    # filter by field; method: ==, !=, <, <=, >, >=, contain, not contain
+mgr.get_recording_by(filters)     # filter by multiple recording/well fields
+mgr.get_by(key, value, method)    # deprecated compatibility wrapper
 mgr.get_wells(recording_key)      # dict[str, WellEntry]
 mgr.register_well(rec_key, well_id, metadata)   # add/merge a well manually
 mgr.update_well_metadata(rec_key, well_id, metadata)
 mgr.refresh()                     # clear cache, full rescan, rewrite cache
+```
+
+`get_recording_by()` accepts filters in `(key, method, value)` order and combines
+them with AND. Recording-level keys are `RecordingEntry` fields, while well
+metadata keys use `wells.<metadata_key>`. When multiple well filters are
+provided, they must match the same well.
+
+```python
+network_control = mgr.get_recording_by([
+    ("scan_type", "==", "Network"),
+    ("wells.groupname", "==", "control"),
+])
 ```
 
 ### Behaviour

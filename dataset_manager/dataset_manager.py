@@ -4,6 +4,7 @@ import dataclasses
 import logging
 import re
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -68,8 +69,53 @@ class DatasetManager:
     def recordings(self) -> list[RecordingEntry]:
         return list(self._cache.values())
 
+    def get_recording_by(
+        self,
+        filters: list[tuple[str, str, Any]],
+    ) -> list[RecordingEntry]:
+        """Filter recordings by recording fields and well metadata.
+
+        Args:
+            filters: Conditions in (key, method, value) order. Recording keys
+                must be RecordingEntry fields. Well metadata keys use
+                'wells.<metadata_key>' and match when the same well satisfies
+                all well filters.
+
+        Raises:
+            ValueError: If a recording key is not valid or method is unknown.
+        """
+        recording_filters: list[tuple[str, str, Any]] = []
+        well_filters: list[tuple[str, str, Any]] = []
+
+        for key, method, value in filters:
+            if method not in _OPS:
+                raise ValueError(
+                    f"Unknown method {method!r}. Valid methods: {sorted(_OPS)}"
+                )
+
+            if key.startswith("wells."):
+                metadata_key = key.removeprefix("wells.")
+                if not metadata_key:
+                    raise ValueError(
+                        "Unknown key 'wells.'. Expected 'wells.<metadata_key>'."
+                    )
+                well_filters.append((metadata_key, method, value))
+            else:
+                if key not in _VALID_KEYS:
+                    raise ValueError(
+                        f"Unknown key {key!r}. Valid keys: {sorted(_VALID_KEYS)}"
+                    )
+                recording_filters.append((key, method, value))
+
+        return [
+            entry
+            for entry in self._cache.values()
+            if self._matches_recording_filters(entry, recording_filters)
+            and self._matches_well_filters(entry, well_filters)
+        ]
+
     def get_by(self, key: str, value: Any, method: str) -> list[RecordingEntry]:
-        """Filter recordings by a metadata field.
+        """Deprecated compatibility wrapper for get_recording_by().
 
         Args:
             key:    A field name of RecordingEntry (e.g. 'scan_type', 'file_size').
@@ -79,16 +125,12 @@ class DatasetManager:
         Raises:
             ValueError: If key is not a valid RecordingEntry field or method is unknown.
         """
-        if key not in _VALID_KEYS:
-            raise ValueError(
-                f"Unknown key {key!r}. Valid keys: {sorted(_VALID_KEYS)}"
-            )
-        if method not in _OPS:
-            raise ValueError(
-                f"Unknown method {method!r}. Valid methods: {sorted(_OPS)}"
-            )
-        op = _OPS[method]
-        return [r for r in self._cache.values() if op(getattr(r, key), value)]
+        warnings.warn(
+            "DatasetManager.get_by() is deprecated; use get_recording_by() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_recording_by([(key, method, value)])
 
     # ------------------------------------------------------------------
     # Well management
@@ -157,6 +199,33 @@ class DatasetManager:
         entry.wells[well_id].metadata.update(metadata)
         self._store.save(self._cache)
         logger.debug("Updated metadata for well %s/%s.", recording_key, well_id)
+
+    def _matches_recording_filters(
+        self,
+        entry: RecordingEntry,
+        filters: list[tuple[str, str, Any]],
+    ) -> bool:
+        return all(
+            _OPS[method](getattr(entry, key), value)
+            for key, method, value in filters
+        )
+
+    def _matches_well_filters(
+        self,
+        entry: RecordingEntry,
+        filters: list[tuple[str, str, Any]],
+    ) -> bool:
+        if not filters:
+            return True
+
+        for well in entry.wells.values():
+            if all(
+                metadata_key in well.metadata
+                and _OPS[method](well.metadata[metadata_key], value)
+                for metadata_key, method, value in filters
+            ):
+                return True
+        return False
 
     def refresh(self) -> None:
         """Clear the cache and re-scan all directories from scratch."""
