@@ -293,7 +293,7 @@ class TestExperimentManager:
         assert entry.wells["well000"].metadata["groupname"] == "control"
         assert entry.wells["well001"].metadata["density"] == 15000.0
 
-    def test_get_by_equals(self, temp_data_root, temp_analysis_dir):
+    def test_get_recording_by_equals(self, temp_data_root, temp_analysis_dir):
         """Test filtering recordings with == operator."""
         # Create multiple recordings
         for sample in ["SampleA", "SampleB"]:
@@ -308,16 +308,16 @@ class TestExperimentManager:
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         # Filter by sample_id
-        results = manager.get_by("sample_id", "==", "SampleA")
+        results = manager.get_recording_by([("sample_id", "==", "SampleA")])
         assert len(results) == 2
         assert all(r.sample_id == "SampleA" for r in results)
 
         # Filter by scan_type
-        results = manager.get_by("scan_type", "==", "ScanType1")
+        results = manager.get_recording_by([("scan_type", "==", "ScanType1")])
         assert len(results) == 2
         assert all(r.scan_type == "ScanType1" for r in results)
 
-    def test_get_by_not_equals(self, temp_data_root, temp_analysis_dir):
+    def test_get_recording_by_not_equals(self, temp_data_root, temp_analysis_dir):
         """Test filtering recordings with != operator."""
         for sample in ["SampleA", "SampleB"]:
             data_dir = temp_data_root / sample / "240415" / "PlateX" / "ScanType1" / "001"
@@ -327,11 +327,11 @@ class TestExperimentManager:
 
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
-        results = manager.get_by("sample_id", "!=", "SampleA")
+        results = manager.get_recording_by([("sample_id", "!=", "SampleA")])
         assert len(results) == 1
         assert results[0].sample_id == "SampleB"
 
-    def test_get_by_comparison_operators(self, temp_data_root, temp_analysis_dir):
+    def test_get_recording_by_comparison_operators(self, temp_data_root, temp_analysis_dir):
         """Test filtering recordings with <, <=, >, >= operators."""
         # Create recordings with different dates
         for date in ["240410", "240415", "240420"]:
@@ -345,20 +345,20 @@ class TestExperimentManager:
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         # Test <
-        results = manager.get_by("date", "<", "240415")
+        results = manager.get_recording_by([("date", "<", "240415")])
         assert len(results) == 1
         assert results[0].date == "240410"
 
         # Test >
-        results = manager.get_by("date", ">", "240415")
+        results = manager.get_recording_by([("date", ">", "240415")])
         assert len(results) == 1
         assert results[0].date == "240420"
 
         # Test <=
-        results = manager.get_by("date", "<=", "240415")
+        results = manager.get_recording_by([("date", "<=", "240415")])
         assert len(results) == 2
 
-    def test_get_by_contain_operators(self, temp_data_root, temp_analysis_dir):
+    def test_get_recording_by_contain_operators(self, temp_data_root, temp_analysis_dir):
         """Test filtering recordings with 'contain' and 'not contain' operators."""
         for i, plate in enumerate(["PlateX", "PlateY", "PlateZ"]):
             data_dir = (
@@ -371,11 +371,11 @@ class TestExperimentManager:
         manager = DatasetManager(temp_data_root, temp_analysis_dir)
 
         # Test contain
-        results = manager.get_by("plate_id", "contain", "Plate")
+        results = manager.get_recording_by([("plate_id", "contain", "Plate")])
         assert len(results) == 3
 
         # Test not contain
-        results = manager.get_by("plate_id", "not contain", "Z")
+        results = manager.get_recording_by([("plate_id", "not contain", "Z")])
         assert len(results) == 2
 
     def test_get_recording_by_multiple_recording_filters(
@@ -457,21 +457,6 @@ class TestExperimentManager:
         assert len(matching) == 1
         assert mismatched == []
 
-    def test_get_by_invalid_key_raises_error(self, temp_data_root, temp_analysis_dir):
-        """Test that get_by raises ValueError for invalid key."""
-        manager = DatasetManager(temp_data_root, temp_analysis_dir)
-
-        with pytest.raises(ValueError, match="Unknown key"):
-            manager.get_by("invalid_key", "==", "value")
-
-    def test_get_by_invalid_method_raises_error(self, temp_data_root, temp_analysis_dir):
-        """Test that get_by raises ValueError for invalid method."""
-        manager = DatasetManager(temp_data_root, temp_analysis_dir)
-
-        with pytest.warns(DeprecationWarning, match="get_recording_by"):
-            with pytest.raises(ValueError, match="Unknown method"):
-                manager.get_by("sample_id", "value", "invalid_method")
-
     def test_get_recording_by_invalid_key_raises_error(
         self, temp_data_root, temp_analysis_dir
     ):
@@ -490,23 +475,6 @@ class TestExperimentManager:
         with pytest.raises(ValueError, match="Unknown method"):
             manager.get_recording_by([("sample_id", "invalid_method", "value")])
 
-    def test_get_by_delegates_with_deprecation_warning(
-        self, temp_data_root, temp_analysis_dir
-    ):
-        """Test old get_by API still works while warning users."""
-        data_dir = (
-            temp_data_root / "SampleA" / "240415" / "PlateX" / "Network" / "001"
-        )
-        data_dir.mkdir(parents=True, exist_ok=True)
-        (data_dir / "data.raw.h5").write_bytes(b"test_data")
-
-        manager = DatasetManager(temp_data_root, temp_analysis_dir)
-
-        with pytest.warns(DeprecationWarning, match="get_recording_by"):
-            results = manager.get_by("scan_type", "==", "Network")
-
-        assert len(results) == 1
-        assert results[0].scan_type == "Network"
 
     def test_refresh_clears_and_rescans(self, temp_data_root, temp_analysis_dir):
         """Test that refresh clears cache and re-scans all directories."""
