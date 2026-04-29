@@ -6,6 +6,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from .base_task import BaseAnalysisTask
 from .cache_store import BasePipelineCacheStore, JsonPipelineCacheStore
 from .pipeline_entry import PipelineEntry
 from .task_record import TaskRecord, TaskStatus
@@ -30,11 +31,13 @@ class PipelineManager:
 
     def __init__(
         self,
-        analysis_dir: Path,
-        cache_store:  BasePipelineCacheStore | None = None,
+        analysis_dir:    Path,
+        config_provider: BaseConfigProvider | None      = None,
+        cache_store:     BasePipelineCacheStore | None  = None,
     ) -> None:
-        self._analysis_dir = Path(analysis_dir)
-        self._store        = cache_store or JsonPipelineCacheStore(self._analysis_dir)
+        self._analysis_dir    = Path(analysis_dir)
+        self._config_provider = config_provider or DummyConfigProvider()
+        self._store           = cache_store or JsonPipelineCacheStore(self._analysis_dir)
 
         # task_name → ordered list of immediate dep names
         self._forward_deps: dict[str, list[str]] = {}
@@ -43,6 +46,8 @@ class PipelineManager:
 
         self._cache: dict[str, PipelineEntry] = self._store.load()
         logger.info("Loaded %d pipeline entries from cache.", len(self._cache))
+        if self._cache:
+            self._reset_stale_tasks()
 
     # ------------------------------------------------------------------
     # Setup
@@ -76,6 +81,14 @@ class PipelineManager:
 
         self._store.save(self._cache)
         logger.debug("Registered task %r with deps %s.", name, dependencies)
+
+    def register_task(self, task_class: type[BaseAnalysisTask]) -> None:
+        """Convenience wrapper: register a BaseAnalysisTask subclass.
+
+        Extracts ``task_class.task_name`` and ``task_class.dependencies`` and
+        delegates to ``register_computation_task()``.
+        """
+        self.register_computation_task(task_class.task_name, task_class.dependencies)
 
     def add_well(self, recording_key: str, well_id: str) -> None:
         """Register a (recording, well) pair and initialise all registered tasks."""
@@ -164,6 +177,10 @@ class PipelineManager:
         record.output_path  = Path(output_path) if (
             status == TaskStatus.COMPLETE and output_path is not None
         ) else record.output_path
+        if status == TaskStatus.RUNNING:
+            record.config = self._config_provider.get_config(
+                work_item.task_name, work_item.recording_key, work_item.well_id
+            )
 
         self._store.save(self._cache)
         logger.info(
@@ -174,6 +191,23 @@ class PipelineManager:
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
+
+    def is_task_complete(self, work_item: WorkItem) -> bool:
+        """True iff the task is COMPLETE and its frozen config matches the current config.
+
+        A config mismatch (e.g. a parameter was changed in the config file) means
+        the task must be re-run even though its status is COMPLETE.
+        """
+        entry = self.get_entry(work_item.recording_key, work_item.well_id)
+        if entry is None:
+            return False
+        record = entry.tasks.get(work_item.task_name)
+        if record is None or record.status != TaskStatus.COMPLETE:
+            return False
+        current = self._config_provider.get_config(
+            work_item.task_name, work_item.recording_key, work_item.well_id
+        )
+        return record.config == current
 
     def is_all_complete(self) -> bool:
         """True iff every (recording, well) × registered task is COMPLETE."""
@@ -238,6 +272,29 @@ class PipelineManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _reset_stale_tasks(self) -> None:
+        # TEMPORARY FIX (issue #2): On startup from cache, any task that is not
+        # COMPLETE is reset to NOT_RUN.  This recovers tasks left in RUNNING (or
+        # FAILED) when the process crashed between marking a task running and
+        # marking it complete/failed.
+        #
+        # TODO: Replace with lease/heartbeat-based recovery so that FAILED tasks
+        #       preserve their error history and in-flight tasks owned by other
+        #       live workers are not incorrectly reset.
+        changed = 0
+        for entry in self._cache.values():
+            for record in entry.tasks.values():
+                if record.status != TaskStatus.COMPLETE:
+                    record.status       = TaskStatus.NOT_RUN
+                    record.last_updated = time.time()
+                    changed += 1
+        if changed:
+            self._store.save(self._cache)
+            logger.warning(
+                "TEMPORARY FIX (issue #2): reset %d stale task(s) to NOT_RUN on startup.",
+                changed,
+            )
 
     def _make_task_record(self, task_name: str) -> TaskRecord:
         return TaskRecord(

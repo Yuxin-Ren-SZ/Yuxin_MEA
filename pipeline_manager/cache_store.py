@@ -11,7 +11,7 @@ from .task_record import TaskRecord, TaskStatus
 
 PIPELINE_CACHE_FILENAME = "pipeline_cache.json"
 
-_TASK_KEYS  = {"status", "dependencies", "output_path", "last_updated", "error"}
+_TASK_KEYS  = {"status", "dependencies", "output_path", "last_updated", "error", "config"}
 _ENTRY_KEYS = {"recording_key", "well_id", "created_at", "tasks"}
 
 
@@ -41,6 +41,7 @@ def _decode(d: dict):
             output_path=Path(op) if op is not None else None,
             last_updated=d["last_updated"],
             error=d["error"],
+            config=d.get("config", {}),
         )
     if _ENTRY_KEYS <= d.keys():
         return PipelineEntry(
@@ -64,6 +65,7 @@ def _entry_to_dict(entry: PipelineEntry) -> dict:
                 "output_path":  str(t.output_path) if t.output_path is not None else None,
                 "last_updated": t.last_updated,
                 "error":        t.error,
+                "config":       t.config,
             }
             for name, t in entry.tasks.items()
         },

@@ -116,7 +116,6 @@ class DatasetManager:
 
     def get_by(self, key: str, method: Any, value: Any) -> list[RecordingEntry]:
         """Deprecated compatibility wrapper for get_recording_by().
-
         Args:
             key:    A field name of RecordingEntry (e.g. 'scan_type', 'file_size').
             method: One of '==', '!=', '<', '<=', '>', '>=', 'contain', 'not contain'.

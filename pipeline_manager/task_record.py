@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -27,3 +27,4 @@ class TaskRecord:
     output_path:  Path | None   # output produced (set on complete)
     last_updated: float | None  # POSIX timestamp of last status change
     error:        str | None    # error message when status == FAILED
+    config:       dict          = field(default_factory=dict)  # config snapshot at RUNNING
