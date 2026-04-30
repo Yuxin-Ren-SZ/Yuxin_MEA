@@ -163,9 +163,9 @@ class BurstDetectionTaskRunTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             output_path = self._run_task(Path(tmp))
             expected = {
-                "burstlets.parquet",
-                "network_bursts.parquet",
-                "superbursts.parquet",
+                "burstlets.pkl",
+                "network_bursts.pkl",
+                "superbursts.pkl",
                 "metrics.json",
                 "diagnostics.json",
                 "plot_signals.npy",

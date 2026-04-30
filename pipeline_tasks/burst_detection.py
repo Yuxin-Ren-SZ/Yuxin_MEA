@@ -81,7 +81,7 @@ class BurstDetectionTask(BaseAnalysisTask):
             BurstDetectorConfig,
             compute_network_bursts,
         )
-        from pipeline_tasks.analysis.burst_output import ParquetBurstOutputWriter
+        from pipeline_tasks.analysis.burst_output import PickleBurstOutputWriter
 
         p = self.resolve_params(params)
         rec_name, actual_well_id = self.split_compound_well_id(well_id)
@@ -121,5 +121,5 @@ class BurstDetectionTask(BaseAnalysisTask):
             rec_name,
             actual_well_id,
         )
-        ParquetBurstOutputWriter().write(results, output_dir)
+        PickleBurstOutputWriter().write(results, output_dir)
         return output_dir
