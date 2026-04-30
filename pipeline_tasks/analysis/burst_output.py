@@ -14,7 +14,7 @@ from .burst_detector import BurstResults
 class BurstOutputWriter(ABC):
     """ABC for persisting and reloading BurstResults.
 
-    Concrete implementations choose the serialization format (Parquet, JSON, etc.)
+    Concrete implementations choose the serialization format (pickle, JSON, etc.)
     without coupling the detector algorithm or the pipeline task to a specific format.
 
     Implementations must guarantee that write() + read() is lossless for all
@@ -30,26 +30,26 @@ class BurstOutputWriter(ABC):
         """Reconstruct BurstResults from a previously written output_dir."""
 
 
-class ParquetBurstOutputWriter(BurstOutputWriter):
-    """Writes burst events as Parquet files plus JSON/npy for non-tabular data.
+class PickleBurstOutputWriter(BurstOutputWriter):
+    """Writes burst events as pickled DataFrames plus JSON/npy for non-tabular data.
 
     Output layout inside output_dir::
 
-        burstlets.parquet
-        network_bursts.parquet
-        superbursts.parquet
+        burstlets.pkl
+        network_bursts.pkl
+        superbursts.pkl
         metrics.json
         diagnostics.json
         plot_signals.npy
 
-    Event DataFrames are written with index=False so the row index is not
-    included as a column (avoids ambiguity when concatenating across wells).
+    Pickle preserves the DataFrame index, so callers that want to ignore it on
+    reload can simply call ``df.reset_index(drop=True)``.
     """
 
     _EVENT_FILES = {
-        "burstlets": "burstlets.parquet",
-        "network_bursts": "network_bursts.parquet",
-        "superbursts": "superbursts.parquet",
+        "burstlets": "burstlets.pkl",
+        "network_bursts": "network_bursts.pkl",
+        "superbursts": "superbursts.pkl",
     }
 
     def write(self, results: BurstResults, output_dir: Path) -> None:
@@ -62,9 +62,9 @@ class ParquetBurstOutputWriter(BurstOutputWriter):
             df = getattr(results, attr)
             dest = output_dir / filename
             if isinstance(df, pd.DataFrame) and not df.empty:
-                df.to_parquet(dest, index=False)
+                df.to_pickle(dest)
             else:
-                pd.DataFrame().to_parquet(dest, index=False)
+                pd.DataFrame().to_pickle(dest)
 
         self._atomic_json_write(results.metrics, output_dir / "metrics.json")
         self._atomic_json_write(results.diagnostics, output_dir / "diagnostics.json")
@@ -80,7 +80,7 @@ class ParquetBurstOutputWriter(BurstOutputWriter):
         dataframes = {}
         for attr, filename in self._EVENT_FILES.items():
             path = output_dir / filename
-            dataframes[attr] = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+            dataframes[attr] = pd.read_pickle(path) if path.exists() else pd.DataFrame()
 
         with open(output_dir / "metrics.json") as f:
             metrics = json.load(f)

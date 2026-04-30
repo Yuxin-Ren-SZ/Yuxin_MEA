@@ -14,7 +14,7 @@ from pipeline_tasks.analysis.burst_detector import (
     BurstResults,
     compute_network_bursts,
 )
-from pipeline_tasks.analysis.burst_output import ParquetBurstOutputWriter
+from pipeline_tasks.analysis.burst_output import PickleBurstOutputWriter
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +265,7 @@ class ParquetRoundTripTests(unittest.TestCase):
         cls.original = compute_network_bursts(_make_bursty_spike_trains())
 
     def test_roundtrip_event_dataframes(self):
-        writer = ParquetBurstOutputWriter()
+        writer = PickleBurstOutputWriter()
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "burst_out"
             writer.write(self.original, out)
@@ -284,7 +284,7 @@ class ParquetRoundTripTests(unittest.TestCase):
                 )
 
     def test_roundtrip_diagnostics(self):
-        writer = ParquetBurstOutputWriter()
+        writer = PickleBurstOutputWriter()
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "burst_out"
             writer.write(self.original, out)
@@ -295,7 +295,7 @@ class ParquetRoundTripTests(unittest.TestCase):
             self.assertAlmostEqual(v, loaded.diagnostics[k], places=6)
 
     def test_roundtrip_plot_signals(self):
-        writer = ParquetBurstOutputWriter()
+        writer = PickleBurstOutputWriter()
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "burst_out"
             writer.write(self.original, out)
@@ -308,7 +308,7 @@ class ParquetRoundTripTests(unittest.TestCase):
             )
 
     def test_expected_output_files_created(self):
-        writer = ParquetBurstOutputWriter()
+        writer = PickleBurstOutputWriter()
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "burst_out"
             writer.write(self.original, out)
@@ -316,9 +316,9 @@ class ParquetRoundTripTests(unittest.TestCase):
             self.assertEqual(
                 {f.name for f in out.iterdir()},
                 {
-                    "burstlets.parquet",
-                    "network_bursts.parquet",
-                    "superbursts.parquet",
+                    "burstlets.pkl",
+                    "network_bursts.pkl",
+                    "superbursts.pkl",
                     "metrics.json",
                     "diagnostics.json",
                     "plot_signals.npy",

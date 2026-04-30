@@ -12,12 +12,12 @@ class AutoCurationTask(BaseAnalysisTask):
     """Quality-metric curation of sorted units.
 
     Loads the SortingAnalyzer from AnalyzerTask, merges quality_metrics,
-    template_metrics, and unit_locations into a single Parquet table, and
+    template_metrics, and unit_locations into a single pickled DataFrame, and
     applies configurable threshold filters.
 
     When enabled=True (default), units that fail any threshold are marked
-    curated=False in quality_metrics.parquet and recorded in
-    rejection_log.parquet.
+    curated=False in quality_metrics.pkl and recorded in
+    rejection_log.pkl.
 
     When enabled=False, all units are marked curated=True (pass-through).
 
@@ -140,8 +140,8 @@ class AutoCurationTask(BaseAnalysisTask):
 
         curated_ids = metrics.index[metrics["curated"]].tolist()
 
-        metrics.to_parquet(output_dir / "quality_metrics.parquet")
-        rejection_log.to_parquet(output_dir / "rejection_log.parquet", index=False)
+        metrics.to_pickle(output_dir / "quality_metrics.pkl")
+        rejection_log.to_pickle(output_dir / "rejection_log.pkl")
 
         # Hard contract: BurstDetectionTask expects this file at this exact path
         spike_times: dict[Any, Any] = {
