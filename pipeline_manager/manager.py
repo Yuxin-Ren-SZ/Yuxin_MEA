@@ -119,11 +119,15 @@ class PipelineManager:
         n: int = 1,
         type: str | None = None,
         retry_failed: bool = False,
+        recording_keys: set[str] | None = None,
     ) -> list[WorkItem]:
         """Return up to n WorkItems whose dependencies are complete and status is NOT_RUN.
 
         retry_failed: when True, FAILED tasks are also returned for retry without
             requiring an explicit refresh() call first.
+        recording_keys: when provided, only return tasks for these recording keys.
+            Useful when the cache holds entries from previous sessions and the caller
+            only wants to advance work for a specific subset of recordings.
         type must be None (reserved for future parallelisation).
         """
         if type is not None:
@@ -135,6 +139,8 @@ class PipelineManager:
         for entry in self._cache.values():
             if len(results) >= n:
                 break
+            if recording_keys is not None and entry.recording_key not in recording_keys:
+                continue
             for task_name, record in entry.tasks.items():
                 if len(results) >= n:
                     break

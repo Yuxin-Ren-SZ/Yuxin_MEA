@@ -65,6 +65,15 @@ class SortingTask(BaseAnalysisTask):
         return output, output
 
     @staticmethod
+    def _suppress_kilosort_console() -> None:
+        import logging
+        ks_log = logging.getLogger("kilosort")
+        if not ks_log.handlers:
+            handler = logging.StreamHandler()
+            handler.setLevel(logging.WARNING)
+            ks_log.addHandler(handler)
+
+    @staticmethod
     def _detect_total_vram_gb(torch_module: Any) -> float:
         try:
             if not torch_module.cuda.is_available():
@@ -141,9 +150,8 @@ class SortingTask(BaseAnalysisTask):
         sorter_output.parent.mkdir(parents=True, exist_ok=True)
 
         recording = si.load(preprocessed_path)
-        # TODO Replace with better excetipn message
-        if type(recording) != si.BaseRecording:
-            raise ValueError(f"Expected a BaseRecording, got {type(recording)}")
+        # if not isinstance(recording, si.BaseRecording):
+        #     raise ValueError(f"Expected a BaseRecording, got {type(recording)}")
         
         total_vram_gb = self._detect_total_vram_gb(torch)
         sorter_params = self._build_kilosort_params(
@@ -158,6 +166,7 @@ class SortingTask(BaseAnalysisTask):
         if total_vram_gb > 0:
             torch.cuda.empty_cache()
 
+        self._suppress_kilosort_console()
         sorting = si.run_sorter(
             sorter_name=p["sorter"],
             recording=recording,
@@ -169,9 +178,8 @@ class SortingTask(BaseAnalysisTask):
             **sorter_params,
         )
 
-        # TODO Replace with better excetipn message
-        if type(sorting) != si.BaseSorting:
-            raise ValueError(f"Expected a BaseSorting, got {type(sorting)}")
+        # if not isinstance(sorting, si.BaseSorting):
+        #     raise ValueError(f"Expected a BaseSorting, got {type(sorting)}")
 
         if bool(p["clean_excess_spikes"]):
             sorting = si.remove_excess_spikes(sorting, recording)

@@ -1,5 +1,7 @@
 name: yuxin_mea
 channels:
+  - pytorch
+  - nvidia
   - conda-forge
 dependencies:
   - python=3.11
@@ -14,5 +16,12 @@ dependencies:
   - scipy
   - h5py
   - zarr
+  - pyarrow
   - spikeinterface
-  - pytorch
+  - pytorch::pytorch>=2.7.0
+  - pytorch::torchvision
+  - pytorch::torchaudio
+#  - pytorch-cuda=12.8
+  - pynvml
+  - pip:
+    - kilosort

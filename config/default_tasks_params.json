@@ -1,0 +1,99 @@
+{
+  "global": {
+    "data_root": "/mnt/benshalom-nas/raw_data/rbs_maxtwo_desktop/harddisk20tbV2/Sadegh_Lab/CX138",
+    "analysis_root": "../data/analysis"
+  },
+  "tasks": {
+    "preprocessing": {
+      "output_root": "./preprocessed_data",
+      "bandpass_freq_min": 300,
+      "bandpass_freq_max": 3000,
+      "reference": "local",
+      "operator": "median",
+      "local_radius": [
+        0,
+        250
+      ],
+      "dtype": "float32",
+      "n_jobs": 30,
+      "chunk_duration": "1s",
+      "progress_bar": true,
+      "overwrite": true
+    },
+    "sorting": {
+      "preprocessing_output_root": "./preprocessed_data",
+      "output_root": "./spikesorted_data",
+      "sorter": "kilosort4",
+      "docker_image": null,
+      "verbose": true,
+      "remove_existing_folder": true,
+      "delete_output_folder": false,
+      "overwrite": true,
+      "clean_excess_spikes": true,
+      "remove_empty_units": true,
+      "min_high_vram_gb": 14,
+      "high_vram_sorter_kwargs": {
+        "batch_size_seconds": 2.0,
+        "clear_cache": true,
+        "invert_sign": true,
+        "cluster_downsampling": 20,
+        "max_cluster_subset": null,
+        "nblocks": 0,
+        "dmin": 17,
+        "do_correction": false
+      },
+      "low_vram_sorter_kwargs": {
+        "batch_size_seconds": 0.5,
+        "clear_cache": true,
+        "invert_sign": true,
+        "cluster_downsampling": 30,
+        "max_cluster_subset": 50000,
+        "nblocks": 0,
+        "do_correction": false
+      },
+      "sorter_kwargs": {}
+    },
+    "auto_merge": {
+      "output_root": "./auto_merge_data",
+      "sorting_output_root": "./spikesorted_data",
+      "preprocessing_output_root": "./preprocessed_data",
+      "enabled": false,
+      "presets": [
+        "firing_rate_similarity",
+        "template_similarity"
+      ],
+      "radius_um": 50,
+      "n_jobs": 1
+    },
+    "analyzer": {
+      "output_root": "./analyzer_data",
+      "preprocessing_output_root": "./preprocessed_data",
+      "auto_merge_output_root": "./auto_merge_data",
+      "radius_um": 50,
+      "ms_before": 1.0,
+      "ms_after": 2.0,
+      "unit_locations_method": "monopolar_triangulation",
+      "n_jobs": 1
+    },
+    "auto_curation": {
+      "curation_output_root": "./curation_data",
+      "analyzer_output_root": "./analyzer_data",
+      "enabled": true,
+      "presence_ratio_min": 0.75,
+      "rp_contamination_max": 0.15,
+      "firing_rate_min": 0.05,
+      "amplitude_median_max": -20.0
+    },
+    "burst_detection": {
+      "curation_output_root": "./curation_data",
+      "output_root": "./burst_detection_data",
+      "gamma": 1.0,
+      "min_burstlet_participation": 0.2,
+      "min_absolute_rate_hz": 0.5,
+      "min_burst_density_hz": 1.0,
+      "min_relative_height": 0.1,
+      "extent_frac": 0.3,
+      "network_merge_gap_min_s": 0.75
+    }
+  }
+}
