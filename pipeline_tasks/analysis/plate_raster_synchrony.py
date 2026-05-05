@@ -64,6 +64,71 @@ def _downsample_array(arr: np.ndarray, max_points: int) -> np.ndarray:
     return arr[::stride]
 
 
+def _axis_name_to_ref(axis_name: str) -> str:
+    """Convert Plotly layout axis names to refs used by traces and shapes."""
+    if axis_name == "xaxis":
+        return "x"
+    if axis_name == "yaxis":
+        return "y"
+    if axis_name.startswith("xaxis"):
+        return f"x{axis_name.removeprefix('xaxis')}"
+    if axis_name.startswith("yaxis"):
+        return f"y{axis_name.removeprefix('yaxis')}"
+    return axis_name
+
+
+def _secondary_axis_refs(fig: go.Figure, row: int, col: int) -> tuple[str, str]:
+    """Return shape refs for the subplot secondary axes."""
+    subplot = fig.get_subplot(row, col, secondary_y=True)
+    xref = f"{_axis_name_to_ref(subplot.xaxis._plotly_name)} domain"
+    yref = _axis_name_to_ref(subplot.yaxis._plotly_name)
+    return xref, yref
+
+
+def _add_secondary_hline(
+    fig: go.Figure,
+    row: int,
+    col: int,
+    y: float,
+    color: str,
+) -> None:
+    """Add an annotation-free horizontal line on the subplot secondary y-axis."""
+    xref, yref = _secondary_axis_refs(fig, row, col)
+    fig.add_shape(
+        type="line",
+        xref=xref,
+        yref=yref,
+        x0=0,
+        x1=1,
+        y0=y,
+        y1=y,
+        line=dict(color=color, dash="dash"),
+    )
+
+
+def _synchrony_y_range(sync_payload: dict) -> list[float] | None:
+    """Return a padded participation-axis range for visible synchrony values."""
+    values = []
+    for key in ("signal", "peaks"):
+        trace = sync_payload.get(key)
+        if trace:
+            values.extend(trace["y"])
+    for key in ("baseline", "threshold"):
+        value = sync_payload.get(key)
+        if value is not None:
+            values.append(value)
+
+    finite_values = np.asarray(values, dtype=float)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if finite_values.size == 0:
+        return None
+
+    ymin = min(0.0, float(np.min(finite_values)))
+    ymax = max(0.0, float(np.max(finite_values)))
+    padding = max((ymax - ymin) * 0.08, 0.02)
+    return [ymin - padding, ymax + padding]
+
+
 def _raster_payload_for_well(
     spike_times: dict[str, np.ndarray],
     max_points_per_well: int,
@@ -278,22 +343,6 @@ def build_plate_figure(
                     secondary_y=True,
                 )
 
-            # Smooth synchrony (orange)
-            if sync_payload["smooth"]:
-                fig.add_trace(
-                    go.Scattergl(
-                        x=sync_payload["smooth"]["x"],
-                        y=sync_payload["smooth"]["y"],
-                        mode="lines",
-                        line=dict(color="rgba(255, 140, 0, 0.95)", width=config.line_width * 0.9),
-                        hovertemplate="Smooth sync: %{y:.3f}<br>t=%{x:.3f}s<extra></extra>",
-                        showlegend=False,
-                    ),
-                    row=row,
-                    col=col,
-                    secondary_y=True,
-                )
-
             # Burst peaks (red dots)
             if sync_payload["peaks"]:
                 fig.add_trace(
@@ -312,31 +361,27 @@ def build_plate_figure(
 
             # Baseline (dashed line)
             if sync_payload["baseline"] is not None:
-                baseline_val = sync_payload["baseline"]
-                fig.add_hline(
-                    y=baseline_val,
-                    line_dash="dash",
-                    line_color="rgba(255, 102, 0, 0.7)",
-                    annotation_text=None,
-                    row=row,
-                    col=col,
-                    secondary_y=True,
-                    showlegend=False,
+                _add_secondary_hline(
+                    fig,
+                    row,
+                    col,
+                    sync_payload["baseline"],
+                    "rgba(255, 102, 0, 0.7)",
                 )
 
             # Threshold (dashed line)
             if sync_payload["threshold"] is not None:
-                threshold_val = sync_payload["threshold"]
-                fig.add_hline(
-                    y=threshold_val,
-                    line_dash="dash",
-                    line_color="rgba(192, 57, 43, 0.8)",
-                    annotation_text=None,
-                    row=row,
-                    col=col,
-                    secondary_y=True,
-                    showlegend=False,
+                _add_secondary_hline(
+                    fig,
+                    row,
+                    col,
+                    sync_payload["threshold"],
+                    "rgba(192, 57, 43, 0.8)",
                 )
+
+            y_range = _synchrony_y_range(sync_payload)
+            if y_range is not None:
+                fig.update_yaxes(range=y_range, row=row, col=col, secondary_y=True)
 
     # Add group legend traces (invisible, only for legend)
     for group_name, color in group_colors.items():
