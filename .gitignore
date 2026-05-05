@@ -1,3 +1,11 @@
+# Temporary
+notebooks/preprocessed_data/
+notebooks/spikesorted_data/
+notebooks/auto_merge_data/
+notebooks/curation_data/
+notebooks/analyzer_data/
+notebooks/burst_detection_data/
+
 # Codex
 .codex/
 
