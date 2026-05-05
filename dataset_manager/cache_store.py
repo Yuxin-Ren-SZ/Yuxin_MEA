@@ -94,8 +94,8 @@ class JsonCacheStore(BaseCacheStore):
     Writes are atomic (temp file + os.replace) to prevent partial-write corruption.
     """
 
-    def __init__(self, analysis_dir: Path) -> None:
-        self._path = analysis_dir / CACHE_FILENAME
+    def __init__(self, analysis_dir: Path | str) -> None:
+        self._path = Path(analysis_dir) / CACHE_FILENAME
 
     def load(self) -> dict[str, RecordingEntry]:
         if not self._path.exists():

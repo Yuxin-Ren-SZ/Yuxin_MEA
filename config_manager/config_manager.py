@@ -158,6 +158,7 @@ class ConfigManager(BaseConfigProvider):
                 for name, defaults in self._task_defaults.items()
             },
         }
+        path.parent.mkdir(parents=True, exist_ok=True)
         # "x" mode = exclusive creation; raises FileExistsError if file exists
         try:
             with path.open("x", encoding="utf-8") as fh:

@@ -114,3 +114,8 @@ class PickleBurstOutputWriter(BurstOutputWriter):
             except OSError:
                 pass
             raise
+
+
+# Backwards-compatible import name for callers that used the previous writer API.
+# The current on-disk format is pickle/JSON/NPY, not parquet.
+ParquetBurstOutputWriter = PickleBurstOutputWriter

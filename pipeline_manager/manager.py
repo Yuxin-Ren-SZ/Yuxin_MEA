@@ -119,25 +119,35 @@ class PipelineManager:
         n: int = 1,
         type: str | None = None,
         retry_failed: bool = False,
+        recording_keys: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> list[WorkItem]:
         """Return up to n WorkItems whose dependencies are complete and status is NOT_RUN.
 
         retry_failed: when True, FAILED tasks are also returned for retry without
             requiring an explicit refresh() call first.
+        recording_keys: optional recording-key allowlist used to scope cached work.
         type must be None (reserved for future parallelisation).
         """
         if type is not None:
             raise ValueError("type parameter is reserved and must be None.")
 
         eligible = {TaskStatus.NOT_RUN, TaskStatus.FAILED} if retry_failed else {TaskStatus.NOT_RUN}
+        recording_key_filter = set(recording_keys) if recording_keys is not None else None
 
         results: list[WorkItem] = []
         for entry in self._cache.values():
             if len(results) >= n:
                 break
+            if (
+                recording_key_filter is not None
+                and entry.recording_key not in recording_key_filter
+            ):
+                continue
             for task_name, record in entry.tasks.items():
                 if len(results) >= n:
                     break
+                if task_name not in self._forward_deps:
+                    continue
                 if record.status not in eligible:
                     continue
                 if self._deps_complete(entry, task_name):

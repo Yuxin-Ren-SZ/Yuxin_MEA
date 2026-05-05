@@ -12,11 +12,24 @@ from typing import Any
 import numpy as np
 
 from pipeline_manager.base_task import BaseAnalysisTask
-from pipeline_tasks.analysis.plate_raster_synchrony import (
-    PlateViewerConfig,
-    WellRecord,
-    build_plate_figure,
-)
+
+
+def _load_viewer_components():
+    try:
+        from pipeline_tasks.analysis.plate_raster_synchrony import (
+            PlateViewerConfig,
+            WellRecord,
+            build_plate_figure,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name == "plotly":
+            raise RuntimeError(
+                "PlateViewerTask requires plotly. Install the repo environment "
+                "from environment.yml before running the plate viewer."
+            ) from exc
+        raise
+
+    return PlateViewerConfig, WellRecord, build_plate_figure
 
 
 class PlateViewerTask(BaseAnalysisTask):
@@ -39,6 +52,7 @@ class PlateViewerTask(BaseAnalysisTask):
             "curation_output_root": "./curation_data",
             "figures_root": "./figures",
             "experiment_cache_path": "./data/analysis/experiment_cache.json",
+            "rec_name": "rec0000",
             "display_mode": "both",
             "marker_size": 5.0,
             "line_width": 1.25,
@@ -71,6 +85,8 @@ class PlateViewerTask(BaseAnalysisTask):
         curation_root = Path(p["curation_output_root"])
         figures_root = Path(p["figures_root"])
         cache_path = Path(p["experiment_cache_path"])
+        rec_name = str(p["rec_name"])
+        PlateViewerConfig, WellRecord, build_plate_figure = _load_viewer_components()
 
         # Create output directory
         output_dir = figures_root / recording_key
@@ -86,9 +102,11 @@ class PlateViewerTask(BaseAnalysisTask):
             well_record = self._load_well_record(
                 well_id_str,
                 recording_key,
+                rec_name,
                 burst_root,
                 curation_root,
                 well_metadata,
+                WellRecord,
             )
             well_records.append(well_record)
 
@@ -139,10 +157,12 @@ class PlateViewerTask(BaseAnalysisTask):
         self,
         well_id_str: str,
         recording_key: str,
+        rec_name: str,
         burst_root: Path,
         curation_root: Path,
         well_metadata: dict[str, dict[str, Any]],
-    ) -> WellRecord:
+        well_record_cls: Any,
+    ) -> Any:
         """Load spike times and plot signals for one well.
 
         Returns a WellRecord with status = "ok" or an error message.
@@ -152,13 +172,20 @@ class PlateViewerTask(BaseAnalysisTask):
         groupname = meta.get("groupname", "?")
 
         # Try to load plot_signals
-        plot_signals_path = burst_root / recording_key / well_id_str / "burst_detection" / "plot_signals.npy"
+        plot_signals_path = (
+            burst_root
+            / recording_key
+            / rec_name
+            / well_id_str
+            / "burst_detection"
+            / "plot_signals.npy"
+        )
         plot_signals = None
         if plot_signals_path.exists():
             try:
                 plot_signals = np.load(plot_signals_path, allow_pickle=True).item()
-            except Exception as e:
-                return WellRecord(
+            except Exception:
+                return well_record_cls(
                     well_id=well_id_str,
                     well_name=well_name,
                     groupname=groupname,
@@ -166,13 +193,20 @@ class PlateViewerTask(BaseAnalysisTask):
                 )
 
         # Try to load spike times
-        spike_times_path = curation_root / recording_key / well_id_str / "auto_curation" / "curated_spike_times.npy"
+        spike_times_path = (
+            curation_root
+            / recording_key
+            / rec_name
+            / well_id_str
+            / "auto_curation"
+            / "curated_spike_times.npy"
+        )
         spike_times = None
         if spike_times_path.exists():
             try:
                 spike_times = np.load(spike_times_path, allow_pickle=True).item()
-            except Exception as e:
-                return WellRecord(
+            except Exception:
+                return well_record_cls(
                     well_id=well_id_str,
                     well_name=well_name,
                     groupname=groupname,
@@ -180,14 +214,14 @@ class PlateViewerTask(BaseAnalysisTask):
                 )
 
         if plot_signals is None and spike_times is None:
-            return WellRecord(
+            return well_record_cls(
                 well_id=well_id_str,
                 well_name=well_name,
                 groupname=groupname,
                 status="missing",
             )
 
-        return WellRecord(
+        return well_record_cls(
             well_id=well_id_str,
             well_name=well_name,
             groupname=groupname,
