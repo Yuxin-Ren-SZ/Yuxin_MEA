@@ -6,6 +6,7 @@ from .pipeline_entry import PipelineEntry
 from .cache_store import BasePipelineCacheStore, JsonPipelineCacheStore
 from .well_metadata import BaseWellMetadataProvider, DummyWellMetadataProvider
 from .manager import PipelineManager
+from .runner import PipelineRunOptions, PipelineRunResult, run_pipeline_session
 
 __all__ = [
     "BaseAnalysisTask",
@@ -20,4 +21,7 @@ __all__ = [
     "BaseWellMetadataProvider",
     "DummyWellMetadataProvider",
     "PipelineManager",
+    "PipelineRunOptions",
+    "PipelineRunResult",
+    "run_pipeline_session",
 ]
