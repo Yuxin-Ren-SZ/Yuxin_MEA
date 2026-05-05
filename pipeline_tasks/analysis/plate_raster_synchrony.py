@@ -182,14 +182,16 @@ def build_plate_figure(
 
     Each subplot: raster (primary Y) + synchrony signals (secondary Y).
     """
+    well_records = sorted(well_records, key=lambda wr: _well_id_to_position(wr.well_id))
+
     fig = make_subplots(
         rows=4,
         cols=6,
         shared_xaxes=True,
-        secondary_y=True,
+        specs=[[{"secondary_y": True} for _ in range(6)] for _ in range(4)],
         vertical_spacing=0.08,
         horizontal_spacing=0.03,
-        subplot_titles=[f"{wr.well_name}\n{wr.groupname}" for wr in well_records],
+        subplot_titles=[f"{wr.well_name} / {wr.groupname}" for wr in well_records],
     )
 
     # Compute global x-max for matching all x-axes

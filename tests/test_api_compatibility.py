@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -161,3 +162,125 @@ def test_plate_viewer_loads_compound_upstream_paths():
     assert record.well_name == "A1"
     assert record.plot_signals is not None
     assert record.spike_times is not None
+
+
+def test_plate_viewer_loads_cache_metadata_and_rec_map():
+    from pipeline_tasks.plate_viewer import PlateViewerTask
+
+    recording_key = "SampleA/240415/PlateX/Network/001"
+
+    with TemporaryDirectory() as tmp:
+        cache_path = Path(tmp) / "experiment_cache.json"
+        cache_path.write_text(
+            json.dumps(
+                {
+                    recording_key: {
+                        "wells": {
+                            "well000": {
+                                "metadata": {
+                                    "well_name": "A1",
+                                    "groupname": "control",
+                                }
+                            },
+                            "well006": {
+                                "metadata": {
+                                    "well_name": "B1",
+                                    "groupname": "treated",
+                                }
+                            },
+                        },
+                        "h5_recordings": {
+                            "rec0000": ["well000"],
+                            "rec0001": ["well006"],
+                        },
+                    }
+                }
+            )
+        )
+
+        metadata, rec_names = PlateViewerTask()._load_recording_cache(
+            cache_path,
+            recording_key,
+        )
+
+    assert metadata["well000"] == {"well_name": "A1", "groupname": "control"}
+    assert metadata["well006"] == {"well_name": "B1", "groupname": "treated"}
+    assert rec_names == {"well000": "rec0000", "well006": "rec0001"}
+
+
+def test_plate_viewer_loads_auto_rec_names_across_outputs():
+    from pipeline_tasks.plate_viewer import PlateViewerTask
+
+    @dataclass
+    class StubWellRecord:
+        well_id: str
+        well_name: str
+        groupname: str
+        plot_signals: dict | None = None
+        spike_times: dict | None = None
+        status: str = "ok"
+
+    recording_key = "SampleA/240415/PlateX/Network/001"
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        burst_dir = root / "burst" / recording_key / "rec0001" / "well006" / "burst_detection"
+        curation_dir = (
+            root / "curation" / recording_key / "rec0001" / "well006" / "auto_curation"
+        )
+        burst_dir.mkdir(parents=True)
+        curation_dir.mkdir(parents=True)
+        np.save(
+            burst_dir / "plot_signals.npy",
+            {"t": np.array([0.0]), "rate_signal": np.array([1.0])},
+        )
+        np.save(curation_dir / "curated_spike_times.npy", {"unit_0": np.array([0.1])})
+
+        record = PlateViewerTask()._load_well_record(
+            "well006",
+            recording_key,
+            "auto",
+            root / "burst",
+            root / "curation",
+            {"well006": {"well_name": "B1", "groupname": "treated"}},
+            StubWellRecord,
+            {"well006": "rec0001"},
+        )
+
+    assert record.status == "ok"
+    assert record.well_name == "B1"
+    assert record.groupname == "treated"
+    assert record.plot_signals is not None
+    assert record.spike_times is not None
+
+
+def test_plate_viewer_resolves_cache_fallback_and_discovers_rec_names():
+    from pipeline_tasks.plate_viewer import PlateViewerTask
+
+    recording_key = "SampleA/240415/PlateX/Network/001"
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        figures_root = root / "figures"
+        fallback_cache = root / "analysis" / "experiment_cache.json"
+        fallback_cache.parent.mkdir(parents=True)
+        fallback_cache.write_text("{}")
+
+        burst_dir = root / "burst" / recording_key / "rec0003" / "well023" / "burst_detection"
+        curation_dir = (
+            root / "curation" / recording_key / "rec0002" / "well014" / "auto_curation"
+        )
+        burst_dir.mkdir(parents=True)
+        curation_dir.mkdir(parents=True)
+
+        task = PlateViewerTask()
+        resolved = task._resolve_cache_path(root / "missing.json", figures_root)
+        discovered = task._discover_well_rec_names(
+            recording_key,
+            root / "burst",
+            root / "curation",
+        )
+
+    assert resolved == fallback_cache
+    assert discovered["well023"] == "rec0003"
+    assert discovered["well014"] == "rec0002"
