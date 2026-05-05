@@ -20,6 +20,7 @@ def _synthetic_well_records() -> list[WellRecord]:
                 plot_signals={
                     "t": np.array([0.0, 1.0, 2.0]),
                     "participation_signal": np.array([0.1, 0.3, 0.2]),
+                    "participation_signal_smooth": np.array([0.12, 0.22, 0.18]),
                     "rate_signal": np.array([1.0, 1.5, 1.1]),
                     "burst_peak_times": np.array([1.0]),
                     "burst_peak_values": np.array([0.3]),
@@ -81,14 +82,38 @@ def test_threshold_and_baseline_shapes_use_secondary_y_axes():
     assert all(int(yref.removeprefix("y")) % 2 == 0 for yref in yrefs)
 
 
-def test_default_viewer_does_not_plot_rate_signal():
+def test_default_viewer_plots_smooth_participation_not_rate_signal():
     fig = build_plate_figure(_synthetic_well_records(), PlateViewerConfig())
 
-    assert all(
-        not str(getattr(trace, "hovertemplate", "")).startswith("Smooth sync")
+    smooth_traces = [
+        trace
         for trace in fig.data
-    )
+        if str(getattr(trace, "hovertemplate", "")).startswith("Smooth participation")
+    ]
+
+    assert len(smooth_traces) == 24
+    assert list(smooth_traces[0].y) == [0.12, 0.22, 0.18]
+    assert smooth_traces[0].yaxis == "y2"
     assert all(list(trace.y) != [1.0, 1.5, 1.1] for trace in fig.data)
+
+
+def test_default_viewer_smooths_participation_when_smooth_field_missing():
+    records = _synthetic_well_records()
+    for record in records:
+        record.plot_signals.pop("participation_signal_smooth")
+
+    fig = build_plate_figure(records, PlateViewerConfig())
+
+    smooth_traces = [
+        trace
+        for trace in fig.data
+        if str(getattr(trace, "hovertemplate", "")).startswith("Smooth participation")
+    ]
+
+    assert len(smooth_traces) == 24
+    assert smooth_traces[0].yaxis == "y2"
+    assert all(0.0 <= y <= 1.0 for y in smooth_traces[0].y)
+    assert list(smooth_traces[0].y) != [1.0, 1.5, 1.1]
 
 
 def test_peak_markers_use_participation_values_on_secondary_y_axis():

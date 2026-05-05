@@ -173,14 +173,14 @@ class BurstResultsSchemaTests(unittest.TestCase):
 
     def test_plot_data_required_keys(self):
         required = {
-            "t", "participation_signal", "rate_signal",
+            "t", "participation_signal", "participation_signal_smooth", "rate_signal",
             "burst_peak_times", "burst_peak_values",
             "participation_baseline", "participation_threshold",
         }
         self.assertTrue(required.issubset(self.result.plot_data.keys()))
 
     def test_plot_signals_are_ndarrays(self):
-        for key in ("t", "participation_signal", "rate_signal"):
+        for key in ("t", "participation_signal", "participation_signal_smooth", "rate_signal"):
             self.assertIsInstance(self.result.plot_data[key], np.ndarray)
 
 
@@ -301,7 +301,7 @@ class ParquetRoundTripTests(unittest.TestCase):
             writer.write(self.original, out)
             loaded = writer.read(out)
 
-        for key in ("t", "participation_signal", "rate_signal"):
+        for key in ("t", "participation_signal", "participation_signal_smooth", "rate_signal"):
             np.testing.assert_array_almost_equal(
                 self.original.plot_data[key],
                 loaded.plot_data[key],

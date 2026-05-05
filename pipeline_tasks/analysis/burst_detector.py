@@ -289,13 +289,14 @@ def compute_network_bursts(
     pfr = spike_counts_total / bin_size
 
     # ------------------------------------------------------------------
-    # 3. Smoothing — fast (participation) and slow (rate)
+    # 3. Smoothing — fast/slow participation plus slow rate
     # ------------------------------------------------------------------
     isi_bins = biological_isi_s / bin_size
     sigma_fast = float(np.clip(isi_bins, 1, 2))
     sigma_slow = float(np.clip(5.0 * isi_bins, 3, 8))
 
     ws_sharp = gaussian_filter1d(participation_signal_raw, sigma_fast)
+    ws_participation_smooth = gaussian_filter1d(participation_signal_raw, sigma_slow)
     ws_smooth = gaussian_filter1d(rate_signal_raw, sigma_slow)
 
     burstlet_merge_gap_s = 3 * biological_isi_s
@@ -441,6 +442,7 @@ def compute_network_bursts(
     plot_data = {
         "t": t_centers,
         "participation_signal": ws_sharp,
+        "participation_signal_smooth": ws_participation_smooth,
         "rate_signal": ws_smooth,
         "burst_peak_times": np.array([b["peak_time"] for b in network_bursts]),
         "burst_peak_values": np.array([b["peak_synchrony"] for b in network_bursts]),

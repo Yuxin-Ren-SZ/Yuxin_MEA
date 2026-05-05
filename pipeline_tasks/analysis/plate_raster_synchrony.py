@@ -10,6 +10,7 @@ from typing import Optional
 
 import numpy as np
 import plotly.graph_objects as go
+from scipy.ndimage import gaussian_filter1d
 from plotly.subplots import make_subplots
 
 
@@ -109,7 +110,7 @@ def _add_secondary_hline(
 def _synchrony_y_range(sync_payload: dict) -> list[float] | None:
     """Return a padded participation-axis range for visible synchrony values."""
     values = []
-    for key in ("signal", "peaks"):
+    for key in ("signal", "smooth", "peaks"):
         trace = sync_payload.get(key)
         if trace:
             values.extend(trace["y"])
@@ -194,7 +195,7 @@ def _synchrony_payload_for_well(
 
     t = plot_signals.get("t")
     participation_signal = plot_signals.get("participation_signal")
-    rate_signal = plot_signals.get("rate_signal")
+    participation_signal_smooth = plot_signals.get("participation_signal_smooth")
     burst_peak_times = plot_signals.get("burst_peak_times")
     burst_peak_values = plot_signals.get("burst_peak_values")
     participation_baseline = plot_signals.get("participation_baseline")
@@ -209,9 +210,16 @@ def _synchrony_payload_for_well(
         t_down, sig_down = _downsample_xy(t, participation_signal, max_points)
         payload["signal"] = {"x": t_down.tolist(), "y": sig_down.tolist()}
 
-    # Smooth synchrony (rate_signal)
-    if t is not None and rate_signal is not None:
-        t_down, sig_down = _downsample_xy(t, rate_signal, max_points)
+    # Smooth synchrony (slow participation). Older outputs do not have this
+    # field, so smooth the sharp participation trace for display compatibility.
+    if participation_signal_smooth is None and participation_signal is not None:
+        participation_signal_smooth = gaussian_filter1d(
+            np.asarray(participation_signal, dtype=float),
+            sigma=5,
+        )
+
+    if t is not None and participation_signal_smooth is not None:
+        t_down, sig_down = _downsample_xy(t, participation_signal_smooth, max_points)
         payload["smooth"] = {"x": t_down.tolist(), "y": sig_down.tolist()}
 
     # Burst peaks
@@ -336,6 +344,22 @@ def build_plate_figure(
                         mode="lines",
                         line=dict(color="#b22222", width=config.line_width),
                         hovertemplate="Sharp sync: %{y:.3f}<br>t=%{x:.3f}s<extra></extra>",
+                        showlegend=False,
+                    ),
+                    row=row,
+                    col=col,
+                    secondary_y=True,
+                )
+
+            # Smooth participation synchrony (orange)
+            if sync_payload["smooth"]:
+                fig.add_trace(
+                    go.Scattergl(
+                        x=sync_payload["smooth"]["x"],
+                        y=sync_payload["smooth"]["y"],
+                        mode="lines",
+                        line=dict(color="rgba(255, 140, 0, 0.95)", width=config.line_width * 0.9),
+                        hovertemplate="Smooth participation: %{y:.3f}<br>t=%{x:.3f}s<extra></extra>",
                         showlegend=False,
                     ),
                     row=row,
