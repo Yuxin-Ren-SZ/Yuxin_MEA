@@ -6,12 +6,41 @@ No pipeline coupling — can be used standalone or by PlateViewerTask.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import plotly.graph_objects as go
 from scipy.ndimage import gaussian_filter1d
 from plotly.subplots import make_subplots
+
+
+BURST_EVENT_TYPES = {
+    "burstlets": {
+        "label": "Burstlet",
+        "color": "rgba(31, 119, 180, 0.42)",
+        "line_color": "rgba(31, 119, 180, 0.80)",
+        "default_visible": False,
+        "lane": 0,
+    },
+    "network_bursts": {
+        "label": "Burst",
+        "color": "rgba(255, 127, 14, 0.46)",
+        "line_color": "rgba(214, 90, 0, 0.85)",
+        "default_visible": True,
+        "lane": 1,
+    },
+    "superbursts": {
+        "label": "Superburst",
+        "color": "rgba(148, 103, 189, 0.46)",
+        "line_color": "rgba(112, 67, 160, 0.85)",
+        "default_visible": False,
+        "lane": 2,
+    },
+}
+EVENT_MARGINAL_FRACTION = 0.22
+EVENT_MARGINAL_GAP_FRACTION = 0.035
 
 
 @dataclass(frozen=True)
@@ -35,6 +64,7 @@ class WellRecord:
     groupname: str  # "NPH", "IVH Early", etc.
     plot_signals: Optional[dict] = None  # Keys: t, participation_signal, rate_signal, etc.
     spike_times: Optional[dict[str, np.ndarray]] = None  # unit_id -> spike times in seconds
+    event_intervals: Optional[dict[str, list[dict]]] = None
     status: str = "ok"  # "ok", "missing", or error message string
 
 
@@ -86,6 +116,33 @@ def _secondary_axis_refs(fig: go.Figure, row: int, col: int) -> tuple[str, str]:
     return xref, yref
 
 
+def _primary_axis_refs(fig: go.Figure, row: int, col: int) -> tuple[str, str]:
+    """Return shape refs for the subplot primary axes."""
+    subplot = fig.get_subplot(row, col, secondary_y=False)
+    xref = _axis_name_to_ref(subplot.xaxis._plotly_name)
+    yref = _axis_name_to_ref(subplot.yaxis._plotly_name)
+    return xref, yref
+
+
+def _primary_axis_names(fig: go.Figure, row: int, col: int) -> tuple[str, str]:
+    """Return Plotly layout axis names for the subplot primary axes."""
+    subplot = fig.get_subplot(row, col, secondary_y=False)
+    return subplot.xaxis._plotly_name, subplot.yaxis._plotly_name
+
+
+def _event_marginal_domain(fig: go.Figure, row: int, col: int) -> tuple[float, float]:
+    """Reserve an upper marginal band over the primary plot and return its paper domain."""
+    _, yaxis_name = _primary_axis_names(fig, row, col)
+    yaxis = fig.layout[yaxis_name]
+    domain = list(yaxis.domain)
+    domain_height = domain[1] - domain[0]
+    marginal_height = domain_height * EVENT_MARGINAL_FRACTION
+    gap = domain_height * EVENT_MARGINAL_GAP_FRACTION
+    marginal_domain = (domain[1] - marginal_height, domain[1])
+    yaxis.domain = [domain[0], domain[1] - marginal_height - gap]
+    return marginal_domain
+
+
 def _add_secondary_hline(
     fig: go.Figure,
     row: int,
@@ -105,6 +162,61 @@ def _add_secondary_hline(
         y1=y,
         line=dict(color=color, dash="dash"),
     )
+
+
+def _add_event_zone_shapes(
+    fig: go.Figure,
+    row: int,
+    col: int,
+    event_intervals: dict[str, list[dict]] | None,
+) -> None:
+    """Add toggleable event interval lanes in an upper marginal band."""
+    marginal_y0, marginal_y1 = _event_marginal_domain(fig, row, col)
+    xref, _ = _primary_axis_refs(fig, row, col)
+    band_height = marginal_y1 - marginal_y0
+    lane_count = max(len(BURST_EVENT_TYPES), 1)
+    lane_gap = band_height * 0.08 / lane_count
+    lane_height = (band_height - lane_gap * (lane_count + 1)) / lane_count
+
+    fig.add_shape(
+        type="rect",
+        xref=f"{xref} domain",
+        yref="paper",
+        x0=0,
+        x1=1,
+        y0=marginal_y0,
+        y1=marginal_y1,
+        fillcolor="rgba(245, 247, 250, 0.92)",
+        line=dict(width=1, color="rgba(170, 180, 195, 0.65)"),
+        layer="above",
+        name="event-marginal-background",
+    )
+
+    if not event_intervals:
+        return
+
+    for event_key, style in BURST_EVENT_TYPES.items():
+        intervals = event_intervals.get(event_key, [])
+        if not intervals:
+            continue
+        lane = int(style["lane"])
+        y0 = marginal_y0 + lane_gap + lane * (lane_height + lane_gap)
+        y1 = y0 + lane_height
+        for interval in intervals:
+            fig.add_shape(
+                type="rect",
+                xref=xref,
+                yref="paper",
+                x0=float(interval["start"]),
+                x1=float(interval["end"]),
+                y0=y0,
+                y1=y1,
+                fillcolor=str(style["color"]),
+                line=dict(width=1, color=str(style["line_color"])),
+                layer="above",
+                visible=bool(style["default_visible"]),
+                name=f"event-zone:{event_key}",
+            )
 
 
 def _synchrony_y_range(sync_payload: dict) -> list[float] | None:
@@ -305,6 +417,8 @@ def build_plate_figure(
             )
             continue
 
+        _add_event_zone_shapes(fig, row, col, wr.event_intervals)
+
         # Raster traces (primary Y)
         if wr.spike_times:
             raster_traces, _ = _raster_payload_for_well(
@@ -428,7 +542,7 @@ def build_plate_figure(
 
     fig.update_layout(
         title="24-Well Plate Raster + Synchrony Viewer",
-        height=max(800, config.width_px // 3),
+        height=max(950, int(config.width_px * 0.42)),
         width=config.width_px,
         showlegend=True,
         hovermode="closest",
@@ -437,6 +551,119 @@ def build_plate_figure(
     )
 
     return fig
+
+
+def plate_figure_to_html(fig: go.Figure) -> str:
+    """Return standalone viewer HTML with burst-zone checkbox controls."""
+    html = fig.to_html(full_html=True)
+    controls = _burst_zone_controls_html()
+    script = _burst_zone_controls_script()
+    return html.replace("<body>", f"<body>\n{controls}\n{script}", 1)
+
+
+def write_plate_viewer_html(fig: go.Figure, output_path: str | Path) -> None:
+    """Write a standalone plate viewer with custom burst-zone controls."""
+    Path(output_path).write_text(plate_figure_to_html(fig), encoding="utf-8")
+
+
+def _burst_zone_controls_html() -> str:
+    controls = []
+    for event_key, style in BURST_EVENT_TYPES.items():
+        checked = " checked" if style["default_visible"] else ""
+        color = str(style["line_color"])
+        controls.append(
+            (
+                '<label class="burst-zone-control__item">'
+                f'<input type="checkbox" data-burst-event="{event_key}"{checked}>'
+                f'<span class="burst-zone-control__swatch" style="background:{color}"></span>'
+                f'<span>{style["label"]}</span>'
+                "</label>"
+            )
+        )
+    controls_html = "\n".join(controls)
+    return f"""
+<style>
+.burst-zone-control {{
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.94);
+  border-bottom: 1px solid #d9dee7;
+  font-family: Arial, sans-serif;
+  font-size: 13px;
+  color: #243042;
+}}
+.burst-zone-control__title {{
+  font-weight: 600;
+}}
+.burst-zone-control__item {{
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}}
+.burst-zone-control__swatch {{
+  width: 18px;
+  height: 9px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+}}
+</style>
+<div class="burst-zone-control" data-burst-zone-control>
+  <span class="burst-zone-control__title">Burst zones</span>
+  {controls_html}
+</div>
+""".strip()
+
+
+def _burst_zone_controls_script() -> str:
+    event_keys = list(BURST_EVENT_TYPES.keys())
+    event_keys_json = json.dumps(event_keys)
+    return f"""
+<script>
+(function() {{
+  const eventKeys = {event_keys_json};
+  function applyBurstZoneVisibility(graphDiv, eventKey, visible) {{
+    const shapes = (graphDiv.layout && graphDiv.layout.shapes) || [];
+    const update = {{}};
+    shapes.forEach(function(shape, index) {{
+      if (shape.name === "event-zone:" + eventKey) {{
+        update["shapes[" + index + "].visible"] = visible;
+      }}
+    }});
+    if (Object.keys(update).length > 0) {{
+      Plotly.relayout(graphDiv, update);
+    }}
+  }}
+  function initBurstZoneControls() {{
+    const graphDiv = document.querySelector(".plotly-graph-div");
+    const panel = document.querySelector("[data-burst-zone-control]");
+    if (!graphDiv || !panel || !window.Plotly) {{
+      return;
+    }}
+    eventKeys.forEach(function(eventKey) {{
+      const input = panel.querySelector('[data-burst-event="' + eventKey + '"]');
+      if (!input) {{
+        return;
+      }}
+      applyBurstZoneVisibility(graphDiv, eventKey, input.checked);
+      input.addEventListener("change", function() {{
+        applyBurstZoneVisibility(graphDiv, eventKey, input.checked);
+      }});
+    }});
+  }}
+  if (document.readyState === "loading") {{
+    document.addEventListener("DOMContentLoaded", initBurstZoneControls);
+  }} else {{
+    initBurstZoneControls();
+  }}
+}})();
+</script>
+""".strip()
 
 
 def _get_group_colors(group_names: list[str]) -> dict[str, str]:

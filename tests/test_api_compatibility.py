@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
+import pandas as pd
 
 
 def test_pipeline_tasks_import_does_not_require_viewer_runtime():
@@ -252,6 +253,75 @@ def test_plate_viewer_loads_auto_rec_names_across_outputs():
     assert record.groupname == "treated"
     assert record.plot_signals is not None
     assert record.spike_times is not None
+
+
+def test_plate_viewer_loads_burst_event_intervals():
+    from pipeline_tasks.plate_viewer import PlateViewerTask
+
+    @dataclass
+    class StubWellRecord:
+        well_id: str
+        well_name: str
+        groupname: str
+        plot_signals: dict | None = None
+        spike_times: dict | None = None
+        event_intervals: dict | None = None
+        status: str = "ok"
+
+    recording_key = "SampleA/240415/PlateX/Network/001"
+    rec_name = "rec0000"
+    well_id = "well000"
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        burst_dir = root / "burst" / recording_key / rec_name / well_id / "burst_detection"
+        curation_dir = root / "curation" / recording_key / rec_name / well_id / "auto_curation"
+        burst_dir.mkdir(parents=True)
+        curation_dir.mkdir(parents=True)
+        np.save(
+            burst_dir / "plot_signals.npy",
+            {"t": np.array([0.0]), "rate_signal": np.array([1.0])},
+        )
+        np.save(curation_dir / "curated_spike_times.npy", {"unit_0": np.array([0.1])})
+        pd.DataFrame(
+            [{"start": 0.1, "end": 0.2, "peak_time": 0.15, "total_spikes": 10}]
+        ).to_pickle(burst_dir / "burstlets.pkl")
+        pd.DataFrame([{"start": 0.3, "end": 0.6}]).to_pickle(
+            burst_dir / "network_bursts.pkl"
+        )
+        pd.DataFrame().to_pickle(burst_dir / "superbursts.pkl")
+
+        record = PlateViewerTask()._load_well_record(
+            well_id,
+            recording_key,
+            rec_name,
+            root / "burst",
+            root / "curation",
+            {well_id: {"well_name": "A1", "groupname": "control"}},
+            StubWellRecord,
+        )
+
+    assert record.event_intervals["burstlets"] == [
+        {"start": 0.1, "end": 0.2, "peak_time": 0.15, "total_spikes": 10}
+    ]
+    assert record.event_intervals["network_bursts"] == [{"start": 0.3, "end": 0.6}]
+    assert record.event_intervals["superbursts"] == []
+
+
+def test_plate_viewer_event_intervals_tolerate_missing_files():
+    from pipeline_tasks.plate_viewer import PlateViewerTask
+
+    recording_key = "SampleA/240415/PlateX/Network/001"
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        intervals = PlateViewerTask()._load_event_intervals(
+            "well000",
+            recording_key,
+            ["rec0000"],
+            root / "burst",
+        )
+
+    assert intervals == {"burstlets": [], "network_bursts": [], "superbursts": []}
 
 
 def test_plate_viewer_resolves_cache_fallback_and_discovers_rec_names():

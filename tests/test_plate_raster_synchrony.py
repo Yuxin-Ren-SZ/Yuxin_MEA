@@ -6,6 +6,7 @@ from pipeline_tasks.analysis.plate_raster_synchrony import (
     PlateViewerConfig,
     WellRecord,
     build_plate_figure,
+    plate_figure_to_html,
 )
 
 
@@ -33,6 +34,16 @@ def _synthetic_well_records() -> list[WellRecord]:
                 },
             )
         )
+    return records
+
+
+def _synthetic_well_records_with_events() -> list[WellRecord]:
+    records = _synthetic_well_records()
+    records[0].event_intervals = {
+        "burstlets": [{"start": 0.2, "end": 0.4}],
+        "network_bursts": [{"start": 0.3, "end": 0.8}],
+        "superbursts": [{"start": 0.1, "end": 1.5}],
+    }
     return records
 
 
@@ -74,12 +85,86 @@ def test_build_plate_figure_orders_shuffled_well_titles_by_plate_position():
 def test_threshold_and_baseline_shapes_use_secondary_y_axes():
     fig = build_plate_figure(_synthetic_well_records(), PlateViewerConfig())
 
-    assert len(fig.layout.shapes) == 48
-    yrefs = [shape.yref for shape in fig.layout.shapes]
+    threshold_shapes = [
+        shape
+        for shape in fig.layout.shapes
+        if not str(getattr(shape, "name", "")).startswith("event-")
+    ]
+    assert len(threshold_shapes) == 48
+    yrefs = [shape.yref for shape in threshold_shapes]
 
     assert yrefs[:2] == ["y2", "y2"]
     assert all(yref != "y" for yref in yrefs)
     assert all(int(yref.removeprefix("y")) % 2 == 0 for yref in yrefs)
+
+
+def test_event_interval_shapes_are_toggleable_by_event_type():
+    fig = build_plate_figure(_synthetic_well_records_with_events(), PlateViewerConfig())
+
+    event_shapes = [
+        shape
+        for shape in fig.layout.shapes
+        if str(getattr(shape, "name", "")).startswith("event-zone:")
+    ]
+
+    assert len(event_shapes) == 3
+    visibility_by_name = {shape.name: shape.visible for shape in event_shapes}
+    assert visibility_by_name["event-zone:burstlets"] is False
+    assert visibility_by_name["event-zone:network_bursts"] is True
+    assert visibility_by_name["event-zone:superbursts"] is False
+    assert all(shape.type == "rect" for shape in event_shapes)
+    assert all(shape.yref == "paper" for shape in event_shapes)
+    assert all(shape.layer == "above" for shape in event_shapes)
+    assert all(shape.line.width == 1 for shape in event_shapes)
+
+
+def test_event_marginal_reserves_separate_plot_band():
+    fig = build_plate_figure(_synthetic_well_records_with_events(), PlateViewerConfig())
+
+    event_backgrounds = [
+        shape
+        for shape in fig.layout.shapes
+        if str(getattr(shape, "name", "")) == "event-marginal-background"
+    ]
+    event_shapes = [
+        shape
+        for shape in fig.layout.shapes
+        if str(getattr(shape, "name", "")).startswith("event-zone:")
+    ]
+
+    assert len(event_backgrounds) == 24
+    assert len(event_shapes) == 3
+    assert event_backgrounds[0].yref == "paper"
+    assert event_shapes[0].y0 >= event_backgrounds[0].y0
+    assert event_shapes[0].y1 <= event_backgrounds[0].y1
+    assert fig.layout.yaxis.domain[1] < event_backgrounds[0].y0
+
+
+def test_event_shapes_do_not_replace_secondary_threshold_shapes():
+    fig = build_plate_figure(_synthetic_well_records_with_events(), PlateViewerConfig())
+
+    threshold_shapes = [
+        shape
+        for shape in fig.layout.shapes
+        if not str(getattr(shape, "name", "")).startswith("event-")
+    ]
+
+    assert len(threshold_shapes) == 48
+    assert threshold_shapes[0].yref == "y2"
+
+
+def test_plate_figure_html_contains_burst_zone_controls():
+    fig = build_plate_figure(_synthetic_well_records_with_events(), PlateViewerConfig())
+    html = plate_figure_to_html(fig)
+
+    assert "data-burst-zone-control" in html
+    assert "Burstlet" in html
+    assert "Burst" in html
+    assert "Superburst" in html
+    assert '"burstlets"' in html
+    assert '"network_bursts"' in html
+    assert '"superbursts"' in html
+    assert "event-zone:" in html
 
 
 def test_default_viewer_plots_smooth_participation_not_rate_signal():

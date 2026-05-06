@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from pipeline_manager.base_task import BaseAnalysisTask
 
@@ -20,6 +21,7 @@ def _load_viewer_components():
             PlateViewerConfig,
             WellRecord,
             build_plate_figure,
+            write_plate_viewer_html,
         )
     except ModuleNotFoundError as exc:
         if exc.name == "plotly":
@@ -29,7 +31,7 @@ def _load_viewer_components():
             ) from exc
         raise
 
-    return PlateViewerConfig, WellRecord, build_plate_figure
+    return PlateViewerConfig, WellRecord, build_plate_figure, write_plate_viewer_html
 
 
 class PlateViewerTask(BaseAnalysisTask):
@@ -85,7 +87,12 @@ class PlateViewerTask(BaseAnalysisTask):
         curation_root = Path(p["curation_output_root"])
         figures_root = Path(p["figures_root"])
         rec_name = str(p["rec_name"])
-        PlateViewerConfig, WellRecord, build_plate_figure = _load_viewer_components()
+        (
+            PlateViewerConfig,
+            WellRecord,
+            build_plate_figure,
+            write_plate_viewer_html,
+        ) = _load_viewer_components()
 
         # Create output directory
         output_dir = figures_root / recording_key
@@ -132,7 +139,7 @@ class PlateViewerTask(BaseAnalysisTask):
 
         # Write HTML
         output_path = output_dir / "plate_viewer.html"
-        fig.write_html(str(output_path))
+        write_plate_viewer_html(fig, output_path)
 
         return output_path
 
@@ -263,6 +270,12 @@ class PlateViewerTask(BaseAnalysisTask):
             curation_root,
             recording_key,
         )
+        event_intervals = self._load_event_intervals(
+            well_id_str,
+            recording_key,
+            rec_names,
+            burst_root,
+        )
 
         # Try to load plot_signals
         plot_signals = None
@@ -311,18 +324,109 @@ class PlateViewerTask(BaseAnalysisTask):
                 break
 
         if plot_signals is None and spike_times is None:
-            return well_record_cls(
+            return self._make_well_record(
+                well_record_cls,
                 well_id=well_id_str,
                 well_name=well_name,
                 groupname=groupname,
+                event_intervals=event_intervals,
                 status="missing",
             )
 
-        return well_record_cls(
+        return self._make_well_record(
+            well_record_cls,
             well_id=well_id_str,
             well_name=well_name,
             groupname=groupname,
             plot_signals=plot_signals,
             spike_times=spike_times,
+            event_intervals=event_intervals,
             status="ok",
         )
+
+    def _make_well_record(self, well_record_cls: Any, **kwargs: Any) -> Any:
+        """Instantiate WellRecord, tolerating older test stubs without new fields."""
+        try:
+            return well_record_cls(**kwargs)
+        except TypeError as exc:
+            if "event_intervals" not in str(exc):
+                raise
+            kwargs.pop("event_intervals", None)
+            return well_record_cls(**kwargs)
+
+    def _load_event_intervals(
+        self,
+        well_id_str: str,
+        recording_key: str,
+        rec_names: list[str],
+        burst_root: Path,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Load persisted event interval tables for one well."""
+        event_intervals = {event_key: [] for event_key in self._event_type_keys()}
+        for candidate_rec_name in rec_names:
+            burst_dir = (
+                burst_root
+                / recording_key
+                / candidate_rec_name
+                / well_id_str
+                / "burst_detection"
+            )
+            if not burst_dir.exists():
+                continue
+            for event_key in event_intervals:
+                event_path = burst_dir / f"{event_key}.pkl"
+                if event_path.exists():
+                    event_intervals[event_key] = self._read_event_table(event_path)
+            break
+        return event_intervals
+
+    def _event_type_keys(self) -> list[str]:
+        """Return event table keys from the viewer registry."""
+        try:
+            from pipeline_tasks.analysis.plate_raster_synchrony import BURST_EVENT_TYPES
+        except ModuleNotFoundError as exc:
+            if exc.name == "plotly":
+                return ["burstlets", "network_bursts", "superbursts"]
+            raise
+        return list(BURST_EVENT_TYPES.keys())
+
+    def _read_event_table(self, event_path: Path) -> list[dict[str, Any]]:
+        """Read one event table and keep valid numeric intervals."""
+        try:
+            table = pd.read_pickle(event_path)
+        except Exception as exc:
+            print(f"Warning: Failed to load event intervals from {event_path}: {exc}")
+            return []
+        if table is None or table.empty or "start" not in table or "end" not in table:
+            return []
+
+        intervals = []
+        for row in table.to_dict(orient="records"):
+            try:
+                start = float(row["start"])
+                end = float(row["end"])
+            except (TypeError, ValueError):
+                continue
+            if not (np.isfinite(start) and np.isfinite(end)) or end <= start:
+                continue
+            interval = {}
+            for key, value in row.items():
+                safe_value = self._json_safe_scalar(value)
+                if safe_value is not None:
+                    interval[key] = safe_value
+            interval["start"] = start
+            interval["end"] = end
+            intervals.append(interval)
+        return intervals
+
+    def _json_safe_scalar(self, value: Any) -> Any:
+        """Convert common numpy/pandas scalars to JSON-safe values."""
+        if value is None:
+            return None
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, float) and not np.isfinite(value):
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        return None
