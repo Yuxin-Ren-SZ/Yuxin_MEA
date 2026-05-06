@@ -5,6 +5,7 @@ from .analyzer import AnalyzerTask
 from .auto_curation import AutoCurationTask
 from .burst_detection import BurstDetectionTask
 from .plate_viewer import PlateViewerTask
+from .base_plate_viewer import BasePlateViewer
 
 __all__ = [
     "PreprocessingTask",
@@ -14,4 +15,5 @@ __all__ = [
     "AutoCurationTask",
     "BurstDetectionTask",
     "PlateViewerTask",
+    "BasePlateViewer",
 ]
