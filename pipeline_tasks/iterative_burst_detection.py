@@ -85,7 +85,7 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
     ) -> Path:
         import numpy as np
 
-        from pipeline_tasks.analysis.iterative_burst_detector import (
+        from pipeline_tasks.analysis import (
             IterativeBurstConfig,
             compute_iterative_bursts,
         )

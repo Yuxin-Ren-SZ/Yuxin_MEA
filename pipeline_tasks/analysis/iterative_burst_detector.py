@@ -144,7 +144,7 @@ class IterativeBurstConfig:
     fisher_alpha_frac: float = 1e-3
 
     # FF multi-scale bin-size multipliers
-    ff_scale_multipliers: tuple = (0.5, 1.0, 2.0, 5.0)
+    ff_scale_multipliers: tuple[float, ...] = (0.5, 1.0, 2.0, 5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -259,17 +259,15 @@ def _compute_multiscale_ff(
             0, n_coarse - 1,
         )
 
-        ff_coarse = np.zeros(n_coarse)
-        for j in range(n_coarse):
-            fine_mask = coarse_idx == j
-            if not fine_mask.any():
-                continue
-            # Sum spike counts within this coarse window for each unit
-            unit_counts = spike_matrix[:, fine_mask].sum(axis=1)  # shape (n_units,)
-            mean_c = float(unit_counts.mean())
-            if mean_c > 1e-9:
-                # Var/Mean across the population at this time window
-                ff_coarse[j] = float(unit_counts.var()) / mean_c
+        # Aggregate per-unit spike counts into coarse bins via bincount (vectorized)
+        n_units_ff = spike_matrix.shape[0]
+        unit_coarse = np.zeros((n_units_ff, n_coarse), dtype=np.float64)
+        for i in range(n_units_ff):
+            unit_coarse[i] = np.bincount(coarse_idx, weights=spike_matrix[i], minlength=n_coarse)
+        mean_c = unit_coarse.mean(axis=0)   # (n_coarse,)
+        var_c = unit_coarse.var(axis=0)     # (n_coarse,)
+        valid = mean_c > 1e-9
+        ff_coarse = np.where(valid, var_c / np.where(valid, mean_c, 1.0), 0.0)
 
         # Broadcast coarse FF back to fine resolution, then lightly smooth
         ff_fine = ff_coarse[coarse_idx]
@@ -802,6 +800,8 @@ def compute_iterative_bursts(
     all_spikes = np.sort(np.concatenate(non_empty))
     rec_start, rec_end = float(all_spikes[0]), float(all_spikes[-1])
     total_dur = rec_end - rec_start
+    if total_dur < 1e-6:
+        raise IterativeBurstError("spike_times spans insufficient duration (< 1 µs)")
 
     # -----------------------------------------------------------------------
     # Phase 1a: Adaptive bin size from the population median log-ISI
@@ -923,9 +923,6 @@ def compute_iterative_bursts(
     # participation-heavy prior (1.5) reflects domain knowledge that synchronous
     # recruitment of units is the most reliable burst indicator.
     w_prior = np.array([1.0, 1.5] + [0.5] * n_ff + [1.0, 0.5])
-    w_prior = w_prior[:n_features]
-    if len(w_prior) < n_features:
-        w_prior = np.concatenate([w_prior, np.full(n_features - len(w_prior), 0.5)])
     w = w_prior / float(np.linalg.norm(w_prior))
 
     # Global fallback background rate: used when a unit has zero spikes in the
@@ -998,10 +995,8 @@ def compute_iterative_bursts(
             bg_mask = np.ones(n_bins, dtype=bool)
 
         # Per-unit background rate from background bins only
-        lambda_bg_per_unit = np.array([
-            float(spike_matrix[i, bg_mask].sum() / (bg_mask.sum() * bin_size))
-            for i in range(n_units)
-        ])
+        n_bg_bins = bg_mask.sum()
+        lambda_bg_per_unit = spike_matrix[:, bg_mask].sum(axis=1) / (n_bg_bins * bin_size)
         # Replace units with zero background spikes with the global estimate
         lambda_bg_per_unit = np.where(
             lambda_bg_per_unit > 0, lambda_bg_per_unit, global_lambda_bg
@@ -1183,7 +1178,7 @@ def compute_iterative_bursts(
         "burst_peak_times": np.array([b["peak_time"] for b in network_bursts]),
         "burst_peak_values": np.array([b["peak_synchrony"] for b in network_bursts]),
         "participation_baseline": float(baseline_init),
-        "participation_threshold": float(composite_threshold),
+        "participation_threshold": float(init_threshold),
     }
 
     return BurstResults(
