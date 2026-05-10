@@ -9,6 +9,11 @@ from .burst_output import (
     ParquetBurstOutputWriter,
     PickleBurstOutputWriter,
 )
+from .iterative_burst_detector import (
+    IterativeBurstConfig,
+    IterativeBurstError,
+    compute_iterative_bursts,
+)
 
 __all__ = [
     "BurstDetectorConfig",
@@ -18,6 +23,9 @@ __all__ = [
     "BurstOutputWriter",
     "PickleBurstOutputWriter",
     "ParquetBurstOutputWriter",
+    "IterativeBurstConfig",
+    "IterativeBurstError",
+    "compute_iterative_bursts",
     "PlateViewerConfig",
     "WellRecord",
     "build_plate_figure",
