@@ -244,8 +244,10 @@ def _compute_multiscale_ff(
     rec_start = float(bins[0])
     rec_end = float(bins[-1])
 
+    # TODO is there a faster way to do this without a Python loop over scales? The loop is only over 4 scales so it's not a bottleneck, but it would be cleaner if we could vectorize it.
     for k, mult in enumerate(ff_scale_multipliers):
         # Clamp scale to [5 ms, 100 ms] regardless of the adaptive bin size
+        # TODO parameterize the min and max.
         scale_dt = float(np.clip(mult * bin_size, 0.005, 0.1))
 
         coarse_bins = np.arange(rec_start, rec_end + scale_dt, scale_dt)
@@ -270,6 +272,7 @@ def _compute_multiscale_ff(
         ff_coarse = np.where(valid, var_c / np.where(valid, mean_c, 1.0), 0.0)
 
         # Broadcast coarse FF back to fine resolution, then lightly smooth
+        # TODO is the smoothing necessary? Lookslike yes.
         ff_fine = ff_coarse[coarse_idx]
         ff_signals[:, k] = gaussian_filter1d(ff_fine, sigma=1.5)
 
