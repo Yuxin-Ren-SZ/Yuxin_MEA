@@ -1,3 +1,59 @@
+"""Iterative contrast-maximizing network burst detector.
+
+Algorithm overview
+------------------
+The core problem: a single participation-signal threshold works poorly when
+recordings differ in baseline firing rate, unit count, or noise level, because
+it has no way to learn what "different from background" means for a given well.
+
+This detector instead treats burst detection as an iterative two-class
+separation problem:
+
+  1. PERMISSIVE SEED  — over-detect using a low threshold on the participation
+     signal. This produces many false positives but ensures no true burst is
+     missed at the start.
+
+  2. FEATURE MATRIX  — compute 8 biologically motivated signals per time bin:
+       F0  PFR              population firing rate (Hz)
+       F1  P                participation fraction (fraction of active units)
+       F2–F5  FF×4          spatial Fano Factor at 4 temporal scales
+       F6  LLR              per-unit Poisson log-likelihood ratio vs background
+       F7  burstiness       mean instantaneous ISI reciprocal
+
+  3. ITERATE until convergence:
+       a. Estimate per-unit background rates from non-candidate bins
+       b. Update the LLR feature (depends on background estimate)
+       c. Z-score all features relative to background
+       d. Fit Fisher's linear discriminant on the current burst/non-burst labels
+          to find the projection direction w that maximises between-class
+          variance relative to within-class variance
+       e. Compute composite(t) = X_norm[t] @ w  (single discriminant score)
+       f. Re-threshold composite to get new burst/non-burst labels
+       g. Trim candidate boundaries where composite falls below extent threshold
+       h. Merge nearby candidates whose separating valley is still "bursty"
+       i. Check convergence: stop when < 0.5 % of bins change label
+
+  4. HIERARCHY  — apply the same two-tier merge used by the original detector:
+       burstlets  →(merge_strict)→  network_bursts
+       network_bursts  →(merge_clustered)→  superbursts
+
+  5. OUTPUT  — BurstResults with the standard schema plus four quality columns
+     per event: llr_aggregate, composite_peak, composite_mean, ff_peak.
+
+Key design choices
+------------------
+- Fisher LDA is re-fit every iteration so the composite signal adapts to
+  whichever features actually discriminate in each recording. Iteration 0 uses
+  a fixed participation-heavy prior to bootstrap the label set.
+- Background rates are per-unit (not pooled) so heterogeneous networks where
+  some units fire much faster than others are handled correctly.
+- Fano Factor is computed at four temporal scales. Short scales capture fast
+  synchrony inside a burstlet; coarser scales capture slower network-wide
+  co-activation. Fisher LDA learns which scales are informative.
+- LLR is signed (positive = elevated above background, negative = suppressed),
+  so it contributes positively to the composite during bursts and near-zero
+  during quiet periods.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,6 +69,64 @@ class IterativeBurstError(ValueError):
 
 @dataclass(frozen=True)
 class IterativeBurstConfig:
+    """All tunable parameters for the iterative burst detector.
+
+    Phase 1 — permissive seeding
+    ----------------------------
+    permissive_mad_scale : float
+        MAD multiplier for the initial participation threshold (0.30 = very
+        permissive, roughly half the normal 0.75 setting). Lower → more seed
+        candidates (more false positives that iterations must eliminate).
+    permissive_percentile : float
+        Fallback initial threshold when spread_mad is near zero (sparse or
+        uniform recordings where MAD-based thresholding is meaningless).
+        70.0 means "top 30 % of bins by participation fraction".
+    mad_fallback_threshold : float
+        If spread_mad < this value the percentile fallback is used instead of
+        the MAD method.
+
+    Phase 3 — iterative refinement
+    --------------------------------
+    composite_mad_scale : float
+        MAD multiplier applied to the composite signal background distribution
+        to set the burst/non-burst threshold each iteration. Matches the
+        original detector's 0.75 default once the composite is well-calibrated.
+    extent_frac : float
+        After re-thresholding, candidate edges are trimmed inward until the
+        composite value exceeds max(threshold, extent_frac × peak_composite).
+        Controls how tightly boundaries follow the burst envelope.
+    merge_floor_frac : float
+        During iteration, two adjacent candidates are merged if their separating
+        valley is above merge_floor_frac × threshold. 0.70 is relaxed (allows
+        merges even when the valley dips somewhat below the detection threshold).
+        The final hierarchy merge uses a stricter criterion.
+    network_merge_gap_min_s : float
+        Minimum gap enforced for the network-burst merge stage in the hierarchy,
+        regardless of the biological ISI estimate.
+    max_iterations : int
+        Hard cap on refinement iterations (safety valve; typically converges
+        in 5–10 iterations).
+    convergence_eps : float
+        Stop iterating when fewer than this fraction of bins change their
+        burst/non-burst label relative to the previous iteration.
+
+    Fisher regularization
+    ---------------------
+    fisher_alpha_frac : float
+        Ridge regularization for the within-class scatter matrix S_W:
+            alpha = fisher_alpha_frac × trace(S_W) / n_features
+        Prevents numerical issues when features are nearly collinear or one
+        class has very few samples. 1e-3 is mild regularization.
+
+    Fano Factor scales
+    ------------------
+    ff_scale_multipliers : tuple of float
+        Each multiplier is applied to the adaptive bin size to produce one
+        Fano Factor feature. E.g. (0.5, 1.0, 2.0, 5.0) with bin_size=20 ms
+        gives FF at 10 ms, 20 ms, 40 ms, 100 ms. Clamped to [5, 100] ms.
+        Fisher LDA learns which scale(s) best discriminate for each recording.
+    """
+
     # Phase 1 — initial detection
     permissive_mad_scale: float = 0.30
     permissive_percentile: float = 70.0
@@ -34,7 +148,7 @@ class IterativeBurstConfig:
 
 
 # ---------------------------------------------------------------------------
-# Helpers — statistics
+# Helpers — summary statistics (used for aggregate metrics output)
 # ---------------------------------------------------------------------------
 
 def _stats(x: np.ndarray) -> dict:
@@ -65,7 +179,7 @@ def _level_metrics(events: list[dict], total_dur: float) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Helpers — feature computation
+# Helpers — feature computation (F0–F7)
 # ---------------------------------------------------------------------------
 
 def _compute_spike_matrix(
@@ -74,7 +188,14 @@ def _compute_spike_matrix(
     bins: np.ndarray,
     n_bins: int,
 ) -> np.ndarray:
-    """Shape (n_units, n_bins): integer spike counts per unit per bin."""
+    """Build the (n_units × n_bins) spike count matrix.
+
+    Each row is a unit; each column is an adaptive time bin. This matrix is
+    the shared substrate for all per-bin features: summing columns gives PFR
+    and participation; computing Var/Mean across rows at each column gives the
+    spatial Fano Factor; comparing against per-unit background expectations
+    gives the LLR signal.
+    """
     matrix = np.zeros((len(units), n_bins), dtype=np.float32)
     for i, u in enumerate(units):
         spk = np.asarray(spike_times[u])
@@ -91,7 +212,32 @@ def _compute_multiscale_ff(
     bin_size: float,
     ff_scale_multipliers: tuple,
 ) -> np.ndarray:
-    """Spatial Fano Factor at multiple scales. Returns (n_bins, n_scales)."""
+    """Spatial Fano Factor at multiple temporal scales. Returns (n_bins, n_scales).
+
+    Fano Factor (FF) at a given temporal scale Δt:
+        FF(t) = Var( spike_counts_per_unit in [t, t+Δt) ) /
+                Mean( spike_counts_per_unit in [t, t+Δt) )
+
+    For independent Poisson firing:  FF ≈ 1  (variance equals mean).
+    During synchronised bursting:    FF >> 1  (units fire together, so the
+        variance across units is much larger than the mean count).
+    During silence:                  FF → 0  (all units have 0 counts).
+
+    Why multiple scales?
+    A short burstlet (< 100 ms) shows elevated FF at fine scales (5–20 ms)
+    but is too brief to leave a strong signal at coarse scales. A long network
+    burst shows elevated FF at all scales. By providing 4 scales, Fisher's
+    discriminant can learn which temporal resolution is most informative for
+    each recording, rather than committing to a single scale up front.
+
+    Implementation:
+    Rather than re-histogramming from raw spike times at each scale, we reuse
+    the fine-resolution spike_matrix by summing columns that fall within each
+    coarse bin. This is equivalent to re-binning but avoids re-reading spike
+    times. The coarse FF value is then broadcast back to all fine bins within
+    that coarse window, and lightly smoothed (sigma=1.5 bins) to reduce
+    single-bin artefacts.
+    """
     n_bins = len(t_centers)
     n_scales = len(ff_scale_multipliers)
     ff_signals = np.zeros((n_bins, n_scales))
@@ -99,6 +245,7 @@ def _compute_multiscale_ff(
     rec_end = float(bins[-1])
 
     for k, mult in enumerate(ff_scale_multipliers):
+        # Clamp scale to [5 ms, 100 ms] regardless of the adaptive bin size
         scale_dt = float(np.clip(mult * bin_size, 0.005, 0.1))
 
         coarse_bins = np.arange(rec_start, rec_end + scale_dt, scale_dt)
@@ -106,6 +253,7 @@ def _compute_multiscale_ff(
         if n_coarse < 1:
             continue
 
+        # Map each fine-resolution bin center to its coarse bin index
         coarse_idx = np.clip(
             np.searchsorted(coarse_bins, t_centers, side="right") - 1,
             0, n_coarse - 1,
@@ -116,11 +264,14 @@ def _compute_multiscale_ff(
             fine_mask = coarse_idx == j
             if not fine_mask.any():
                 continue
-            unit_counts = spike_matrix[:, fine_mask].sum(axis=1)
+            # Sum spike counts within this coarse window for each unit
+            unit_counts = spike_matrix[:, fine_mask].sum(axis=1)  # shape (n_units,)
             mean_c = float(unit_counts.mean())
             if mean_c > 1e-9:
+                # Var/Mean across the population at this time window
                 ff_coarse[j] = float(unit_counts.var()) / mean_c
 
+        # Broadcast coarse FF back to fine resolution, then lightly smooth
         ff_fine = ff_coarse[coarse_idx]
         ff_signals[:, k] = gaussian_filter1d(ff_fine, sigma=1.5)
 
@@ -133,22 +284,57 @@ def _compute_llr_signal(
     bin_size: float,
     sigma: float,
 ) -> np.ndarray:
-    """Signed per-unit Poisson LLR, averaged across units, then smoothed."""
-    expected = (lambda_bg_per_unit * bin_size)[:, np.newaxis]  # (n_units, 1)
-    n_u = spike_matrix
+    """Signed per-unit Poisson log-likelihood ratio, averaged and smoothed.
 
+    For each bin t and each unit u, the Poisson LLR tests whether the observed
+    spike count n_u(t) is consistent with the unit's background firing rate:
+
+        H0: spikes ~ Poisson( λ_u_bg × bin_size )
+        H1: spikes ~ Poisson( λ_u_obs )
+
+    The score-test form of the LLR is:
+        LLR_u(t) = 2 × [ n_u(t) × ln( n_u(t) / expected_u ) − (n_u(t) − expected_u) ]
+    where expected_u = λ_u_bg × bin_size.
+
+    This is always non-negative (it's a KL divergence × 2). We apply a sign:
+        +  when n_u(t) > expected_u  (burst: firing above background)
+        −  when n_u(t) < expected_u  (suppression: firing below background)
+
+    Then average across units. The resulting signal is:
+        ≫ 0  during bursts  (most units fire far above their individual baselines)
+        ≈ 0  during background  (observed ≈ expected by construction of λ_bg)
+        < 0  rare, only when a unit is transiently suppressed below its baseline
+
+    The signal is smoothed with sigma_slow (≈ 5 × biological ISI in bins) to
+    integrate evidence over a biologically meaningful window rather than reacting
+    to single-bin coincidences in sparse units.
+
+    Why per-unit λ_bg?
+    In heterogeneous MEA networks, some units fire at 0.1 Hz and others at 5 Hz.
+    A shared global background rate would make the fast unit look "always bursting"
+    and the slow unit look "never bursting". Per-unit rates give each unit equal
+    sensitivity to detect its own rate elevation during a burst.
+    """
+    # expected_u shape: (n_units, 1) — broadcasts across bins
+    expected = (lambda_bg_per_unit * bin_size)[:, np.newaxis]
+
+    # Numerically safe substitutes for log(0) and 0/0 cases
     safe_expected = np.where(expected > 1e-12, expected, 1.0)
-    safe_n = np.where(n_u > 0, n_u, 1.0)
+    safe_n = np.where(spike_matrix > 0, spike_matrix, 1.0)
 
     with np.errstate(divide="ignore", invalid="ignore"):
+        # Full two-sided LLR (always ≥ 0)
         llr_u = np.where(
-            (n_u > 0) & (expected > 1e-12),
-            2.0 * (n_u * np.log(safe_n / safe_expected) - (n_u - expected)),
-            np.where(expected > 1e-12, 2.0 * (0.0 - (0.0 - expected)), 0.0),
+            (spike_matrix > 0) & (expected > 1e-12),
+            2.0 * (spike_matrix * np.log(safe_n / safe_expected) - (spike_matrix - expected)),
+            # When n=0: LLR = 2×(0 − (0 − expected)) = 2×expected > 0, but
+            # sign will be −1 since 0 < expected, so contribution is −2×expected ≈ 0
+            np.where(expected > 1e-12, 2.0 * expected, 0.0),
         )
-        # Sign: + when elevated above background, - when suppressed
-        signed = np.sign(n_u - expected) * np.abs(llr_u)
+        # Apply sign so the signal is directional: + = elevated, − = suppressed
+        signed = np.sign(spike_matrix - expected) * np.abs(llr_u)
 
+    # Average across units, then smooth to integrate evidence over ~5 ISI window
     llr = np.mean(signed, axis=0)
     return gaussian_filter1d(llr, sigma=sigma)
 
@@ -159,7 +345,23 @@ def _compute_burstiness(
     bins: np.ndarray,
     n_bins: int,
 ) -> np.ndarray:
-    """Per-bin mean instantaneous firing rate (1/ISI), smoothed."""
+    """Per-bin mean instantaneous firing rate (reciprocal of ISI), smoothed.
+
+    For each consecutive spike pair (t_i, t_{i+1}) of a unit, the instantaneous
+    rate 1/ISI is assigned to the bin containing the ISI midpoint. Bins that
+    fall in a burst have many short ISIs → high instantaneous rate. Background
+    bins have only occasional long ISIs → low instantaneous rate.
+
+    This differs from the population firing rate (PFR) in that it measures
+    *within-unit* temporal tightness rather than total spike count. A single
+    very fast unit in a bin elevates burstiness without elevating PFR much,
+    while a burst where all units fire once each elevates PFR without affecting
+    per-unit ISIs. Together, PFR and burstiness cover complementary aspects
+    of burst structure.
+
+    Light Gaussian smoothing (sigma=2 bins) fills gaps where a unit had no ISI
+    midpoint in a given bin despite active firing in adjacent bins.
+    """
     raw = np.zeros(n_bins)
     cnt = np.zeros(n_bins)
 
@@ -169,27 +371,41 @@ def _compute_burstiness(
             continue
         isi = np.diff(spk)
         midpoints = (spk[:-1] + spk[1:]) / 2
+        # Place each ISI's reciprocal at its midpoint bin
         idx = np.clip(np.searchsorted(bins[1:], midpoints), 0, n_bins - 1)
-        inst = 1.0 / np.maximum(isi, 1e-6)
+        inst = 1.0 / np.maximum(isi, 1e-6)  # cap at 1 MHz to avoid inf
         np.add.at(raw, idx, inst)
         np.add.at(cnt, idx, 1)
 
+    # Divide only where at least one ISI midpoint landed
     result = np.divide(raw, cnt, out=np.zeros_like(raw), where=cnt > 0)
     return gaussian_filter1d(result, sigma=2.0)
 
 
 # ---------------------------------------------------------------------------
-# Helpers — Fisher's discriminant
+# Helpers — Fisher's linear discriminant
 # ---------------------------------------------------------------------------
 
 def _znorm(
     X: np.ndarray,
     bg_mask: np.ndarray,
 ) -> np.ndarray:
-    """Z-score X using background (bg_mask=True) bin statistics."""
+    """Z-score feature matrix using statistics from background bins only.
+
+    Features have very different units and scales (Hz for PFR, dimensionless
+    [0,1] for participation, dimensionless ≥ 0 for FF, LLR in nats²). After
+    Z-scoring relative to the background distribution, all features are on the
+    same scale (standard deviations above/below background mean) so Fisher's
+    discriminant can meaningfully compare their contributions.
+
+    Using background-only statistics (not global statistics) ensures the
+    Z-score reflects "how unusual is this bin compared to quiet periods" rather
+    than "how unusual is this bin compared to the mix of burst and non-burst".
+    """
     bg = X[bg_mask]
     mu = bg.mean(axis=0)
     std = bg.std(axis=0)
+    # Replace near-zero std with 1.0 to avoid division by zero on constant features
     std = np.where(std < 1e-6, 1.0, std)
     return (X - mu) / std
 
@@ -199,10 +415,39 @@ def _fit_fisher(
     labels: np.ndarray,
     alpha_frac: float,
 ) -> np.ndarray | None:
-    """Fisher LDA direction. Returns unit-norm weight vector or None if degenerate."""
+    """Compute Fisher's linear discriminant direction.
+
+    Fisher's LDA finds the unit-norm weight vector w that maximises the ratio
+    of between-class variance to within-class variance when projecting X onto w:
+
+        w* = S_W^{-1} (μ_burst − μ_background)
+
+    where S_W = S_burst + S_background is the total within-class scatter matrix.
+
+    Geometric intuition: w points in the direction that is simultaneously
+    (a) aligned with the vector from the background centroid to the burst
+        centroid (separating the class means), and
+    (b) perpendicular to the directions of high within-class spread (ignoring
+        variance shared by both classes).
+
+    Iteration dynamics: each iteration re-labels bins based on the previous
+    iteration's composite signal, re-estimates background rates, and re-fits w.
+    As the burst/background partition improves, the class centroids become more
+    extreme (bursts look more bursty, background looks flatter) and S_W shrinks,
+    so the discriminant becomes sharper. This is analogous to EM for a Gaussian
+    mixture model.
+
+    Ridge regularisation (alpha × I) is added to S_W before solving to handle:
+    - near-collinear features (e.g., FF at adjacent scales are correlated)
+    - small sample sizes in one class (very sparse recordings)
+    alpha = alpha_frac × trace(S_W) / n_features scales with the data magnitude.
+
+    Returns None when either class has < 3 samples or the solve fails, in which
+    case the caller keeps the previous iteration's weight vector.
+    """
     n_features = X_norm.shape[1]
-    idx1 = labels == 1
-    idx0 = labels == 0
+    idx1 = labels == 1   # burst bins
+    idx0 = labels == 0   # background bins
 
     if idx1.sum() < 3 or idx0.sum() < 3:
         return None
@@ -210,11 +455,15 @@ def _fit_fisher(
     X1, X0 = X_norm[idx1], X_norm[idx0]
     mu1, mu0 = X1.mean(axis=0), X0.mean(axis=0)
 
+    # Within-class scatter: sum of deviations from each class mean
     S_W = (X1 - mu1).T @ (X1 - mu1) + (X0 - mu0).T @ (X0 - mu0)
+
+    # Ridge regularisation scaled to the matrix's own magnitude
     alpha = alpha_frac * float(np.trace(S_W)) / n_features
     S_W_reg = S_W + alpha * np.eye(n_features)
 
     try:
+        # Solve S_W_reg @ w = (μ1 − μ0) rather than explicitly inverting S_W
         w = np.linalg.solve(S_W_reg, mu1 - mu0)
     except np.linalg.LinAlgError:
         return None
@@ -228,7 +477,12 @@ def _fit_fisher(
 # ---------------------------------------------------------------------------
 
 def _mask_to_candidates(mask: np.ndarray, bins: np.ndarray) -> list[dict]:
-    """Boolean mask → list of {start, end, start_idx, end_idx}."""
+    """Convert a boolean bin mask to a list of contiguous above-threshold regions.
+
+    Each candidate dict stores both the continuous time boundaries (start/end
+    in seconds, using bin edges) and the array indices (start_idx/end_idx) so
+    downstream steps can slice the feature matrix without recomputing indices.
+    """
     candidates = []
     n = len(mask)
     in_b = False
@@ -248,6 +502,11 @@ def _mask_to_candidates(mask: np.ndarray, bins: np.ndarray) -> list[dict]:
 
 
 def _candidates_to_mask(candidates: list[dict], t_centers: np.ndarray) -> np.ndarray:
+    """Reconstruct a boolean bin mask from a candidate list.
+
+    Prefers stored index fields (O(1) per candidate) and falls back to a
+    time-based search when indices are absent (e.g. after external construction).
+    """
     mask = np.zeros(len(t_centers), dtype=bool)
     for c in candidates:
         s, e = c.get("start_idx"), c.get("end_idx")
@@ -266,6 +525,24 @@ def _trim_candidate(
     bins: np.ndarray,
     n_bins: int,
 ) -> dict | None:
+    """Trim a candidate's edges to the region where composite exceeds the extent threshold.
+
+    The extent threshold is the tighter of:
+      - the global detection threshold (ensures the boundary is in burst regime)
+      - extent_frac × peak_composite (proportional to the burst's own peak,
+        so weak bursts don't get artificially wide boundaries)
+
+    The walk proceeds from each edge inward toward the peak, stopping as soon
+    as composite crosses the extent threshold. The peak itself always satisfies
+    composite >= threshold (it was detected above threshold), so the walk
+    always terminates before reaching the peak. If the walk exhausts the
+    candidate without finding a valid boundary, the candidate is discarded.
+
+    This step is crucial for accurate duration estimation: the permissive
+    initial detection produces overly wide candidates that include low-composite
+    flanking bins. Trimming removes those flanks each iteration, so by
+    convergence the boundaries tightly enclose the burst.
+    """
     s, e = c["start_idx"], c["end_idx"]
     if s > e:
         return None
@@ -273,10 +550,13 @@ def _trim_candidate(
     peak_rel = int(np.argmax(composite[s:e + 1]))
     peak_idx = s + peak_rel
     peak_val = composite[peak_idx]
+    # Tighter of global threshold and fraction of peak
     ext_thr = max(threshold, extent_frac * peak_val)
 
+    # Walk left edge rightward until composite is strong enough
     while s < peak_idx and composite[s] < ext_thr:
         s += 1
+    # Walk right edge leftward until composite is strong enough
     while e > peak_idx and composite[e] < ext_thr:
         e -= 1
 
@@ -292,6 +572,12 @@ def _valley_min(
     composite: np.ndarray,
     t_centers: np.ndarray,
 ) -> float | None:
+    """Minimum composite value in the valley between two adjacent candidates.
+
+    Returns None when there are no bins between the two candidates (they are
+    immediately adjacent), in which case callers use the gap duration as a
+    proxy.
+    """
     mask = (t_centers >= prev["end"]) & (t_centers <= nxt["start"])
     if not mask.any():
         return None
@@ -308,7 +594,19 @@ def _iter_merge(
     threshold: float,
     floor_frac: float,
 ) -> list[dict]:
-    """Merge candidates during iteration with relaxed valley condition."""
+    """Merge adjacent candidates during iteration using a relaxed valley condition.
+
+    Two candidates are merged when both conditions hold:
+      1. Their temporal gap is ≤ gap_s  (burstlet_merge_gap_s = 3 × ISI)
+      2. The valley between them stays above floor_frac × threshold
+         (default 0.70 × threshold = "still 70 % as intense as burst regime")
+
+    The relaxed floor (70 % rather than 100 %) allows the algorithm to merge
+    candidates that are clearly part of the same burst even if the composite
+    signal dips briefly in the valley, which is common for fast oscillations
+    within a burst. The final hierarchy merge (Phase 4) applies a stricter
+    criterion on the converged candidates.
+    """
     if not candidates:
         return []
     candidates = sorted(candidates, key=lambda x: x["start"])
@@ -317,8 +615,10 @@ def _iter_merge(
     for nxt in candidates[1:]:
         gap = nxt["start"] - cur["end"]
         vm = _valley_min(cur, nxt, composite, t_centers)
+        # If no bins exist in the valley, use gap width as a proxy
         valley_ok = (gap <= bin_size) if vm is None else (vm >= floor_frac * threshold)
         if gap <= gap_s and valley_ok:
+            # Extend current candidate to absorb nxt
             cur = {"start": cur["start"], "end": nxt["end"],
                    "start_idx": cur["start_idx"], "end_idx": nxt["end_idx"]}
         else:
@@ -329,7 +629,7 @@ def _iter_merge(
 
 
 # ---------------------------------------------------------------------------
-# Helpers — hierarchy finalization
+# Helpers — hierarchy finalization (Phase 4)
 # ---------------------------------------------------------------------------
 
 def _finalize_event(
@@ -349,11 +649,24 @@ def _finalize_event(
     llr_signal: np.ndarray,
     bin_size: float,
 ) -> dict:
+    """Aggregate sub-events (evs) into a single merged event spanning [s, e).
+
+    The participation and rate metrics (peak_synchrony, synchrony_energy,
+    burst_peak) are computed over the full merged window [s, e) rather than
+    summarised from sub-events, so they reflect the true extent of the merged
+    event. The peak_time is inherited from the sub-event with the highest
+    participation peak, so it always points at the moment of maximum synchrony.
+
+    The four quality columns (llr_aggregate, composite_peak, composite_mean,
+    ff_peak) are also measured over [s, e) so they reflect the merged event's
+    statistical footprint in the converged feature space.
+    """
     in_ev = (t_centers >= s) & (t_centers < e)
     participating = sum(
         1 for u in units if np.any((spike_times[u] >= s) & (spike_times[u] < e))
     )
     total_spikes = int(spike_counts_total[in_ev].sum())
+    # Peak time: from the sub-event with the highest participation peak
     best = max(evs, key=lambda x: x["peak_synchrony"])
 
     comp_vals = composite[in_ev]
@@ -369,6 +682,7 @@ def _finalize_event(
         "burst_peak": float(pfr[in_ev].max()) if in_ev.any() else 0.0,
         "fragment_count": sum(ev.get("fragment_count", 1) for ev in evs),
         "n_sub_events": len(evs),
+        # Quality columns unique to this detector
         "llr_aggregate": float(llr_signal[in_ev].mean()) if in_ev.any() else 0.0,
         "composite_peak": float(comp_vals.max()) if comp_vals.size > 0 else 0.0,
         "composite_mean": float(comp_vals.mean()) if comp_vals.size > 0 else 0.0,
@@ -382,7 +696,14 @@ def _merge_strict_hier(
     threshold: float,
     **ctx,
 ) -> list[dict]:
-    """Merge burstlets → network bursts: valley must stay above threshold."""
+    """Merge burstlets → network bursts using the strict valley condition.
+
+    Two burstlets are merged into one network burst only if the composite
+    signal in the valley between them stays at or above the detection threshold
+    (i.e. the valley itself is still "in burst regime"). This is the most
+    conservative merge criterion and is appropriate for the first hierarchy
+    level where we want to join only tightly coupled burstlets.
+    """
     if not events:
         return []
     composite, t_centers, bin_size = ctx["composite"], ctx["t_centers"], ctx["bin_size"]
@@ -391,6 +712,7 @@ def _merge_strict_hier(
     s, e = events[0]["start"], events[0]["end"]
     for nxt in events[1:]:
         vm = _valley_min(curr_evs[-1], nxt, composite, t_centers)
+        # Strict: valley must stay above the full detection threshold
         valley_ok = (nxt["start"] - e <= bin_size) if vm is None else (vm >= threshold)
         if (nxt["start"] - e) <= gap and valley_ok:
             curr_evs.append(nxt)
@@ -409,7 +731,17 @@ def _merge_clustered_hier(
     threshold: float,
     **ctx,
 ) -> list[dict]:
-    """Merge network bursts → superbursts: valley between baseline and threshold."""
+    """Merge network bursts → superbursts using the relaxed valley condition.
+
+    Two network bursts are merged into a superburst when the valley between
+    them dips below the detection threshold but stays above the background
+    baseline — i.e., the network is not fully silent between them. This captures
+    the "burst cluster" phenomenon where a sequence of network bursts are driven
+    by a slow oscillation, separated by partial quieting rather than true silence.
+
+    Requires ≥ 2 sub-events (network bursts) per superburst, so isolated
+    network bursts are never promoted to superbursts.
+    """
     if not events:
         return []
     composite, t_centers, bin_size = ctx["composite"], ctx["t_centers"], ctx["bin_size"]
@@ -418,6 +750,7 @@ def _merge_clustered_hier(
     s, e = events[0]["start"], events[0]["end"]
     for nxt in events[1:]:
         vm = _valley_min(curr_evs[-1], nxt, composite, t_centers)
+        # Relaxed: valley must be above baseline but is allowed below threshold
         valley_ok = (nxt["start"] - e <= bin_size) if vm is None else (baseline < vm < threshold)
         if (nxt["start"] - e) <= gap and valley_ok:
             curr_evs.append(nxt)
@@ -437,11 +770,21 @@ def compute_iterative_bursts(
     spike_times: dict[str, np.ndarray],
     config: IterativeBurstConfig | None = None,
 ) -> "BurstResults":
-    """Iterative contrast-maximizing network burst detector.
+    """Detect burstlets, network bursts, and superbursts via iterative LDA.
 
-    Learns a Fisher LDA composite signal over 8 features (PFR, participation,
-    multi-scale Fano Factor, per-unit Poisson LLR, burstiness) and iterates
-    until the burst/non-burst partition converges.
+    Args:
+        spike_times: Mapping of unit_id → spike time array (seconds).
+        config: Detection parameters. Uses IterativeBurstConfig defaults if None.
+
+    Returns:
+        BurstResults with per-level DataFrames (burstlets / network_bursts /
+        superbursts), aggregate metrics, diagnostics, and plot_data signals.
+        Each event DataFrame carries four additional quality columns not present
+        in the standard detector: llr_aggregate, composite_peak, composite_mean,
+        ff_peak.
+
+    Raises:
+        IterativeBurstError: When spike_times is empty or contains no spikes.
     """
     from .burst_detector import BurstResults
 
@@ -461,7 +804,19 @@ def compute_iterative_bursts(
     total_dur = rec_end - rec_start
 
     # -----------------------------------------------------------------------
-    # Phase 1a: Adaptive binning
+    # Phase 1a: Adaptive bin size from the population median log-ISI
+    #
+    # The median ISI (in log space, to be robust to outliers) sets the bin size
+    # so that each bin is roughly one "typical spike interval" wide.  Clamped
+    # to [10, 30] ms: finer bins produce too many empty bins in sparse data;
+    # coarser bins blur the temporal structure of fast bursts.
+    #
+    # Downstream time constants are also derived from biological_isi_s:
+    #   sigma_fast  ≈ 1 bin   — narrow smoothing that preserves burst peaks
+    #   sigma_slow  ≈ 5 ISIs  — broad smoothing for rate and LLR integration
+    #   burstlet_merge_gap_s = 3 ISIs  — gap within which two burstlets
+    #       are still considered a single event
+    #   network_merge_gap_s  = 10 ISIs — gap for the superburst hierarchy
     # -----------------------------------------------------------------------
     all_log_isis: list[float] = []
     for u in units:
@@ -481,7 +836,7 @@ def compute_iterative_bursts(
     n_bins = len(t_centers)
     n_units = len(units)
 
-    isi_bins = biological_isi_s / bin_size
+    isi_bins = biological_isi_s / bin_size  # ISI length in bin units
     sigma_fast = float(np.clip(isi_bins, 1, 2))
     sigma_slow = float(np.clip(5.0 * isi_bins, 3, 8))
 
@@ -489,15 +844,32 @@ def compute_iterative_bursts(
     network_merge_gap_s = max(10.0 * biological_isi_s, config.network_merge_gap_min_s)
 
     # -----------------------------------------------------------------------
-    # Phase 1b: Population signals + initial participation-based candidates
+    # Phase 1b: Participation signal and permissive initial candidates
+    #
+    # ws_sharp = fast-smoothed fraction of active units per bin. This is the
+    # same signal used by the original parameter-free detector. It serves two
+    # roles here:
+    #   (1) Seeding: an intentionally low threshold (0.30 × MAD instead of
+    #       0.75 × MAD) gives many false-positive candidates that the iteration
+    #       will eliminate. Starting permissive is safer than starting strict
+    #       — a missed burst can never be recovered, but a false positive will
+    #       be trimmed away.
+    #   (2) Reporting: peak_synchrony and peak_time in the output DataFrames
+    #       are always derived from ws_sharp (not composite) for compatibility
+    #       with viewers that interpret these as participation fractions.
+    #
+    # Fallback to percentile thresholding when spread_mad < mad_fallback_threshold:
+    # For very sparse recordings the participation signal is nearly all zeros with
+    # rare spikes. MAD is also near zero, making any MAD multiplier meaningless.
+    # Taking the top 30 % of bins by participation is always well-defined.
     # -----------------------------------------------------------------------
     spike_matrix = _compute_spike_matrix(spike_times, units, bins, n_bins)
     spike_counts_total = spike_matrix.sum(axis=0)
     active_unit_counts = (spike_matrix > 0).sum(axis=0).astype(float)
 
     participation_raw = active_unit_counts / max(1, n_units)
-    pfr = spike_counts_total / bin_size
-    rate_per_unit = pfr / max(1, n_units)
+    pfr = spike_counts_total / bin_size           # population firing rate (Hz)
+    rate_per_unit = pfr / max(1, n_units)         # per-unit average rate (Hz)
 
     ws_sharp = gaussian_filter1d(participation_raw, sigma_fast)
     ws_smooth = gaussian_filter1d(rate_per_unit, sigma_slow)
@@ -509,13 +881,26 @@ def compute_iterative_bursts(
         init_threshold = baseline_init + config.permissive_mad_scale * spread_mad_init
         init_method = "mad"
     else:
+        # Sparse/uniform recording: fall back to top-percentile floor
         init_threshold = float(np.percentile(ws_sharp, config.permissive_percentile))
         init_method = "percentile"
 
+    # Seed candidates: every contiguous run of bins above init_threshold
     candidates = _mask_to_candidates(ws_sharp >= init_threshold, bins)
 
     # -----------------------------------------------------------------------
-    # Phase 2: Static feature signals (FF, burstiness — don't depend on λ_bg)
+    # Phase 2: Static feature signals
+    #
+    # FF signals and burstiness are computed once outside the loop because they
+    # do not depend on the background rate estimate (λ_bg). Only the LLR column
+    # is recomputed inside the loop as λ_bg updates.
+    #
+    # Feature matrix layout (columns):
+    #   [0]      PFR              — raw population firing rate (Hz)
+    #   [1]      P                — participation fraction
+    #   [2..5]   FF_scale[0..3]   — spatial Fano Factor at 4 scales
+    #   [llr_idx] LLR             — signed per-unit Poisson log-LR (placeholder, updated per iter)
+    #   [-1]     burstiness       — mean instantaneous ISI reciprocal
     # -----------------------------------------------------------------------
     ff_signals = _compute_multiscale_ff(
         spike_matrix, bins, t_centers, bin_size, config.ff_scale_multipliers
@@ -528,24 +913,68 @@ def compute_iterative_bursts(
     burstiness = _compute_burstiness(spike_times, units, bins, n_bins)
 
     n_ff = len(config.ff_scale_multipliers)
-    n_features = 2 + n_ff + 2  # PFR, P, FF×n_ff, LLR, burstiness
-    llr_idx = 2 + n_ff          # index of LLR column in X
+    n_features = 2 + n_ff + 2   # PFR + P + FF×n_ff + LLR + burstiness
+    llr_idx = 2 + n_ff           # column index of LLR in X
 
-    # Placeholder X — LLR column updated each iteration
+    # Build feature matrix with placeholder zeros for the LLR column
     X = np.column_stack([pfr, participation_raw, ff_signals, np.zeros(n_bins), burstiness])
 
-    # Bootstrap Fisher weights (participation-heavy prior)
+    # Bootstrap weight vector for iteration 0 (before Fisher can be applied):
+    # participation-heavy prior (1.5) reflects domain knowledge that synchronous
+    # recruitment of units is the most reliable burst indicator.
     w_prior = np.array([1.0, 1.5] + [0.5] * n_ff + [1.0, 0.5])
     w_prior = w_prior[:n_features]
     if len(w_prior) < n_features:
         w_prior = np.concatenate([w_prior, np.full(n_features - len(w_prior), 0.5)])
     w = w_prior / float(np.linalg.norm(w_prior))
 
-    # Global fallback background rate (used when per-unit estimate is unreliable)
+    # Global fallback background rate: used when a unit has zero spikes in the
+    # background window (e.g. a unit that only fires during bursts)
     global_lambda_bg = float(pfr.mean()) / max(1, n_units)
 
     # -----------------------------------------------------------------------
     # Phase 3: Iterative refinement
+    #
+    # Each iteration follows these steps:
+    #
+    #   3a. Background estimation
+    #       Identify background bins (bins not in any current candidate).
+    #       Compute per-unit background firing rate λ_u_bg from those bins.
+    #       Fall back to global_lambda_bg for any unit with zero background spikes.
+    #
+    #   3b. LLR update
+    #       Recompute the LLR signal using the updated λ_bg.  Because background
+    #       bins change each iteration, the LLR signal "tightens" around true
+    #       burst periods as the partition improves.
+    #
+    #   3c. Z-normalisation
+    #       Z-score all features using background bin statistics so that each
+    #       feature contributes on a common scale (standard deviations above
+    #       background mean) to the Fisher discriminant.
+    #
+    #   3d. Fisher LDA (skipped on iteration 0, which uses w_prior)
+    #       Fit the LDA direction on the current burst/background labels.
+    #       The weight vector w that maximises between-class / within-class
+    #       variance is solved via w = S_W^{-1}(μ_burst − μ_background).
+    #       If Fisher returns None (degenerate case), keep the previous w.
+    #
+    #   3e. Composite signal and new threshold
+    #       composite(t) = X_norm[t] @ w   (scalar projection per bin)
+    #       Threshold derived from the median + MAD of composite in background
+    #       bins, mirroring the original detector's robust threshold.
+    #
+    #   3f. Boundary trimming
+    #       Walk each new candidate's edges inward until composite exceeds the
+    #       extent threshold.  This progressively tightens boundaries that were
+    #       loose in earlier iterations.
+    #
+    #   3g. Iteration-level merge
+    #       Join nearby trimmed candidates whose valley stays above 70 % of
+    #       threshold.  This is intentionally relaxed so the algorithm can
+    #       experiment with merged states; the final strict hierarchy merge in
+    #       Phase 4 will split any over-merged events.
+    #
+    #   Convergence: < convergence_eps fraction of bins changed label → stop.
     # -----------------------------------------------------------------------
     prev_mask = _candidates_to_mask(candidates, t_centers)
     composite = np.zeros(n_bins)
@@ -554,62 +983,73 @@ def compute_iterative_bursts(
     n_iterations = 0
     convergence_delta = 1.0
     lambda_bg_per_unit = np.full(n_units, global_lambda_bg)
+    llr_signal = np.zeros(n_bins)
 
     for iteration in range(config.max_iterations):
         n_iterations = iteration + 1
 
-        # 3a. Background estimation
+        # 3a. Background bins = all bins not covered by any candidate
         candidate_mask = _candidates_to_mask(candidates, t_centers)
         bg_mask = ~candidate_mask
         if bg_mask.sum() < 2:
+            # Edge case: candidates cover almost the whole recording.
+            # Fall back to treating all bins as background to avoid
+            # Z-scoring on an empty set.
             bg_mask = np.ones(n_bins, dtype=bool)
 
+        # Per-unit background rate from background bins only
         lambda_bg_per_unit = np.array([
             float(spike_matrix[i, bg_mask].sum() / (bg_mask.sum() * bin_size))
             for i in range(n_units)
         ])
+        # Replace units with zero background spikes with the global estimate
         lambda_bg_per_unit = np.where(
             lambda_bg_per_unit > 0, lambda_bg_per_unit, global_lambda_bg
         )
 
-        # 3b. Recompute LLR with updated background
+        # 3b. Recompute LLR with updated per-unit background rates
         llr_signal = _compute_llr_signal(spike_matrix, lambda_bg_per_unit, bin_size, sigma_slow)
-        X[:, llr_idx] = llr_signal
+        X[:, llr_idx] = llr_signal  # update LLR column in-place
 
-        # 3c. Z-normalize relative to background
+        # 3c. Z-score all features relative to background
         X_norm = _znorm(X, bg_mask)
 
-        # 3d. Learn Fisher weights (skip iteration 0 — use prior bootstrap)
+        # 3d. Learn Fisher weights from current burst/background partition
+        #     (skip iteration 0: use w_prior to bootstrap the first composite)
         if iteration > 0:
             w_new = _fit_fisher(X_norm, candidate_mask.astype(int), config.fisher_alpha_frac)
             if w_new is not None:
                 w = w_new
 
+        # Compute scalar composite signal: one number per bin
         composite = X_norm @ w
 
-        # 3e. Re-derive threshold from background distribution of composite
+        # 3e. Threshold composite using background distribution
         comp_bg = composite[bg_mask]
         composite_baseline = float(np.median(comp_bg))
         composite_mad = float(np.median(np.abs(comp_bg - composite_baseline)))
+        # max(..., 1e-6) prevents a zero-MAD threshold on constant composite
         composite_threshold = composite_baseline + config.composite_mad_scale * max(
             composite_mad, 1e-6
         )
 
+        # All above-threshold connected regions become new candidate seeds
         new_candidates_raw = _mask_to_candidates(composite >= composite_threshold, bins)
 
-        # 3f. Trim boundaries
+        # 3f. Trim each candidate's boundaries to where composite is strong enough
         trimmed: list[dict] = []
         for c in new_candidates_raw:
             tc = _trim_candidate(c, composite, composite_threshold, config.extent_frac, bins, n_bins)
             if tc is not None:
                 trimmed.append(tc)
 
-        # 3g. Merge nearby candidates (relaxed valley during iteration)
+        # 3g. Merge nearby trimmed candidates (relaxed valley during iteration)
         candidates = _iter_merge(
             trimmed, composite, t_centers, bin_size,
             burstlet_merge_gap_s, composite_threshold, config.merge_floor_frac,
         )
 
+        # Convergence: measure fraction of bins that changed burst/background label
         new_mask = _candidates_to_mask(candidates, t_centers)
         convergence_delta = float(np.sum(new_mask != prev_mask)) / n_bins
         prev_mask = new_mask
@@ -618,9 +1058,16 @@ def compute_iterative_bursts(
             break
 
     # -----------------------------------------------------------------------
-    # Phase 4: Build burstlet events from converged candidates
+    # Phase 4a: Materialise burstlet events from converged candidates
+    #
+    # Each converged candidate becomes one burstlet.  Per-event scalars are
+    # computed over the candidate's exact time window.  peak_synchrony and
+    # peak_time are derived from ws_sharp (participation signal) for
+    # compatibility with existing viewers; the four quality columns are from
+    # the composite/LLR/FF signals that drove the iterative detection.
     # -----------------------------------------------------------------------
-    ff1 = ff_signals[:, min(1, n_ff - 1)]  # 1× bin-scale FF for quality output
+    # Use the 1× bin-scale FF column as the representative FF for quality output
+    ff1 = ff_signals[:, min(1, n_ff - 1)]
 
     burstlets_raw: list[dict] = []
     for c in candidates:
@@ -638,6 +1085,7 @@ def compute_iterative_bursts(
         )
         total_spikes = int(spike_counts_total[in_ev].sum())
 
+        # Peak time: bin with highest participation within this burstlet
         peak_abs_idx = int(np.where(in_ev)[0][np.argmax(ws_sharp[in_ev])])
         peak_time = float(t_centers[peak_abs_idx])
         comp_vals = composite[in_ev]
@@ -653,6 +1101,7 @@ def compute_iterative_bursts(
             "total_spikes": total_spikes,
             "burst_peak": float(pfr[in_ev].max()),
             "fragment_count": 1,
+            # Quality columns: how strongly did the composite signal and LLR flag this event?
             "llr_aggregate": float(llr_signal[in_ev].mean()),
             "composite_peak": float(comp_vals.max()),
             "composite_mean": float(comp_vals.mean()),
@@ -660,7 +1109,17 @@ def compute_iterative_bursts(
         })
 
     # -----------------------------------------------------------------------
-    # Phase 4: Hierarchy merge (burstlets → network bursts → superbursts)
+    # Phase 4b: Two-tier hierarchy merge
+    #
+    # burstlets  →[merge_strict]→   network_bursts
+    #     Valley must stay ≥ composite_threshold (still "in burst regime").
+    #     Gap ≤ burstlet_merge_gap_s = 3 × biological_isi_s.
+    #
+    # network_bursts  →[merge_clustered]→  superbursts
+    #     Valley is allowed to dip below threshold but must stay above
+    #     composite_baseline (not fully silent between bursts).
+    #     Gap ≤ network_merge_gap_s = max(10 × ISI, 0.75 s).
+    #     Requires ≥ 2 network bursts per superburst.
     # -----------------------------------------------------------------------
     hier_ctx = dict(
         units=units, spike_times=spike_times, n_units=n_units,
@@ -678,7 +1137,7 @@ def compute_iterative_bursts(
     )
 
     # -----------------------------------------------------------------------
-    # Phase 5: Output
+    # Phase 5: Assemble and return BurstResults
     # -----------------------------------------------------------------------
     def _to_df(evs: list[dict]) -> pd.DataFrame:
         return pd.DataFrame(evs) if evs else pd.DataFrame()
@@ -690,30 +1149,37 @@ def compute_iterative_bursts(
     }
 
     diagnostics = {
+        # Adaptive binning
         "adaptive_bin_ms": adaptive_bin_ms,
         "biological_isi_s": biological_isi_s,
-        "n_iterations": n_iterations,
-        "convergence_delta": float(convergence_delta),
-        "feature_weights_final": w.tolist(),
-        "lambda_bg_per_unit": {u: float(lambda_bg_per_unit[i]) for i, u in enumerate(units)},
-        "composite_threshold": float(composite_threshold),
-        "composite_baseline": float(composite_baseline),
-        "ff_scales_ms": ff_scales_ms,
-        "init_method": init_method,
-        "burstlet_merge_gap_s": float(burstlet_merge_gap_s),
-        "network_merge_gap_s": float(network_merge_gap_s),
-        "n_units": n_units,
         "sigma_fast_bins": sigma_fast,
         "sigma_slow_bins": sigma_slow,
+        # Iteration summary
+        "n_iterations": n_iterations,
+        "convergence_delta": float(convergence_delta),
+        "init_method": init_method,           # "mad" or "percentile"
+        # Final composite calibration
+        "composite_threshold": float(composite_threshold),
+        "composite_baseline": float(composite_baseline),
+        # Learnt feature weights — inspect to understand which features drove detection
+        "feature_weights_final": w.tolist(),  # shape (n_features,)
+        # Per-unit background rates — useful for diagnosing heterogeneous networks
+        "lambda_bg_per_unit": {u: float(lambda_bg_per_unit[i]) for i, u in enumerate(units)},
+        # Merge geometry
+        "burstlet_merge_gap_s": float(burstlet_merge_gap_s),
+        "network_merge_gap_s": float(network_merge_gap_s),
+        # FF scales actually used
+        "ff_scales_ms": ff_scales_ms,
+        "n_units": n_units,
     }
 
     plot_data = {
         "t": t_centers,
-        "participation_signal": ws_sharp,
-        "rate_signal": ws_smooth,
-        "composite_signal": composite,
-        "ff_signal": ff1,
-        "llr_signal": llr_signal,
+        "participation_signal": ws_sharp,        # fast-smoothed participation (original signal)
+        "rate_signal": ws_smooth,                # slow-smoothed per-unit rate
+        "composite_signal": composite,           # Fisher LDA projection (main detection signal)
+        "ff_signal": ff1,                        # Fano Factor at 1× bin scale
+        "llr_signal": llr_signal,                # signed per-unit Poisson LLR
         "burst_peak_times": np.array([b["peak_time"] for b in network_bursts]),
         "burst_peak_values": np.array([b["peak_synchrony"] for b in network_bursts]),
         "participation_baseline": float(baseline_init),
