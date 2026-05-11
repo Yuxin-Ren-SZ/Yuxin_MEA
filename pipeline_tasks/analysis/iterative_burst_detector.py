@@ -877,6 +877,11 @@ def compute_iterative_bursts(
     ws_sharp = gaussian_filter1d(participation_raw, sigma_fast)
     ws_smooth = gaussian_filter1d(rate_per_unit, sigma_slow)
 
+    participation_floor_count = (
+        max(5, 0.15 * n_units) if n_units < 50 else max(10, 0.05 * n_units)
+    )
+    participation_floor = participation_floor_count / max(1, n_units)
+
     baseline_init = float(np.median(ws_sharp))
     spread_mad_init = float(np.median(np.abs(ws_sharp - baseline_init)))
 
@@ -887,6 +892,8 @@ def compute_iterative_bursts(
         # Sparse/uniform recording: fall back to top-percentile floor
         init_threshold = float(np.percentile(ws_sharp, config.permissive_percentile))
         init_method = "percentile"
+
+    init_threshold = max(participation_floor, init_threshold)
 
     # Seed candidates: every contiguous run of bins above init_threshold
     candidates = _mask_to_candidates(ws_sharp >= init_threshold, bins)
@@ -1016,7 +1023,7 @@ def compute_iterative_bursts(
         #     (skip iteration 0: use w_prior to bootstrap the first composite)
         if iteration > 0:
             w_new = _fit_fisher(X_norm, candidate_mask.astype(int), config.fisher_alpha_frac)
-            if w_new is not None:
+            if w_new is not None and w_new[1] >= 0 and w_new[llr_idx] >= 0:
                 w = w_new
 
         # Compute scalar composite signal: one number per bin
@@ -1085,6 +1092,10 @@ def compute_iterative_bursts(
 
         # Peak time: bin with highest participation within this burstlet
         peak_abs_idx = int(np.where(in_ev)[0][np.argmax(ws_sharp[in_ev])])
+        peak_synchrony = float(ws_sharp[peak_abs_idx])
+        if peak_synchrony < participation_floor:
+            continue
+
         peak_time = float(t_centers[peak_abs_idx])
         comp_vals = composite[in_ev]
 
@@ -1092,7 +1103,7 @@ def compute_iterative_bursts(
             "start": float(s_t),
             "end": float(e_t),
             "duration_s": float(duration_s),
-            "peak_synchrony": float(ws_sharp[in_ev].max()),
+            "peak_synchrony": peak_synchrony,
             "peak_time": peak_time,
             "synchrony_energy": float(ws_smooth[in_ev].sum() * bin_size),
             "participation": participating / n_units,
@@ -1159,6 +1170,7 @@ def compute_iterative_bursts(
         # Final composite calibration
         "composite_threshold": float(composite_threshold),
         "composite_baseline": float(composite_baseline),
+        "participation_floor": float(participation_floor),
         # Learnt feature weights — inspect to understand which features drove detection
         "feature_weights_final": w.tolist(),  # shape (n_features,)
         # Per-unit background rates — useful for diagnosing heterogeneous networks
