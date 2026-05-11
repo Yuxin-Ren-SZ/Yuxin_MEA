@@ -12,11 +12,13 @@ dependencies:
   - pre-commit
   - pytest
   - scipy
+  - scikit-learn
   - h5py
   - zarr
   - spikeinterface
   - pynvml
   - plotly
+  - matplotlib
   - pip:
     - --extra-index-url https://download.pytorch.org/whl/cu128
     - "torch==2.10.0+cu128"
