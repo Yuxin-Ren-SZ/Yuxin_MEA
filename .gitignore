@@ -91,6 +91,7 @@ temp/
 *.tiff
 *.svg
 *.webp
+*.html
 
 # macOS
 .DS_Store
