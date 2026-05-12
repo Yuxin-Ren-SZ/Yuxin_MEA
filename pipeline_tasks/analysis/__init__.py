@@ -12,6 +12,7 @@ from .burst_output import (
 from .iterative_burst_detector import (
     IterativeBurstConfig,
     IterativeBurstError,
+    IterativeBurstTrace,
     compute_iterative_bursts,
 )
 
@@ -25,6 +26,7 @@ __all__ = [
     "ParquetBurstOutputWriter",
     "IterativeBurstConfig",
     "IterativeBurstError",
+    "IterativeBurstTrace",
     "compute_iterative_bursts",
     "PlateViewerConfig",
     "WellRecord",

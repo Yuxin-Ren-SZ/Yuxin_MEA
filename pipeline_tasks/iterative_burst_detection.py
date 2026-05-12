@@ -40,6 +40,11 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
             "convergence_eps": 0.005,
             "fisher_alpha_frac": 1e-3,
             "ff_scale_multipliers": [0.5, 1.0, 2.0, 5.0],
+            "min_burst_modulation": 0.1,
+            "cluster_events": True,
+            "cluster_initial_components": 6,
+            "cluster_min_events": 5,
+            "cluster_min_separation": 1.5,
         }
 
     @staticmethod
@@ -123,6 +128,11 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
             convergence_eps=float(p["convergence_eps"]),
             fisher_alpha_frac=float(p["fisher_alpha_frac"]),
             ff_scale_multipliers=tuple(float(x) for x in p["ff_scale_multipliers"]),
+            min_burst_modulation=float(p["min_burst_modulation"]),
+            cluster_events=bool(p["cluster_events"]),
+            cluster_initial_components=int(p["cluster_initial_components"]),
+            cluster_min_events=int(p["cluster_min_events"]),
+            cluster_min_separation=float(p["cluster_min_separation"]),
         )
 
         results = compute_iterative_bursts(spike_times, config=config)
