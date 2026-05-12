@@ -178,6 +178,110 @@ class IterativeBurstConfig:
     """Maximum normalised Euclidean distance between component means for them
     to be merged in standardized feature space."""
 
+    # Inner partitioner — bin-level burst/background separation each iteration
+    inner_partitioner: str = "fisher_lda"
+    """Which method discriminates burst vs background bins each iteration.
+
+    ``"fisher_lda"`` (default) fits Fisher's linear discriminant on the
+    z-normed feature matrix.  Augmented with two safeguards added after the
+    diagnostic on ``cx138_44_02`` revealed that the LDA could flip sign on
+    heterogeneous (silence + tonic + burst) recordings:
+
+      - Silence excision: bins with zero active units are removed from both
+        the burst and background classes, and from the ``_znorm`` background
+        statistics, so the "background" class is not dragged toward zero by
+        long silent stretches.
+      - Sign pinning: a new ``w`` is rejected (the previous iteration's
+        weights are kept) when ``w_PFR``, ``w_P``, or ``w_LLR`` is negative.
+        These three features are biologically constrained to be elevated
+        during bursts; a negative weight is a signal the LDA found the
+        wrong contrast and would otherwise drag the next iteration in the
+        wrong direction.
+
+    ``"gmm_em"`` fits a BIC-adaptive Gaussian Mixture Model on the same
+    feature matrix and uses the burst-component posterior as the per-bin
+    score.  Best suited to recordings where the latent regime structure is
+    not well captured by a single discriminant direction.  Currently less
+    stable across iterations than the LDA path on simple 2-regime data
+    because GMM relabels its components each fit.
+    """
+
+    gmm_k_range: tuple[int, int] = (2, 3)
+    """Inclusive ``(k_min, k_max)`` component count range swept by the
+    BIC-based GMM-EM partitioner each iteration.  Capped at 3 by default
+    because the natural latent structure of MEA recordings is
+    silence / tonic firing / true burst — allowing more components causes
+    the burst regime itself to split into ramp/peak/tail subclusters and
+    destabilises the burst-component selection across iterations."""
+
+    gmm_bic_margin: float = 5.0
+    """A new ``k*`` must beat the previous iteration's ``k*`` BIC by this
+    margin before the chosen component count is allowed to change.  Suppresses
+    k-flapping when several values of k fit the data nearly equally well."""
+
+    gmm_em_n_init: int = 5
+    """``GaussianMixture(n_init=...)`` — number of random restarts per fit."""
+
+    gmm_em_reg_covar: float = 1e-4
+    """``GaussianMixture(reg_covar=...)``.  Slightly above the sklearn default
+    because the z-normed feature matrix contains near-collinear FF columns
+    that can produce singular covariance estimates."""
+
+    gmm_burst_score_weights: tuple[float, ...] = (
+        0.20, 0.25, 0.05, 0.10, 0.10, 0.05, 0.20, 0.05,
+    )
+    """Burst-component scoring prior aligned to the bin feature order
+    ``[PFR, P, FF0, FF1, FF2, FF3, LLR, burst]``.  After the GMM is fit and
+    near-duplicate components are merged, each merged group's centroid is
+    scored by ``weights @ centroid`` (centroid is in standardized space).
+    The highest-scoring group is designated as the burst cluster, so the
+    sign pattern of this prior pins burst semantics (high P, high LLR, high
+    PFR, high burstiness) regardless of how the GMM labels its components."""
+
+    gmm_posterior_threshold: float | None = 0.5
+    """Candidate threshold for the GMM-EM posterior.  Because the posterior is
+    naturally bounded in ``[0, 1]`` and tends to be near-binary at convergence,
+    a fixed cut at ``0.5`` is the natural choice (every bin where the burst
+    component is more likely than the rest combined).  Set to ``None`` to fall
+    back to the MAD-based threshold used by the Fisher path
+    (``median(composite[bg]) + composite_mad_scale * MAD(composite[bg])``)."""
+
+    # Fisher LDA stability safeguards (only used when inner_partitioner == "fisher_lda")
+    lda_exclude_silence: bool = True
+    """Exclude truly silent bins (``active_unit_count == 0``) from both the
+    burst and background classes inside ``_fit_fisher``, and from the
+    background statistics used by ``_znorm``.  Prevents heterogeneous
+    recordings (silence + tonic + burst) from collapsing the LDA onto the
+    silence-vs-everything contrast — the failure mode observed on
+    ``cx138_44_02`` where ``w_PFR`` converged to ``-0.81``."""
+
+    lda_sign_pinned_feature_names: tuple[str, ...] = ("PFR", "P", "LLR")
+    """Feature names whose Fisher weight must be non-negative for the new
+    direction to be accepted.  When any pinned weight is negative the LDA
+    step is rejected and the previous iteration's ``w`` is kept (as for
+    other degenerate solves).  These features are biologically constrained
+    to be elevated during bursts; a negative weight is a sign-flip
+    indicating the LDA found the wrong contrast."""
+
+    gmm_component_merge_distance: float = 0.5
+    """Standardized-Euclidean distance below which sibling GMM components are
+    collapsed into a single group before centroid scoring.  Prevents
+    degenerate EM solutions (two near-identical components for the same
+    regime) from splitting the burst posterior across two columns."""
+
+    gmm_burst_top_fraction: float = 1.0
+    """Selects which merged groups contribute to the burst posterior.  Keeps
+    every group whose centroid score is at least
+    ``gmm_burst_top_fraction × top_score``.
+
+    ``1.0`` (default) → top group only.  Use a smaller value (e.g. ``0.5``)
+    when you want a multi-component burst regime (ramp + peak + plateau) to
+    be unioned together rather than collapsing onto a single component.  In
+    practice the default of 1.0 combined with ``gmm_k_range = (2, 3)`` is
+    the most stable across iterations — the GMM's three clusters already
+    correspond to silence / tonic / burst, and the top group is
+    unambiguously the burst one."""
+
 
 @dataclass
 class IterativeBurstTrace:
@@ -524,6 +628,160 @@ def _fit_fisher(
 
     norm = float(np.linalg.norm(w))
     return w / norm if norm > 1e-12 else None
+
+
+def _fit_gmm_em(
+    X_norm: np.ndarray,
+    prev_k: int | None,
+    config: "IterativeBurstConfig",
+    prev_burst_centroid: np.ndarray | None = None,
+) -> dict | None:
+    """Fit a multi-component GMM and return the burst-component posterior.
+
+    Replacement for ``_fit_fisher`` when ``config.inner_partitioner == "gmm_em"``.
+    Sweeps ``k`` over ``config.gmm_k_range`` (inclusive), picks ``k*`` by lowest
+    BIC (with ``gmm_bic_margin`` hysteresis against ``prev_k``), merges
+    near-duplicate components, and identifies the burst cluster as the merged
+    group whose centroid scores highest under ``gmm_burst_score_weights``.
+
+    Returns a dict with keys:
+        burst_posterior      : (n_bins,) float — Σ resp. over burst group members
+        burst_centroid       : (n_features,) — burst group's standardized centroid
+        k_chosen             : int — number of components actually fit
+        bic_by_k             : dict[int, float]
+        component_means      : (k, n_features) — raw GMM component means
+        merged_groups        : list[dict] — output of _merge_component_groups
+        group_scores         : list[float] — score per merged group
+        burst_group_members  : list[int] — GMM component indices in the burst group
+
+    Returns ``None`` on degenerate fits (too few samples, sklearn missing, or
+    all merged groups score ≤ 0).  The caller keeps the previous iteration's
+    posterior in that case (parallel to ``_fit_fisher`` returning ``None``).
+    """
+    n_bins, n_features = X_norm.shape
+    k_min, k_max = config.gmm_k_range
+    k_max = min(int(k_max), max(2, n_bins // 10))  # need ≥ ~10 bins per component
+    k_min = max(2, int(k_min))
+    if k_max < k_min:
+        return None
+
+    try:
+        from sklearn.mixture import GaussianMixture
+    except ImportError:
+        return None
+
+    weights_arr = np.asarray(config.gmm_burst_score_weights, dtype=float)
+    if weights_arr.size < n_features:
+        weights_arr = np.concatenate([weights_arr, np.zeros(n_features - weights_arr.size)])
+    else:
+        weights_arr = weights_arr[:n_features]
+
+    bic_by_k: dict[int, float] = {}
+    fits: dict[int, GaussianMixture] = {}
+    for k in range(k_min, k_max + 1):
+        try:
+            gm = GaussianMixture(
+                n_components=k,
+                n_init=int(config.gmm_em_n_init),
+                reg_covar=float(config.gmm_em_reg_covar),
+                random_state=42,
+            )
+            gm.fit(X_norm)
+        except Exception:
+            continue
+        bic_by_k[k] = float(gm.bic(X_norm))
+        fits[k] = gm
+
+    if not fits:
+        return None
+
+    best_k = min(bic_by_k, key=bic_by_k.get)
+    # Hysteresis: keep prev_k unless new candidate beats it by margin
+    if prev_k is not None and prev_k in bic_by_k and prev_k != best_k:
+        if bic_by_k[prev_k] - bic_by_k[best_k] < float(config.gmm_bic_margin):
+            best_k = prev_k
+
+    gm = fits[best_k]
+    means = np.asarray(gm.means_)            # (k, n_features)
+    weights = np.asarray(gm.weights_)        # (k,)
+
+    merged_groups = _merge_component_groups(
+        means, weights, float(config.gmm_component_merge_distance)
+    )
+
+    group_scores = [
+        float(weights_arr @ np.asarray(g["centroid"])) for g in merged_groups
+    ]
+    if not group_scores:
+        return None
+
+    top_score = max(group_scores)
+    fraction = float(config.gmm_burst_top_fraction)
+
+    # Identity persistence: when a previous burst centroid is available, anchor
+    # the burst cluster to the group whose centroid is closest to it. Otherwise
+    # (first GMM iteration) anchor by argmax burst-prior score. Without this,
+    # the GMM relabels components randomly each iteration and the iteration
+    # loop oscillates between regimes (the "burst" identity hops between the
+    # tight peak component and a broader mid-mass component as the candidate
+    # mask shrinks and grows).
+    if prev_burst_centroid is not None:
+        prev_c = np.asarray(prev_burst_centroid, dtype=float)
+        if prev_c.shape[0] == n_features:
+            dists = [
+                float(np.linalg.norm(np.asarray(g["centroid"]) - prev_c))
+                for g in merged_groups
+            ]
+            anchor_idx = int(np.argmin(dists))
+        else:
+            anchor_idx = int(np.argmax(group_scores))
+    else:
+        anchor_idx = int(np.argmax(group_scores))
+
+    anchor_score = group_scores[anchor_idx]
+
+    if anchor_score <= 0.0 or fraction >= 1.0:
+        burst_group_indices = [anchor_idx]
+    else:
+        cutoff = fraction * anchor_score
+        burst_group_indices = [
+            i for i, s in enumerate(group_scores) if s >= cutoff
+        ]
+        if anchor_idx not in burst_group_indices:
+            burst_group_indices.append(anchor_idx)
+
+    burst_group_members: list[int] = []
+    for gi in burst_group_indices:
+        burst_group_members.extend(int(m) for m in merged_groups[gi]["members"])
+
+    # Burst centroid for diagnostics: weight-weighted average across selected
+    # groups (so a multi-component burst is summarised by one centroid).
+    sel_centroids = np.stack([
+        np.asarray(merged_groups[gi]["centroid"], dtype=float)
+        for gi in burst_group_indices
+    ])
+    sel_weights = np.array([
+        float(merged_groups[gi].get("weight", 0.0)) for gi in burst_group_indices
+    ])
+    if sel_weights.sum() > 1e-12:
+        burst_centroid = (sel_centroids * sel_weights[:, None]).sum(axis=0) / sel_weights.sum()
+    else:
+        burst_centroid = sel_centroids.mean(axis=0)
+
+    resp = gm.predict_proba(X_norm)          # (n_bins, k)
+    burst_posterior = resp[:, burst_group_members].sum(axis=1)
+
+    return {
+        "burst_posterior": burst_posterior,
+        "burst_centroid": burst_centroid,
+        "k_chosen": int(best_k),
+        "bic_by_k": bic_by_k,
+        "component_means": means,
+        "component_weights": weights,
+        "merged_groups": merged_groups,
+        "group_scores": group_scores,
+        "burst_group_members": burst_group_members,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1266,6 +1524,23 @@ def compute_iterative_bursts(
     convergence_delta = 1.0
     lambda_bg_per_unit = np.full(n_units, global_lambda_bg)
     llr_signal = np.zeros(n_bins)
+    use_gmm = (config.inner_partitioner == "gmm_em")
+    prev_k: int | None = None
+    prev_burst_centroid: np.ndarray | None = None
+    gmm_info: dict | None = None
+    burst_centroid_final: np.ndarray | None = None
+
+    # Silence mask: bins with truly zero active units. When LDA silence
+    # excision is enabled, these bins are dropped from both classes in
+    # _fit_fisher and from the z-norm background statistics, so a long
+    # silent stretch can't pull the bg-class mean toward zero and flip the
+    # discriminant sign on heterogeneous recordings.
+    silence_mask = (active_unit_counts == 0)
+    lda_pinned_indices = tuple(
+        feature_names.index(name)
+        for name in config.lda_sign_pinned_feature_names
+        if name in feature_names
+    )
 
     if debug:
         print(
@@ -1276,9 +1551,16 @@ def compute_iterative_bursts(
     for iteration in range(config.max_iterations):
         n_iterations = iteration + 1
 
-        # 3a. Background bins = all bins not covered by any candidate
+        # 3a. Background bins = all bins not covered by any candidate.
+        # When LDA silence excision is on, drop truly silent bins (zero active
+        # units) from the bg mask used for z-norm and per-unit rate estimates;
+        # they're not "background firing", they're "no signal", and including
+        # them in the bg class pulls μ_bg toward zero and flips the LDA on
+        # heterogeneous recordings.
         candidate_mask = _candidates_to_mask(candidates, t_centers)
         bg_mask = ~candidate_mask
+        if not use_gmm and config.lda_exclude_silence:
+            bg_mask = bg_mask & ~silence_mask
         if bg_mask.sum() < 2:
             # Edge case: candidates cover almost the whole recording.
             # Fall back to treating all bins as background to avoid
@@ -1300,24 +1582,61 @@ def compute_iterative_bursts(
         # 3c. Z-score all features relative to background
         X_norm = _znorm(X, bg_mask)
 
-        # 3d. Learn Fisher weights from current burst/background partition
-        #     (skip iteration 0: use w_prior to bootstrap the first composite)
-        if iteration > 0:
-            w_new = _fit_fisher(X_norm, candidate_mask.astype(int), config.fisher_alpha_frac)
-            if w_new is not None:
-                w = w_new
+        # 3d. Partition bins into burst vs background.
+        # Iteration 0 always uses the w_prior bootstrap composite so the GMM
+        # has a meaningful candidate mask to refine on iteration 1.
+        # From iteration 1 onward, dispatch to GMM-EM or Fisher LDA per config.
+        gmm_info = None
+        if iteration == 0 or not use_gmm:
+            if iteration > 0:
+                # Silence-excluded label vector + matrix for the Fisher fit:
+                # bins flagged silent are not handed to the LDA on either
+                # side of the contrast.  The composite is still computed on
+                # the full X_norm so the candidate mask covers all bins.
+                if config.lda_exclude_silence:
+                    fit_mask = ~silence_mask
+                    fit_labels = candidate_mask[fit_mask].astype(int)
+                    fit_X = X_norm[fit_mask]
+                else:
+                    fit_labels = candidate_mask.astype(int)
+                    fit_X = X_norm
+                w_new = _fit_fisher(fit_X, fit_labels, config.fisher_alpha_frac)
+                # Sign pinning: reject the new direction if a biologically
+                # sign-constrained feature (PFR/P/LLR) has a negative weight.
+                # That's the signature of the LDA having locked onto silence
+                # as the "burst" class (cx138_44_02 with w_PFR=-0.81).
+                if w_new is not None and lda_pinned_indices:
+                    if any(w_new[i] < 0 for i in lda_pinned_indices):
+                        w_new = None
+                if w_new is not None:
+                    w = w_new
+            composite = X_norm @ w
+        else:
+            gmm_info = _fit_gmm_em(
+                X_norm, prev_k, config, prev_burst_centroid=prev_burst_centroid,
+            )
+            if gmm_info is None:
+                # Degenerate fit — fall back to the previous iteration's posterior.
+                # composite, composite_threshold from last iter are still in scope.
+                pass
+            else:
+                composite = gmm_info["burst_posterior"]
+                prev_k = gmm_info["k_chosen"]
+                prev_burst_centroid = gmm_info["burst_centroid"]
+                burst_centroid_final = gmm_info["burst_centroid"]
 
-        # Compute scalar composite signal: one number per bin
-        composite = X_norm @ w
-
-        # 3e. Threshold composite using background distribution
+        # 3e. Threshold composite using background distribution (or a fixed
+        # posterior cut when configured for the GMM path).
         comp_bg = composite[bg_mask]
         composite_baseline = float(np.median(comp_bg))
         composite_mad = float(np.median(np.abs(comp_bg - composite_baseline)))
-        # max(..., 1e-6) prevents a zero-MAD threshold on constant composite
-        composite_threshold = composite_baseline + config.composite_mad_scale * max(
-            composite_mad, 1e-6
-        )
+        if use_gmm and iteration > 0 and config.gmm_posterior_threshold is not None:
+            composite_threshold = float(config.gmm_posterior_threshold)
+        else:
+            # max(..., 1e-6) prevents a zero-MAD threshold on constant composite
+            composite_threshold = composite_baseline + config.composite_mad_scale * max(
+                composite_mad, 1e-6
+            )
 
         # All above-threshold connected regions become new candidate seeds
         new_candidates_raw = _mask_to_candidates(composite >= composite_threshold, bins)
@@ -1343,7 +1662,7 @@ def compute_iterative_bursts(
         converged = convergence_delta < config.convergence_eps
 
         if trace is not None:
-            trace.iterations.append({
+            entry = {
                 "iter": int(iteration),
                 "n_candidates": len(candidates),
                 "candidates": [dict(c) for c in candidates],
@@ -1358,18 +1677,39 @@ def compute_iterative_bursts(
                 "candidate_mask": new_mask.copy(),
                 "convergence_delta": float(convergence_delta),
                 "converged": bool(converged),
-            })
+            }
+            if gmm_info is not None:
+                entry["k_chosen"] = int(gmm_info["k_chosen"])
+                entry["bic_by_k"] = dict(gmm_info["bic_by_k"])
+                entry["gmm_centroids_scaled"] = gmm_info["component_means"].copy()
+                entry["gmm_component_weights"] = gmm_info["component_weights"].copy()
+                entry["gmm_group_scores"] = list(gmm_info["group_scores"])
+                entry["burst_group_members"] = list(gmm_info["burst_group_members"])
+                entry["burst_centroid"] = gmm_info["burst_centroid"].copy()
+            trace.iterations.append(entry)
 
         if debug and (iteration == 0 or iteration % 5 == 0 or converged):
-            top3 = sorted(zip(feature_names, w), key=lambda x: -abs(x[1]))[:3]
-            wstr = "  ".join(f"{nm}={v:+.2f}" for nm, v in top3)
             tag = "  CONVERGED" if converged else ""
-            print(
-                f"[iter {iteration:>3d}]  candidates={len(candidates):>4d}"
-                f"  delta={convergence_delta:.4f}"
-                f"  thr={composite_threshold:.3f}"
-                f"  top weights: {wstr}{tag}"
-            )
+            if gmm_info is not None:
+                centroid = gmm_info["burst_centroid"]
+                top3 = sorted(zip(feature_names, centroid), key=lambda x: -abs(x[1]))[:3]
+                cstr = "  ".join(f"{nm}={v:+.2f}" for nm, v in top3)
+                print(
+                    f"[iter {iteration:>3d}]  candidates={len(candidates):>4d}"
+                    f"  delta={convergence_delta:.4f}"
+                    f"  thr={composite_threshold:.3f}"
+                    f"  k={gmm_info['k_chosen']}"
+                    f"  burst centroid: {cstr}{tag}"
+                )
+            else:
+                top3 = sorted(zip(feature_names, w), key=lambda x: -abs(x[1]))[:3]
+                wstr = "  ".join(f"{nm}={v:+.2f}" for nm, v in top3)
+                print(
+                    f"[iter {iteration:>3d}]  candidates={len(candidates):>4d}"
+                    f"  delta={convergence_delta:.4f}"
+                    f"  thr={composite_threshold:.3f}"
+                    f"  top weights: {wstr}{tag}"
+                )
 
         if converged:
             break
@@ -1548,8 +1888,16 @@ def compute_iterative_bursts(
         "composite_threshold": float(composite_threshold),
         "composite_baseline": float(composite_baseline),
         "participation_floor": float(participation_floor),
-        # Learnt feature weights — inspect to understand which features drove detection
-        "feature_weights_final": w.tolist(),  # shape (n_features,)
+        # Learnt feature weights — inspect to understand which features drove detection.
+        # For the GMM-EM partitioner this is the burst component's standardized
+        # centroid; for the Fisher LDA path it is the discriminant direction w.
+        "feature_weights_final": (
+            burst_centroid_final.tolist()
+            if (use_gmm and burst_centroid_final is not None)
+            else w.tolist()
+        ),
+        "inner_partitioner": config.inner_partitioner,
+        "k_chosen_final": int(prev_k) if (use_gmm and prev_k is not None) else None,
         # Per-unit background rates — useful for diagnosing heterogeneous networks
         "lambda_bg_per_unit": {u: float(lambda_bg_per_unit[i]) for i, u in enumerate(units)},
         # Merge geometry

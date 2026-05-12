@@ -142,6 +142,85 @@ class IterativeBurstDetectorSyntheticControlsTests(unittest.TestCase):
         )
         self.assertTrue(result.diagnostics["burst_activity_detected"])
 
+    def test_three_regime_recording_keeps_bursts_and_avoids_silence_flip(self):
+        """Silence + tonic-firing + true-burst recording (cx138_44_02 shape).
+
+        With the old Fisher LDA, the silent first half polluted the bg-class
+        mean and flipped the discriminant (w_PFR ≈ -0.81), causing every
+        burstlet to fail the BMI gate.  The silence-excision + sign-pinning
+        safeguards keep the LDA in the correct contrast.
+        """
+        rng = np.random.default_rng(20260512)
+        n_units = 32
+        duration_s = 150.0
+        units = [f"unit_{i:02d}" for i in range(n_units)]
+        spike_times: dict[str, list[float]] = {u: [] for u in units}
+
+        # Regime 1: silence in [0, 50)
+        # Regime 2: tonic Poisson firing in [50, 100) at 1.0 Hz per unit
+        for u in units:
+            n_tonic = rng.poisson(1.0 * 50.0)
+            spike_times[u].extend(
+                rng.uniform(50.0, 100.0, n_tonic).tolist()
+            )
+
+        # Regime 3: synchronised bursts in [100, 150) at four times
+        burst_starts = (108.0, 122.0, 134.0, 144.0)
+        groups = np.array_split(np.arange(n_units), 4)
+        for burst_start in burst_starts:
+            for gi, group in enumerate(groups):
+                g_start = burst_start + gi * 0.05
+                g_end = g_start + 0.18
+                for unit_idx in group:
+                    if rng.random() > 0.9:
+                        continue
+                    n_sp = max(1, int(rng.poisson(80.0 * 0.18)))
+                    spikes = rng.normal(
+                        loc=(g_start + g_end) / 2, scale=0.18 / 7, size=n_sp,
+                    )
+                    spikes = spikes[(spikes >= g_start) & (spikes < g_end)]
+                    if spikes.size == 0:
+                        spikes = np.array([rng.uniform(g_start, g_end)])
+                    spike_times[units[int(unit_idx)]].extend(spikes.tolist())
+
+            # Light tonic firing inside the burst regime so adjacent bins
+            # aren't all silent — keeps the participation signal smooth.
+            for u in units:
+                spike_times[u].extend(
+                    rng.uniform(100.0, duration_s, rng.poisson(0.8 * 50.0)).tolist()
+                )
+
+        spike_times = {
+            u: np.sort(np.asarray([s for s in spikes if 0.0 <= s < duration_s]))
+            for u, spikes in spike_times.items()
+        }
+
+        result = compute_iterative_bursts(spike_times, IterativeBurstConfig())
+        diagnostics = result.diagnostics
+
+        # Detector must find bursts (the original bug returned 0)
+        self.assertGreater(len(result.burstlets), 0)
+        self.assertGreater(len(result.network_bursts), 0)
+
+        # No event should overlap the silent stretch in [0, 50)
+        self.assertTrue(
+            (result.burstlets["start"] >= 50.0).all(),
+            "Burstlets must not be reported inside the silent block",
+        )
+        # And most events should land in the burst regime [100, 150)
+        in_burst_regime = (result.burstlets["start"] >= 100.0).sum()
+        self.assertGreaterEqual(in_burst_regime, len(result.burstlets) - 1)
+
+        # Sign pinning: PFR / P / LLR Fisher weights must end non-negative
+        feature_names = ["PFR", "P", "FF0", "FF1", "FF2", "FF3", "LLR", "burst"]
+        weights = diagnostics["feature_weights_final"]
+        for name in ("PFR", "P", "LLR"):
+            idx = feature_names.index(name)
+            self.assertGreaterEqual(
+                weights[idx], 0.0,
+                f"Sign-pinned feature {name} converged to a negative weight",
+            )
+
     def test_cluster_merges_similar_burstlets(self):
         spike_times = _cascade_spike_trains()
         unclustered = compute_iterative_bursts(
