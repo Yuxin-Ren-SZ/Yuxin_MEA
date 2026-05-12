@@ -37,7 +37,11 @@ separation problem:
        burstlets  →(merge_strict)→  network_bursts
        network_bursts  →(merge_clustered)→  superbursts
 
-  5. OUTPUT  — BurstResults with the standard schema plus four quality columns
+  5. BURSTLET GATE — use burstlet-level llr_aggregate as a soft quality gate
+     to remove bridge-like false positives without deleting an entire mixed
+     recording that contains both silent and bursty sections.
+
+  6. OUTPUT  — BurstResults with the standard schema plus four quality columns
      per event: llr_aggregate, composite_peak, composite_mean, ff_peak.
 
 Key design choices
@@ -56,7 +60,8 @@ Key design choices
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -146,28 +151,53 @@ class IterativeBurstConfig:
     # FF multi-scale bin-size multipliers
     ff_scale_multipliers: tuple[float, ...] = (0.5, 1.0, 2.0, 5.0)
 
-    # Recording-level quality gate
-    min_burst_modulation: float = 5.0
-    """Minimum ratio of (mean LLR in candidate bins − median background LLR) /
-    MAD of background LLR for any events to be reported.  LLR is used because
-    it is an absolute measure (deviation from each unit's own baseline) that
-    does not collapse to near-zero for dense uniform-noise recordings the way
-    the composite signal does. Recordings below this threshold (like uniform-
-    firing wells) are returned as empty."""
+    # Event-level modulation gate
+    min_burst_modulation: float = 0.1
+    """Minimum burstlet-level llr_aggregate required for an event to survive.
+    LLR is used because it is an absolute measure (deviation from each unit's
+    own baseline) that does not collapse to near-zero for dense uniform-noise
+    recordings the way the composite signal does.  A value ≤ 0 disables the
+    gate and keeps the pre-filtered burstlets."""
 
     # Post-convergence event clustering
-    cluster_events: bool = False
-    """After convergence, fit a 2-component GMM on per-event quality features
-    to discard noise events. Automatically skipped when fewer than
-    cluster_min_events are detected."""
+    cluster_events: bool = True
+    """After convergence, fit a multi-component GMM on per-event quality
+    features and merge similar components before discarding the noise-like
+    clusters. Automatically skipped when fewer than cluster_min_events are
+    detected."""
+
+    cluster_initial_components: int = 6
+    """Initial number of GMM components used before similarity-based merging.
+    Larger values let the detector over-segment first and then merge similar
+    components when the iteration itself cannot separate them cleanly."""
 
     cluster_min_events: int = 5
     """Minimum detected events required to attempt GMM clustering."""
 
     cluster_min_separation: float = 1.5
-    """Minimum normalised Euclidean distance between the two GMM component means
-    (in standardised feature space). Below this the two clusters are too similar
-    to trust and all events are kept unchanged."""
+    """Maximum normalised Euclidean distance between component means for them
+    to be merged in standardized feature space."""
+
+
+@dataclass
+class IterativeBurstTrace:
+    """Optional diagnostic bundle for inspecting why candidates get killed.
+
+    When passed to ``compute_iterative_bursts`` the detector populates this in
+    place with intermediate state from every kill stage (iteration trimming,
+    participation floor, BMI gate, GMM clustering). Pass ``None`` (default) and
+    no extra state is captured. Used by ``notebooks/07_*.ipynb`` to visualise
+    the kill pipeline and PCA-project the GMM feature space.
+    """
+
+    iterations: list[dict] = field(default_factory=list)
+    burstlets_pre_gates: list[dict] = field(default_factory=list)
+    participation_gate: dict | None = None
+    bmi_gate: dict | None = None
+    gmm: dict | None = None
+    t_centers: np.ndarray | None = None
+    bin_size: float | None = None
+    feature_names: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -787,6 +817,57 @@ def _merge_clustered_hier(
 
 
 # ---------------------------------------------------------------------------
+# Helpers — event modulation and component merging
+# ---------------------------------------------------------------------------
+
+def _merge_component_groups(
+    centroids: np.ndarray,
+    weights: np.ndarray,
+    max_distance: float,
+) -> list[dict]:
+    """Agglomeratively merge component centroids that are too similar."""
+    groups = [
+        {
+            "members": [i],
+            "centroid": np.asarray(centroids[i], dtype=float).copy(),
+            "weight": float(weights[i]),
+        }
+        for i in range(len(centroids))
+    ]
+
+    if len(groups) <= 1:
+        return groups
+
+    while True:
+        best_i = best_j = -1
+        best_dist = float("inf")
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                dist = float(np.linalg.norm(groups[i]["centroid"] - groups[j]["centroid"]))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_i, best_j = i, j
+
+        if best_i < 0 or best_dist > max_distance:
+            break
+
+        left = groups[best_i]
+        right = groups[best_j]
+        total_weight = left["weight"] + right["weight"]
+        merged_centroid = (
+            left["centroid"] * left["weight"] + right["centroid"] * right["weight"]
+        ) / max(total_weight, 1e-12)
+        groups[best_i] = {
+            "members": left["members"] + right["members"],
+            "centroid": merged_centroid,
+            "weight": total_weight,
+        }
+        del groups[best_j]
+
+    return groups
+
+
+# ---------------------------------------------------------------------------
 # Helpers — post-convergence GMM event clustering
 # ---------------------------------------------------------------------------
 
@@ -794,25 +875,19 @@ def _cluster_events(
     events: list[dict],
     config: "IterativeBurstConfig",
     debug: bool,
+    trace: "IterativeBurstTrace | None" = None,
 ) -> tuple[list[dict], float | None]:
-    """Filter events with a 2-component GMM on per-event quality features.
+    """Cluster events with a multi-component GMM and merge similar components.
 
-    Feature matrix (6 columns, all already present on each event dict):
-        composite_peak, composite_mean, llr_aggregate, ff_peak,
-        participation, burst_peak
-
-    The "burst" component is the one with the higher centroid in the
-    composite_peak + participation dimensions. Events assigned to the "noise"
-    component are discarded.
-
-    Returns (filtered_events, separation) where separation is None when
-    clustering was skipped.  Caller gets all events back unchanged when:
-    - fewer than config.cluster_min_events detected
-    - GMM component means are too close (separation < cluster_min_separation)
-    - sklearn is unavailable or GMM fit fails numerically
+    The detector intentionally over-segments first.  This helper then fits a
+    small GMM with more than two initial components, merges components whose
+    centroids are too close in standardised feature space, and keeps only the
+    clusters that still look burst-like after the merge.
     """
     n = len(events)
     if n < config.cluster_min_events:
+        if trace is not None:
+            trace.gmm = {"skipped": "too_few_events", "n_events": n}
         return events, None
 
     try:
@@ -821,6 +896,8 @@ def _cluster_events(
     except ImportError:
         if debug:
             print("[cluster] sklearn not available — skipping event clustering")
+        if trace is not None:
+            trace.gmm = {"skipped": "sklearn_missing", "n_events": n}
         return events, None
 
     feature_cols = [
@@ -828,36 +905,123 @@ def _cluster_events(
         "ff_peak", "participation", "burst_peak",
     ]
     X = np.array([[ev[c] for c in feature_cols] for ev in events], dtype=float)
+    if not np.isfinite(X).all():
+        if trace is not None:
+            trace.gmm = {"skipped": "nonfinite_features", "n_events": n}
+        return events, None
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    n_components = max(2, min(int(config.cluster_initial_components), n))
 
     try:
-        gm = GaussianMixture(n_components=2, n_init=5, random_state=42)
+        gm = GaussianMixture(
+            n_components=n_components,
+            n_init=10,
+            random_state=42,
+            reg_covar=1e-6,
+        )
         labels = gm.fit_predict(X_scaled)
     except Exception:
+        if trace is not None:
+            trace.gmm = {"skipped": "gmm_fit_failed", "n_events": n}
         return events, None
 
-    means = gm.means_   # (2, n_features)
-    sep = float(np.linalg.norm(means[0] - means[1]))
+    merged_groups = _merge_component_groups(
+        gm.means_,
+        gm.weights_,
+        float(config.cluster_min_separation),
+    )
+    def _score_centroid(centroid: np.ndarray) -> float:
+        return float(
+            0.35 * centroid[0]
+            + 0.15 * centroid[1]
+            + 0.20 * centroid[2]
+            + 0.10 * centroid[3]
+            + 0.15 * centroid[4]
+            + 0.05 * centroid[5]
+        )
 
-    if sep < config.cluster_min_separation:
+    merged_groups.sort(key=lambda g: _score_centroid(g["centroid"]), reverse=True)
+    cluster_scores = [_score_centroid(g["centroid"]) for g in merged_groups]
+
+    if len(merged_groups) > 1:
+        sep = float(
+            min(
+                np.linalg.norm(merged_groups[i]["centroid"] - merged_groups[j]["centroid"])
+                for i in range(len(merged_groups))
+                for j in range(i + 1, len(merged_groups))
+            )
+        )
+    else:
+        sep = None
+
+    def _record_gmm(kept_mask: np.ndarray, decision: str) -> None:
+        if trace is None:
+            return
+        trace.gmm = {
+            "decision": decision,
+            "feature_names": list(feature_cols),
+            "X": X.copy(),
+            "X_scaled": X_scaled.copy(),
+            "labels": np.asarray(labels).copy(),
+            "component_means_scaled": np.asarray(gm.means_).copy(),
+            "component_weights": np.asarray(gm.weights_).copy(),
+            "merged_groups": [
+                {
+                    "centroid": np.asarray(g["centroid"]).copy(),
+                    "members": list(g["members"]),
+                    "weight": float(g.get("weight", 0.0)),
+                }
+                for g in merged_groups
+            ],
+            "cluster_scores": list(cluster_scores),
+            "kept_event_mask": kept_mask.astype(bool),
+            "separation": sep,
+            "score_weights": [0.35, 0.15, 0.20, 0.10, 0.15, 0.05],
+            "n_initial_components": n_components,
+        }
+
+    if len(merged_groups) <= 1:
         if debug:
             print(
-                f"[cluster] GMM separation={sep:.2f} < min={config.cluster_min_separation:.2f}"
-                f"  → keeping all {n} events"
+                f"[cluster] only one merged component after GMM; keeping all {n} events"
             )
+        _record_gmm(np.ones(n, dtype=bool), "single_merged_component")
+        return events, None
+
+    best_score = max(cluster_scores)
+    if best_score <= 0.0:
+        if debug:
+            print(
+                f"[cluster] all merged components scored <= 0; keeping all {n} events"
+            )
+        _record_gmm(np.ones(n, dtype=bool), "all_scores_nonpositive")
         return events, sep
 
-    # Burst cluster = higher composite_peak (col 0) + participation (col 4)
-    burst_label = 0 if (means[0][0] + means[0][4]) > (means[1][0] + means[1][4]) else 1
-    kept = [ev for ev, lb in zip(events, labels) if lb == burst_label]
+    keep_groups = [
+        group for group, score in zip(merged_groups, cluster_scores)
+        if score >= 0.0
+    ]
+    if not keep_groups:
+        keep_groups = [merged_groups[0]]
+
+    component_to_group: dict[int, int] = {}
+    for group_idx, group in enumerate(keep_groups):
+        for member in group["members"]:
+            component_to_group[member] = group_idx
+
+    kept_mask = np.array([lb in component_to_group for lb in labels], dtype=bool)
+    kept: list[dict] = [ev for ev, keep in zip(events, kept_mask) if keep]
 
     if debug:
+        group_sizes = ",".join(str(len(g["members"])) for g in merged_groups)
         print(
-            f"[cluster] GMM sep={sep:.2f}  burst_label={burst_label}"
-            f"  kept {len(kept)}/{n} events"
+            f"[cluster] init={n_components} merged={len(merged_groups)}"
+            f" sizes=[{group_sizes}] kept={len(kept)}/{n}"
         )
+
+    _record_gmm(kept_mask, "filtered_by_score")
     return kept, sep
 
 
@@ -869,6 +1033,7 @@ def compute_iterative_bursts(
     spike_times: dict[str, np.ndarray],
     config: IterativeBurstConfig | None = None,
     debug: bool = False,
+    trace: "IterativeBurstTrace | None" = None,
 ) -> "BurstResults":
     """Detect burstlets, network bursts, and superbursts via iterative LDA.
 
@@ -888,7 +1053,8 @@ def compute_iterative_bursts(
         in the standard detector: llr_aggregate, composite_peak, composite_mean,
         ff_peak.
         diagnostics additionally contains: burst_modulation_index,
-        burst_activity_detected, cluster_separation, cluster_n_kept.
+        burst_activity_detected, burst_modulation_candidates_scored,
+        burst_modulation_candidates_kept, cluster_separation, cluster_n_kept.
 
     Raises:
         IterativeBurstError: When spike_times is empty or contains no spikes.
@@ -1175,6 +1341,25 @@ def compute_iterative_bursts(
         prev_mask = new_mask
 
         converged = convergence_delta < config.convergence_eps
+
+        if trace is not None:
+            trace.iterations.append({
+                "iter": int(iteration),
+                "n_candidates": len(candidates),
+                "candidates": [dict(c) for c in candidates],
+                "composite": composite.copy(),
+                "composite_threshold": float(composite_threshold),
+                "composite_baseline": float(composite_baseline),
+                "composite_mad": float(composite_mad),
+                "w": w.copy(),
+                "lambda_bg_per_unit": lambda_bg_per_unit.copy(),
+                "X_norm": X_norm.copy(),
+                "candidate_mask_in": candidate_mask.copy(),
+                "candidate_mask": new_mask.copy(),
+                "convergence_delta": float(convergence_delta),
+                "converged": bool(converged),
+            })
+
         if debug and (iteration == 0 or iteration % 5 == 0 or converged):
             top3 = sorted(zip(feature_names, w), key=lambda x: -abs(x[1]))[:3]
             wstr = "  ".join(f"{nm}={v:+.2f}" for nm, v in top3)
@@ -1190,44 +1375,6 @@ def compute_iterative_bursts(
             break
 
     # -----------------------------------------------------------------------
-    # Burst modulation quality gate (LLR-based)
-    #
-    # After convergence, measure whether the candidates are genuinely elevated
-    # above background using the LLR signal (an absolute measure of firing-rate
-    # deviation from each unit's own baseline).  The composite signal adapts
-    # to the recording's own distribution and can be fooled by dense Poisson
-    # noise; the LLR is more invariant because it tests against each unit's
-    # own background rate estimate.
-    #
-    # For flat noise (CX138_27_14): LLR in candidates ≈ LLR in background →
-    # small BMI → gate fires → empty results returned.
-    # For real bursts (CX138_27_10): LLR in candidates >> background → large
-    # BMI → gate passes → events materialised.
-    # -----------------------------------------------------------------------
-    candidate_mask_final = _candidates_to_mask(candidates, t_centers)
-    bg_mask_final = ~candidate_mask_final
-
-    if candidate_mask_final.any() and bg_mask_final.sum() > 2:
-        llr_in_cand = llr_signal[candidate_mask_final]
-        llr_in_bg = llr_signal[bg_mask_final]
-        llr_bg_median = float(np.median(llr_in_bg))
-        llr_bg_mad = float(np.median(np.abs(llr_in_bg - llr_bg_median)))
-        burst_modulation_index = (float(np.mean(llr_in_cand)) - llr_bg_median) / max(
-            llr_bg_mad, 1e-6
-        )
-    else:
-        burst_modulation_index = 0.0
-
-    if burst_modulation_index < config.min_burst_modulation:
-        if debug:
-            print(
-                f"[gate] burst_modulation_index={burst_modulation_index:.2f}"
-                f" < min={config.min_burst_modulation:.2f}"
-                f"  → recording lacks burst structure; returning empty results"
-            )
-        candidates = []
-
-    # -----------------------------------------------------------------------
     # Phase 4a: Materialise burstlet events from converged candidates
     #
     # Each converged candidate becomes one burstlet.  Per-event scalars are
@@ -1240,6 +1387,8 @@ def compute_iterative_bursts(
     ff1 = ff_signals[:, min(1, n_ff - 1)]
 
     burstlets_raw: list[dict] = []
+    pre_floor_events: list[dict] = []  # all candidates that produced a valid window
+    dropped_by_floor: list[dict] = []
     for c in candidates:
         s_t, e_t = c["start"], c["end"]
         duration_s = e_t - s_t
@@ -1258,13 +1407,10 @@ def compute_iterative_bursts(
         # Peak time: bin with highest participation within this burstlet
         peak_abs_idx = int(np.where(in_ev)[0][np.argmax(ws_sharp[in_ev])])
         peak_synchrony = float(ws_sharp[peak_abs_idx])
-        if peak_synchrony < participation_floor:
-            continue
-
         peak_time = float(t_centers[peak_abs_idx])
         comp_vals = composite[in_ev]
 
-        burstlets_raw.append({
+        event = {
             "start": float(s_t),
             "end": float(e_t),
             "duration_s": float(duration_s),
@@ -1280,7 +1426,60 @@ def compute_iterative_bursts(
             "composite_peak": float(comp_vals.max()),
             "composite_mean": float(comp_vals.mean()),
             "ff_peak": float(ff1[in_ev].max()),
-        })
+        }
+
+        if trace is not None:
+            pre_floor_events.append(dict(event))
+
+        if peak_synchrony < participation_floor:
+            if trace is not None:
+                dropped_by_floor.append(dict(event))
+            continue
+
+        burstlets_raw.append(event)
+
+    if trace is not None:
+        trace.burstlets_pre_gates = pre_floor_events
+        trace.participation_gate = {
+            "floor": float(participation_floor),
+            "floor_count": float(participation_floor_count),
+            "n_pre": len(pre_floor_events),
+            "n_post": len(burstlets_raw),
+            "n_dropped": len(dropped_by_floor),
+            "dropped_events": dropped_by_floor,
+        }
+
+    # -----------------------------------------------------------------------
+    # Burst modulation gate — burstlet-level LLR filter
+    #
+    # The recording-level gate was too brittle for heterogeneous wells.  We
+    # now use the burstlet's own llr_aggregate so long bridge-like events can
+    # be dropped without deleting a whole burst-rich section.  A value <= 0
+    # disables the gate and keeps the pre-filtered burstlets.
+    # -----------------------------------------------------------------------
+    burst_modulation_scores = [float(ev["llr_aggregate"]) for ev in burstlets_raw]
+    burst_modulation_index = max(burst_modulation_scores) if burst_modulation_scores else 0.0
+    if trace is not None:
+        trace.bmi_gate = {
+            "threshold": float(config.min_burst_modulation),
+            "enabled": bool(config.min_burst_modulation > 0),
+            "llr_aggregate": list(burst_modulation_scores),
+            "n_pre": len(burstlets_raw),
+            "pre_events": [dict(ev) for ev in burstlets_raw],
+        }
+    if config.min_burst_modulation > 0:
+        kept_burstlets = [
+            ev for ev in burstlets_raw
+            if float(ev["llr_aggregate"]) >= config.min_burst_modulation
+        ]
+        if debug and len(kept_burstlets) < len(burstlets_raw):
+            print(
+                f"[gate] burstlet llr gate kept {len(kept_burstlets)}/{len(burstlets_raw)} "
+                f"events at min={config.min_burst_modulation:.2f}"
+            )
+        burstlets_raw = kept_burstlets
+    if trace is not None:
+        trace.bmi_gate["n_post"] = len(burstlets_raw)
 
     # -----------------------------------------------------------------------
     # GMM event clustering — discard noise burstlets
@@ -1293,7 +1492,7 @@ def compute_iterative_bursts(
     # -----------------------------------------------------------------------
     cluster_sep: float | None = None
     if config.cluster_events:
-        burstlets_raw, cluster_sep = _cluster_events(burstlets_raw, config, debug)
+        burstlets_raw, cluster_sep = _cluster_events(burstlets_raw, config, debug, trace=trace)
 
     # -----------------------------------------------------------------------
     # Phase 4b: Two-tier hierarchy merge
@@ -1361,7 +1560,9 @@ def compute_iterative_bursts(
         "n_units": n_units,
         # Quality gate and clustering
         "burst_modulation_index": float(burst_modulation_index),
-        "burst_activity_detected": burst_modulation_index >= config.min_burst_modulation,
+        "burst_activity_detected": bool(burstlets_raw),
+        "burst_modulation_candidates_scored": len(burst_modulation_scores),
+        "burst_modulation_candidates_kept": len(candidates),
         "cluster_separation": cluster_sep,
         "cluster_n_kept": len(burstlets_raw),
     }
@@ -1378,6 +1579,11 @@ def compute_iterative_bursts(
         "participation_baseline": float(baseline_init),
         "participation_threshold": float(init_threshold),
     }
+
+    if trace is not None:
+        trace.t_centers = t_centers.copy()
+        trace.bin_size = float(bin_size)
+        trace.feature_names = list(feature_names)
 
     return BurstResults(
         burstlets=_to_df(burstlets_raw),
