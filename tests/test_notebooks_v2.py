@@ -66,7 +66,13 @@ def test_v2_notebooks_directory_exists():
 
 
 def test_no_v2_notebook_has_stale_outputs():
-    """v2 notebooks must ship with empty `outputs` arrays — pre-commit relies on this."""
+    """v2 notebooks must ship clean — empty outputs AND null execution_count.
+
+    The pre-commit hook strips both; a notebook with `outputs: []` but
+    `execution_count: 5` indicates someone ran cells locally and only
+    cleared outputs by hand, leaving the notebook in a mixed state. Catch
+    both to force a clean kernel-restart-and-clear-outputs before commit.
+    """
     issues: list[str] = []
     for path in _v2_notebooks():
         nb = nbformat.read(path, as_version=4)
@@ -75,4 +81,6 @@ def test_no_v2_notebook_has_stale_outputs():
                 continue
             if cell.get("outputs"):
                 issues.append(f"{path.name} cell {i} has populated outputs")
+            if cell.get("execution_count") is not None:
+                issues.append(f"{path.name} cell {i} has non-null execution_count")
     assert not issues, "\n".join(issues)

@@ -247,7 +247,6 @@ def score_detection(
 
     tp = 0
     for d_start, d_end in detected_sorted:
-        matched = False
         for gi, (g_start, g_end) in enumerate(gt_sorted):
             if claimed[gi]:
                 continue
@@ -255,10 +254,8 @@ def score_detection(
             if overlap >= min_overlap_s:
                 claimed[gi] = True
                 tp += 1
-                matched = True
                 break
-        # un-matched detections contribute to FP below
-        del matched  # explicit intent: matched is purely a debugging breadcrumb
+        # Un-matched detections are accounted for via `fp = len(detected) - tp`.
 
     fp = len(detected_sorted) - tp
     fn = len(gt_sorted) - tp
