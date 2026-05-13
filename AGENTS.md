@@ -13,9 +13,11 @@ Concise codebase map for future coding agents. Production code only.
 - `src/yuxin_mea/dataset/` raw MEA discovery, metadata parse, recording/well cache (was `dataset_manager/`).
 - `src/yuxin_mea/pipeline/` per-well task registry, queue, status cache (was `pipeline_manager/`).
 - `src/yuxin_mea/tasks/` concrete analysis tasks (was `pipeline_tasks/`).
-- `src/yuxin_mea/analysis/` burst detector algorithm and output writer; burst diagnostic library (promoted from `pipeline_tasks/analysis/`).
+- `src/yuxin_mea/analysis/` burst detector algorithm and output writer; burst diagnostic library; curation summary reader; synthetic validation generators (promoted from `pipeline_tasks/analysis/`).
   - `burst_detector.py`, `iterative_burst_detector.py`, `burst_output.py`, `plate_raster_synchrony.py`.
   - `burst_diagnostic.py` — pure library for batch analysis/caching/diagnostics; no Dash imports.
+  - `curation_summary.py` — read/summarize AutoCurationTask outputs (Phase 4).
+  - `synthetic_validation.py` — synthetic spike-train generators and ground-truth scoring (Phase 4).
 - `src/yuxin_mea/dashboard/` multipage Dash app for non-technical users; read-only browsing of dataset/pipeline/burst diagnostics.
   - `__init__.py`, `__main__.py`, `cli.py`, `app.py`, `data.py`.
   - `components/layout.py` — navbar + page container + `no_config_banner()`.
@@ -24,7 +26,8 @@ Concise codebase map for future coding agents. Production code only.
   - `pages/settings.py` — schema-driven config editor (Phase 3).
 - `src/yuxin_mea/cli/` stub (empty; populated in later phase).
 - `config/` example/default pipeline config JSON.
-- `notebooks/` manual pipeline workflows.
+- `notebooks/` manual pipeline workflows (original; not maintained post-Phase-4).
+- `notebooks/v2/` rewritten notebooks against the post-Phase-3 yuxin_mea namespace (canonical set).
 - `tests/` unit/integration tests.
 - `scripts/` helper scripts.
 - `doc/architecture.md` older architecture note; partly stale naming.
@@ -356,6 +359,31 @@ Pure library (no Dash imports) for batch iterative burst analysis, caching, and 
 - `cache_path(analysis_root, key)`: per-analysis cache location `<analysis_root>/burst_diagnostic_cache/<key>.pkl`.
 - `load_or_run_batch(root, analysis_root, force_recompute)`: return `(batch, came_from_cache)` with pickle caching.
 
+## Analysis — curation summary
+
+`src/yuxin_mea/analysis/curation_summary.py`
+
+Read and summarize curation outputs for downstream dashboard/notebook display.
+
+- `summarize_curation(curation_output_dir)`: summarize one well; returns dict with n_total, n_curated, n_rejected, pct_kept, rejection_reasons, metric_stats.
+- `format_curation_summary(summary)`: render summary dict as multi-line plain-text block.
+- `aggregate_curation_summaries(curation_output_dirs)`: build one-row-per-well summary DataFrame.
+
+## Analysis — synthetic validation
+
+`src/yuxin_mea/analysis/synthetic_validation.py`
+
+Synthetic spike-train generators and ground-truth burst evaluation for detector testing.
+
+- `SyntheticDataset`: dataclass holding spike_times dict, duration, burst_intervals, silence_intervals, metadata.
+- `merge_intervals(intervals, duration_s)`: clip, sort, and merge overlapping spans.
+- `complement_intervals(duration_s, blocked)`: return gaps between blocked intervals within [0, duration_s].
+- `poisson_spikes_in_intervals(rate_hz, intervals, rng)`: draw homogeneous Poisson at rate_hz restricted to intervals.
+- `make_unit_ids(n_units)`: return list of "unit_000", "unit_001", etc.
+- `generate_poisson_baseline(n_units, duration_s, rate_hz, seed)`: no-burst negative control; Poisson at uniform rate.
+- `generate_cascade_culture(n_units, duration_s, burst_centers_s, ...)`: discrete network bursts at fixed centers; fraction recruited per burst.
+- `score_detection(detected, ground_truth, min_overlap_s)`: score detected intervals against ground truth; returns tp/fp/fn/precision/recall/f1.
+
 ## Dashboard
 
 `src/yuxin_mea/dashboard/__init__.py`
@@ -439,4 +467,7 @@ Registered at `/burst-diagnostic` (order=3). Burst detector batch runner and dia
 - `tests/test_burst_detector.py`: detector schema, accuracy, parquet roundtrip, reference equivalence.
 - `tests/test_params_schema.py`: params_schema/default_params parity per task.
 - `tests/test_config_builder.py`: form rendering, validation, nested-dict reconstruction (Phase 3.1).
+- `tests/test_curation_summary.py`: curation reader/summarizer/aggregator (Phase 4).
+- `tests/test_synthetic_validation.py`: synthetic generators and scorer (Phase 4).
+- `tests/test_notebooks_v2.py`: notebooks/v2 execution validation (Phase 4).
 - `tests/test_doc.md`: test/doc note.
