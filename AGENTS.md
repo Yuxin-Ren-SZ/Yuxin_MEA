@@ -6,6 +6,10 @@ Concise codebase map for future coding agents. Production code only.
 
 - `src/yuxin_mea/` single namespace; installable as `yuxin_mea` via `pip install -e .`.
 - `src/yuxin_mea/config/` JSON config loader/provider (was `config_manager/`).
+  - `schema.py` — `ParamSpec` dataclass and value validation.
+  - `globals.py` — `GLOBALS_SCHEMA` dict for dashboard settings.
+  - `manager.py` — `ConfigManager` loader/writer.
+  - `__init__.py` — public exports.
 - `src/yuxin_mea/dataset/` raw MEA discovery, metadata parse, recording/well cache (was `dataset_manager/`).
 - `src/yuxin_mea/pipeline/` per-well task registry, queue, status cache (was `pipeline_manager/`).
 - `src/yuxin_mea/tasks/` concrete analysis tasks (was `pipeline_tasks/`).
@@ -14,8 +18,10 @@ Concise codebase map for future coding agents. Production code only.
   - `burst_diagnostic.py` — pure library for batch analysis/caching/diagnostics; no Dash imports.
 - `src/yuxin_mea/dashboard/` multipage Dash app for non-technical users; read-only browsing of dataset/pipeline/burst diagnostics.
   - `__init__.py`, `__main__.py`, `cli.py`, `app.py`, `data.py`.
-  - `components/layout.py` — navbar + page container.
+  - `components/layout.py` — navbar + page container + `no_config_banner()`.
+  - `components/form_builder.py` — schema-driven Dash form renderer (Phase 3).
   - `pages/{home,recordings,pipeline,burst_diagnostic}.py` — registered pages.
+  - `pages/settings.py` — schema-driven config editor (Phase 3).
 - `src/yuxin_mea/cli/` stub (empty; populated in later phase).
 - `config/` example/default pipeline config JSON.
 - `notebooks/` manual pipeline workflows.
@@ -47,6 +53,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `auto_curation` writes `curated_spike_times.npy`; hard input contract for `burst_detection`.
 - Dashboard pages use pure cache loaders (`load_recordings_df`, `load_pipeline_df`) instead of managers to enforce read-only semantics.
 - Notebook scripts are CLI tools; `notebooks/07_iterative_burst_detector_diagnostic.py` is HTML-export-only (uses burst_diagnostic library).
+- Schema mechanism: every task's `params_schema()` keys must equal `default_params()` keys. Enforced by `tests/test_params_schema.py`. Adding a key in one without the other is a parity violation.
 
 ## Config Manager
 
@@ -58,82 +65,59 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `set_global(key, value)`: store global seed for template generation.
 - `get_global(key, default)`: loaded global wins over seed.
 - `get_task_params(task_name)`: task params from loaded JSON; `{}` if absent.
+- `set_task_params(task_name, params)`: replace in-memory task params (no merge).
+- `set_globals(values)`: replace in-memory loaded globals (atomic; not merged).
+- `list_loaded_tasks()`: sorted task names from loaded config.
+- `validate_loaded(schemas)`: find unknown keys; return `{task: [unknown_keys]}` per task.
 - `get_config(task_name, recording_key, well_id)`: pipeline config snapshot source.
 - `generate_template(path)`: write new JSON template; never overwrite existing file.
 - `load(path)`: load `"global"` and `"tasks"` sections from JSON.
 - `save(path)`: atomic write of loaded config only.
 
-## Dataset Manager
+## Config Builder (Phase 3)
 
-`src/yuxin_mea/dataset/entries.py`
+`src/yuxin_mea/config/schema.py`
 
-- `WellEntry`: mutable well metadata holder.
-- `RecordingEntry`: frozen recording fields; mutable metadata/wells/h5 maps.
-- `RecordingEntry.cache_key`: recording identity string.
-- `RecordingEntry.from_path(...)`: parse `data.raw.h5` path into entry; root or sample layout.
+- `ParamType`: literal string types (str, int, float, bool, list_int, list_float, list_str, path, dict).
+- `ParamSpec`: frozen dataclass describing one editable parameter.
+  - `type`: ParamType enum.
+  - `default`: default value.
+  - `description`: human-readable help text.
+  - `choices`: optional list of allowed values.
+  - `multiselect`: bool; if True, list_str renders as multi-option dropdown.
+  - `min`: optional numeric lower bound.
+  - `max`: optional numeric upper bound.
+  - `nested_schema`: optional dict of ParamSpecs for dict-type fields.
+  - `nullable`: bool; if True, field accepts None as a valid value.
+- `ValidationError`: raised by `validate_value()` on schema violation.
+- `validate_value(spec, value)`: coerce raw form value to declared type; validate bounds/choices; recurse nested_schema.
 
-`src/yuxin_mea/dataset/metadata.py`
+`src/yuxin_mea/config/globals.py`
 
-- `WellMetadata`: parsed well id plus fields dict.
-- `RecordingMetadata`: recording fields plus selected wells.
-- `BaseMetadataExtractor`: parser interface.
-- `BaseMetadataExtractor.get(metadata_path)`: return `RecordingMetadata`.
-- `_well_to_fields(well)`: flatten decoded well fields and annotations.
-- `MxassayMetadataExtractor`: real `mxassay.metadata` parser.
-- `MxassayMetadataExtractor.get(metadata_path)`: missing file -> empty metadata.
-- `DummyMetadataExtractor`: offline fixed metadata.
-- `DummyMetadataExtractor.get(metadata_path)`: ignore path; return dummy recording/wells.
+- `GLOBALS_SCHEMA`: dict of `{key: ParamSpec}` for dashboard globals tab.
+  - `"data_root"`: path to raw MEA recordings.
+  - `"analysis_root"`: path to analysis caches and task outputs.
+  - `"figure_root"`: path to exported figures (HTML, PNG).
 
-`src/yuxin_mea/dataset/_mxassay_decoder.py`
+`src/yuxin_mea/dashboard/components/form_builder.py`
 
-- `_qt_escaped_to_bytes(s)`: decode Qt escaped byte text.
-- `_decode_qt_variant(value)`: decode supported Qt `@Variant(...)` values.
-- `_coerce_scalar(value)`: string -> bool/int/float/variant/string.
-- `_unix_to_iso(value)`: Unix timestamp -> UTC ISO string when plausible.
-- `_read_ini_like(path)`: minimal case-preserving INI reader.
-- `_well_name_from_id(well_id, columns)`: numeric well id -> plate name.
-- `_parse_wells(wells_section)`: parse wells, annotations, selected wells.
-- `decode_mxassay_metadata(path, add_iso_times)`: public metadata decoder.
-- `_json_default(obj)`: CLI JSON fallback.
-- `main()`: CLI decode command.
+- `render_form(form_id, schema, values, title)`: build form Div with header, save button, fields, status.
+- `render_field(form_id, name, spec, value)`: render one label + widget + error div.
+- `collect_values(schema, raw_by_name)`: validate every schema field; return `(parsed, errors)` with disjoint key sets.
+- `_reconstruct_nested(raw_by_name)`: fold dotted field IDs (`"parent.child"`) back into nested dicts (Phase 3.1 fix).
+- `_build_widget(...)`: render appropriate Dash component per `ParamSpec.type`.
 
-`src/yuxin_mea/dataset/cache.py`
+`src/yuxin_mea/dashboard/pages/settings.py`
 
-- `BaseCacheStore`: recording cache interface.
-- `BaseCacheStore.load()`: return cache dict.
-- `BaseCacheStore.save(entries)`: persist cache dict.
-- `_RecordingEntryEncoder`: JSON `Path` encoder.
-- `_RecordingEntryEncoder.default(obj)`: `Path` -> string.
-- `_recording_entry_decoder(d)`: JSON object hook -> entries/wells.
-- `JsonCacheStore`: `experiment_cache.json` store.
-- `JsonCacheStore.__init__(analysis_dir)`: set cache path.
-- `JsonCacheStore.load()`: load typed entries; missing file -> `{}`.
-- `JsonCacheStore.save(entries)`: atomic JSON save.
-- `_entry_to_dict(entry)`: typed entry -> JSON dict.
-
-`src/yuxin_mea/dataset/manager.py`
-
-- `DatasetManager`: discover/cache/query raw recordings.
-- `__init__(...)`: set roots/stores/extractor; initialize cache.
-- `recordings`: cached entries list.
-- `get_recording_by(filters)`: AND filter recording fields and same-well metadata.
-- `get_by(key, method, value)`: deprecated wrapper; supports old arg order.
-- `get_wells(recording_key)`: wells dict or `{}`.
-- `get_path(entry)`: absolute data path.
-- `register_well(recording_key, well_id, metadata)`: add/merge well; save cache.
-- `update_well_metadata(recording_key, well_id, metadata)`: merge existing well metadata.
-- `_matches_recording_filters(entry, filters)`: recording-level filter check.
-- `_matches_well_filters(entry, filters)`: all well filters must match same well.
-- `refresh()`: clear cache; full rescan; save.
-- `_initialise()`: load cache; scan new date dirs.
-- `_scan_all()`: full scan helper.
-- `_detect_root_level()`: return `"sample"` or `"root"`.
-- `_collect_disk_date_keys(root_level)`: visible `(sample_id, date)` pairs.
-- `_scan_date_keys(date_keys, root_level)`: threaded date scanning.
-- `_scan_date_dir(sample_id, date_dir, root_level)`: find valid runs.
-- `_populate_h5_structure(entry, data_path)`: read H5 recordings/wells.
-- `_populate_metadata(entry, run_dir)`: merge parsed metadata.
-- `_iter_dirs(parent)`: yield child dirs; ignore/list warnings on errors.
+- Registered at `/settings` (order=10); schema-driven config editor.
+- `layout`: top-level `dcc.Tabs` with Globals + one tab per task with non-empty `params_schema()`.
+- Pattern-matched IDs: `{"form": <form_id>, "field": <name>}` for uniformity across forms.
+- Callbacks (5 total):
+  1. `_populate_globals()`: prefill Globals tab from loaded config; surface unknown-keys banner.
+  2. `_populate_task_tabs()`: lazy populate each task tab with form fields.
+  3. `_mark_forms_dirty()`: any field change → flip dirty flag per form.
+  4. `_toggle_save_buttons()`: dirty flag → enable/disable Save buttons.
+  5. `_save_any_form()`: validate, persist via `set_task_params()` / `set_globals()` / `save()`, update dashboard stash.
 
 ## Pipeline Manager
 
@@ -142,6 +126,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `BaseAnalysisTask`: abstract pipeline task contract.
 - `__init_subclass__(...)`: validate concrete subclasses have `task_name`, `dependencies`.
 - `default_params()`: task fallback params.
+- `params_schema()`: optional rich schema dict for dashboard config builder (Phase 3). Default returns `{}`.
 - `resolve_params(config_params)`: shallow merge defaults with config; config wins.
 - `run(recording_key, well_id, data_path, params)`: execute task; return output path.
 
@@ -217,6 +202,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 - `PreprocessingTask`: SpikeInterface preprocessing for one Maxwell stream.
 - `default_params()`: output/filter/reference/save defaults.
+- `params_schema()`: 11 fields (output_root, bandpass_freq_min, bandpass_freq_max, reference, operator, local_radius, dtype, n_jobs, chunk_duration, progress_bar, overwrite).
 - `split_compound_well_id(well_id)`: `rec_name`, `well_id`; require slash.
 - `build_output_path(output_root, recording_key, rec_name, well_id)`: preprocessed zarr path.
 - `_apply_common_reference(rec, spre, params)`: local/global common reference; local fallback to global.
@@ -226,6 +212,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 - `SortingTask`: Kilosort sorting for preprocessed stream.
 - `default_params()`: sorter/output/VRAM preset defaults.
+- `params_schema()`: 14 fields (preprocessing_output_root, output_root, sorter, docker_image, verbose, remove_existing_folder, delete_output_folder, overwrite, clean_excess_spikes, remove_empty_units, min_high_vram_gb, high_vram_sorter_kwargs, low_vram_sorter_kwargs, sorter_kwargs).
 - `split_compound_well_id(well_id)`: delegate to preprocessing parser.
 - `build_output_paths(output_root, recording_key, rec_name, well_id)`: sorter/cleaned output paths.
 - `_suppress_kilosort_console()`: cap Kilosort logger noise.
@@ -238,6 +225,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 - `AutoMergeTask`: optional SpikeInterface unit merge.
 - `default_params()`: merge/output defaults.
+- `params_schema()`: 7 fields (output_root, sorting_output_root, preprocessing_output_root, enabled, presets, radius_um, n_jobs).
 - `split_compound_well_id(well_id)`: delegate to preprocessing parser.
 - `build_output_path(output_root, recording_key, rec_name, well_id)`: auto-merge path.
 - `run(...)`: pass-through save when disabled; else temp analyzer, auto-merge, cleanup.
@@ -246,6 +234,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 - `AnalyzerTask`: build SortingAnalyzer and compute extensions.
 - `default_params()`: analyzer/output/extension defaults.
+- `params_schema()`: 8 fields (output_root, preprocessing_output_root, auto_merge_output_root, radius_um, ms_before, ms_after, unit_locations_method, n_jobs).
 - `split_compound_well_id(well_id)`: delegate to preprocessing parser.
 - `build_output_path(output_root, recording_key, rec_name, well_id)`: analyzer path.
 - `run(...)`: load preprocessed + merged sorting; estimate sparsity; compute extensions.
@@ -254,6 +243,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 - `AutoCurationTask`: metric threshold curation.
 - `default_params()`: curation thresholds and paths.
+- `params_schema()`: 7 fields (curation_output_root, analyzer_output_root, enabled, presence_ratio_min, rp_contamination_max, firing_rate_min, amplitude_median_max).
 - `split_compound_well_id(well_id)`: delegate to preprocessing parser.
 - `build_output_path(curation_output_root, recording_key, rec_name, well_id)`: curation dir.
 - `_apply_thresholds(metrics, p)`: keep flags and rejection reasons.
@@ -263,6 +253,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 - `BurstDetectionTask`: network burst detection for curated units.
 - `default_params()`: burst detector and path defaults.
+- `params_schema()`: 9 fields (curation_output_root, output_root, gamma, min_burstlet_participation, min_absolute_rate_hz, min_burst_density_hz, min_relative_height, extent_frac, network_merge_gap_min_s).
 - `split_compound_well_id(well_id)`: delegate to preprocessing parser.
 - `build_curation_output_path(...)`: auto-curation input dir.
 - `build_output_path(output_root, recording_key, rec_name, well_id)`: burst output dir.
@@ -272,6 +263,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 - `IterativeBurstDetectionTask`: Fisher LDA iterative network burst detection.
 - `default_params()`: iterative detector params.
+- `params_schema()`: 18 fields (curation_output_root, output_root, permissive_mad_scale, permissive_percentile, mad_fallback_threshold, composite_mad_scale, extent_frac, merge_floor_frac, network_merge_gap_min_s, max_iterations, convergence_eps, fisher_alpha_frac, ff_scale_multipliers, min_burst_modulation, cluster_events, cluster_initial_components, cluster_min_events, cluster_min_separation).
 - `split_compound_well_id(well_id)`: delegate to preprocessing parser.
 - `build_curation_output_path(...)`: auto-curation input dir.
 - `build_output_path(output_root, recording_key, rec_name, well_id)`: output dir.
@@ -285,6 +277,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 - `PlateViewerTask`: visualize all wells in a recording as interactive raster + burst overlay.
 - `default_params()`: figure and data source paths.
+- `params_schema()`: 11 fields (burst_detection_root, curation_output_root, figures_root, experiment_cache_path, rec_name, display_mode, marker_size, line_width, width_px, max_raster_points_per_well, max_synchrony_points).
 - `run(...)`: load burst outputs, build plate figure, save HTML.
 
 ## Analysis (algorithm code)
@@ -375,11 +368,11 @@ Pure library (no Dash imports) for batch iterative burst analysis, caching, and 
 
 `src/yuxin_mea/dashboard/cli.py`
 
-- `main(argv)`: argparse entry point; `--config`, `--host`, `--port`, `--debug`; console script `yuxin-mea-dashboard`.
+- `main(argv)`: argparse entry point; `--config`, `--host`, `--port`, `--debug`; console script `yuxin-mea-dashboard`. No longer exits on missing config; prints warning and launches in config-only mode.
 
 `src/yuxin_mea/dashboard/app.py`
 
-- `build_app(config_path)`: build Dash app; load config; stash resolved paths on `app.server.config["YUXIN_MEA"]`.
+- `build_app(config_path)`: build Dash app; tolerate nonexistent config; load if exists. Stash on `app.server.config["YUXIN_MEA"]` with keys: `config_path`, `config_exists`, `analysis_root`, `data_root`, `figure_root`.
 - `_resolve_optional_path(value)`: coerce non-empty string to Path or None.
 
 `src/yuxin_mea/dashboard/data.py`
@@ -391,26 +384,34 @@ Pure cache loaders (no manager instantiation) for read-only dashboard semantics.
 
 `src/yuxin_mea/dashboard/components/layout.py`
 
+- `no_config_banner()`: blue info banner shown on data pages when config doesn't exist yet (Phase 3).
 - `build_layout()`: static app shell with navbar + page container.
 - `_nav_links()`: build nav links sorted by page order then name.
 
 `src/yuxin_mea/dashboard/pages/home.py`
 
-Registered at `/` (order=0). Shows config path, data roots, and cache entry counts.
+Registered at `/` (order=0). Shows config path, data roots, and cache entry counts. Calls `no_config_banner()` when `config_exists` is False.
 
 - Page layout with config summary + cache summary callbacks.
 
 `src/yuxin_mea/dashboard/pages/recordings.py`
 
-Registered at `/recordings` (order=1). Sortable/filterable recordings table from `experiment_cache.json`.
+Registered at `/recordings` (order=1). Sortable/filterable recordings table from `experiment_cache.json`. Calls `no_config_banner()` when `config_exists` is False.
 
 - Page layout with Refresh button, DataTable with native filter/sort.
 
 `src/yuxin_mea/dashboard/pages/pipeline.py`
 
-Registered at `/pipeline` (order=2). (recording × well) × task status matrix with color coding.
+Registered at `/pipeline` (order=2). (recording × well) × task status matrix with color coding. Calls `no_config_banner()` when `config_exists` is False.
 
 - Page layout, status→color map, Refresh button, conditional cell styling.
+
+`src/yuxin_mea/dashboard/pages/settings.py`
+
+Registered at `/settings` (order=10). Schema-driven config editor (Phase 3).
+
+- Tabs: Globals + one per task with non-empty schema.
+- Five callbacks: populate globals/tasks, mark dirty, toggle save buttons, save any form via pattern-matched IDs.
 
 `src/yuxin_mea/dashboard/pages/burst_diagnostic.py`
 
@@ -436,4 +437,6 @@ Registered at `/burst-diagnostic` (order=3). Burst detector batch runner and dia
 - `tests/test_sorting_task.py`: Kilosort params, VRAM presets, output paths, pipeline scheduling.
 - `tests/test_burst_detection_task.py`: task paths, defaults, detector config handoff, missing curation file.
 - `tests/test_burst_detector.py`: detector schema, accuracy, parquet roundtrip, reference equivalence.
+- `tests/test_params_schema.py`: params_schema/default_params parity per task.
+- `tests/test_config_builder.py`: form rendering, validation, nested-dict reconstruction (Phase 3.1).
 - `tests/test_doc.md`: test/doc note.

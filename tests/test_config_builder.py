@@ -226,6 +226,46 @@ def test_collect_values_falls_back_to_spec_default():
     assert errors == {}
 
 
+def test_collect_values_reconstructs_nested_dict_from_dotted_keys():
+    """REGRESSION: nested-dict fields render with dotted IDs (`parent.child`).
+
+    Pre-Phase-3.1, collect_values looked up by `parent` name in the flat
+    dict, never found the key, and silently substituted spec.default — so
+    every user edit to a nested field (e.g. SortingTask's
+    `high_vram_sorter_kwargs.batch_size_seconds`) was discarded on Save.
+    """
+    schema = {
+        "high_vram_sorter_kwargs": ParamSpec(
+            "dict", {},
+            nested_schema={
+                "batch_size_seconds": ParamSpec("float", 2.0, min=0),
+                "clear_cache": ParamSpec("bool", True),
+            },
+        ),
+    }
+    # Simulating what the Save callback sees: flat dict, dotted keys.
+    raw = {
+        "high_vram_sorter_kwargs.batch_size_seconds": "0.5",
+        "high_vram_sorter_kwargs.clear_cache": [True],
+    }
+    parsed, errors = collect_values(schema, raw)
+    assert errors == {}
+    assert parsed == {
+        "high_vram_sorter_kwargs": {
+            "batch_size_seconds": 0.5,
+            "clear_cache": True,
+        },
+    }
+
+
+def test_collect_values_passes_through_when_no_dotted_keys():
+    """Flat (non-nested) forms must still work after the reconstruction step."""
+    schema = {"x": ParamSpec("int", 0)}
+    parsed, errors = collect_values(schema, {"x": "5"})
+    assert errors == {}
+    assert parsed == {"x": 5}
+
+
 # ---------------------------------------------------------------------------
 # Dashboard tolerates missing config
 # ---------------------------------------------------------------------------

@@ -95,12 +95,17 @@ def collect_values(
     """Validate every schema field; return (parsed, errors).
 
     `raw_by_name` is `{param_name: widget_value}` (caller pulls these out of
-    `State` lists by zipping ids and values). The returned `parsed` dict
-    contains coerced values for every schema key that validated; the
-    `errors` dict contains a user-facing message for every key that
-    didn't. The two dicts have disjoint key sets — a caller can short-
-    circuit on `errors` being non-empty.
+    `State` lists by zipping ids and values). Nested-dict fields are
+    rendered with dotted IDs (`"parent.child"`); this function reconstructs
+    them into `{"parent": {"child": value}}` before validation so
+    ``validate_value`` sees the proper nested dict.
+
+    The returned `parsed` dict contains coerced values for every schema key
+    that validated; the `errors` dict contains a user-facing message for
+    every key that didn't. The two dicts have disjoint key sets — a caller
+    can short-circuit on `errors` being non-empty.
     """
+    raw_by_name = _reconstruct_nested(raw_by_name)
     parsed: dict[str, Any] = {}
     errors: dict[str, str] = {}
     for name, spec in schema.items():
@@ -118,6 +123,30 @@ def collect_values(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+def _reconstruct_nested(raw_by_name: dict[str, Any]) -> dict[str, Any]:
+    """Fold dotted field IDs (`"parent.child"`) back into nested dicts.
+
+    Nested-dict ParamSpecs render sub-fields with IDs like
+    `"high_vram_sorter_kwargs.batch_size_seconds"` — but the Save callback
+    builds a flat `{field: value}` dict that strips that hierarchy. Without
+    this step, ``collect_values`` looks up the parent name, fails, and
+    falls back to ``spec.default`` — silently discarding every user edit
+    to nested fields.
+
+    Inputs that contain no dotted keys pass through unchanged.
+    """
+    if not any("." in k for k in raw_by_name):
+        return dict(raw_by_name)
+    out: dict[str, Any] = {}
+    for key, value in raw_by_name.items():
+        if "." in key:
+            parent, _, child = key.partition(".")
+            out.setdefault(parent, {})[child] = value
+        else:
+            out.setdefault(key, value)
+    return out
 
 
 def _field_id(form_id: str, name: str) -> dict[str, str]:
@@ -167,7 +196,7 @@ def _build_widget(form_id: str, name: str, spec: ParamSpec, value: Any) -> Any:
         return dcc.Dropdown(
             options=[{"label": str(c), "value": c} for c in spec.choices],
             value=list(value) if value else list(spec.default or []),
-            multi=spec.multiselect or True,
+            multi=spec.multiselect,
             style={"maxWidth": "480px"},
             **common,
         )
