@@ -12,6 +12,9 @@ requires-python = ">=3.11"
 # conda-managed packages like torch / spikeinterface from PyPI.
 dependencies = []
 
+[project.scripts]
+yuxin-mea-dashboard = "yuxin_mea.dashboard.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

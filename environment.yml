@@ -19,6 +19,7 @@ dependencies:
   - pynvml
   - plotly
   - matplotlib
+  - dash>=2.14
   - pip:
     - --extra-index-url https://download.pytorch.org/whl/cu128
     - "torch==2.10.0+cu128"
