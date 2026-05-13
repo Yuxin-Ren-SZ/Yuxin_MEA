@@ -39,7 +39,7 @@ from yuxin_mea.analysis.burst_diagnostic import (
 from yuxin_mea.config import ConfigManager
 
 
-dash.register_page(__name__, path="/burst-diagnostic", name="Burst diagnostic", order=3)
+dash.register_page(__name__, path="/burst-diagnostic", name="Burst diagnostic", order=4)
 
 
 _LOADED_BATCHES: dict[str, BatchResults] = {}

@@ -1,6 +1,9 @@
 """Core visualization logic for plate raster + synchrony viewer.
 
-No pipeline coupling — can be used standalone or by PlateViewerTask.
+No pipeline coupling — used by `yuxin_mea.dashboard.pages.plate_viewer` and
+callable directly from notebooks or scripts. Pre-Phase-5, this module was
+consumed by `PlateViewerTask`; that task was removed and replaced by the
+dashboard page when we moved plate visualization out of the pipeline DAG.
 """
 
 from __future__ import annotations
@@ -8,9 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 from scipy.ndimage import gaussian_filter1d
 from plotly.subplots import make_subplots
@@ -678,3 +682,285 @@ def _get_group_colors(group_names: list[str]) -> dict[str, str]:
     ]
     unique_groups = sorted(set(group_names))
     return {group: color_palette[i % len(color_palette)] for i, group in enumerate(unique_groups)}
+
+
+# ---------------------------------------------------------------------------
+# Plate data loading
+# ---------------------------------------------------------------------------
+# These helpers assemble `WellRecord` objects from per-well outputs written
+# by `BurstDetectionTask` (plot_signals.npy + *.pkl event tables) and
+# `AutoCurationTask` (curated_spike_times.npy). They were previously private
+# methods on `BasePlateViewer` and are promoted here so the dashboard's
+# /plate-viewer page can call them without instantiating a task class.
+
+
+_PLATE_WELL_COUNT = 24
+
+
+def load_plate_data(
+    burst_detection_root: Path,
+    curation_output_root: Path,
+    recording_key: str,
+    rec_name: str = "auto",
+    experiment_cache_path: Path | None = None,
+) -> list[WellRecord]:
+    """Assemble plate-level data for one recording from per-well outputs.
+
+    Reads the 24 well-records that drive :func:`build_plate_figure`. Missing
+    wells (incomplete burst_detection / curation) return placeholder records
+    with ``status="missing"`` so the figure still has 24 slots.
+
+    Args:
+        burst_detection_root: directory containing per-well burst_detection outputs.
+        curation_output_root: directory containing per-well curation outputs.
+        recording_key: e.g. ``"CX138/260329/T003346/Network/000029"``.
+        rec_name: Maxwell rec name ("rec0000" etc.) or ``"auto"``/empty for
+            auto-detection from disk + experiment cache.
+        experiment_cache_path: optional path to ``experiment_cache.json``;
+            when present, used to look up well names / groupname. Missing or
+            unreadable cache → wells default to ``well_name="?", groupname="?"``.
+
+    Returns:
+        list[WellRecord]: 24 entries, one per well slot.
+    """
+    burst_root = Path(burst_detection_root)
+    curation_root = Path(curation_output_root)
+
+    well_metadata: dict[str, dict[str, Any]] = {}
+    well_rec_names: dict[str, str] = {}
+    if experiment_cache_path is not None:
+        well_metadata, well_rec_names = _load_recording_cache(
+            Path(experiment_cache_path), recording_key
+        )
+
+    discovered = _discover_well_rec_names(recording_key, burst_root, curation_root)
+    for well_id_str, discovered_rec_name in discovered.items():
+        well_rec_names.setdefault(well_id_str, discovered_rec_name)
+
+    return [
+        _load_well_record(
+            well_id_str=f"well{well_num:03d}",
+            recording_key=recording_key,
+            rec_name=rec_name,
+            burst_root=burst_root,
+            curation_root=curation_root,
+            well_metadata=well_metadata,
+            well_rec_names=well_rec_names,
+        )
+        for well_num in range(_PLATE_WELL_COUNT)
+    ]
+
+
+def _load_recording_cache(
+    cache_path: Path, recording_key: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Load well metadata + per-well rec name map from the experiment cache.
+
+    Returns ``({}, {})`` on any failure (missing file, malformed JSON, etc.).
+    """
+    metadata: dict[str, dict[str, Any]] = {}
+    well_rec_names: dict[str, str] = {}
+    try:
+        with open(cache_path) as fh:
+            cache = json.load(fh)
+        recording_data = cache.get(recording_key, {})
+        wells_data = recording_data.get("wells", {})
+
+        for well_id_str, well_info in wells_data.items():
+            well_meta = well_info.get("metadata", {})
+            metadata[well_id_str] = {
+                "well_name": well_meta.get("well_name", "?"),
+                "groupname": well_meta.get("groupname", "?"),
+            }
+
+        for rec, well_ids in recording_data.get("h5_recordings", {}).items():
+            for wid in well_ids:
+                well_rec_names[str(wid)] = str(rec)
+    except Exception as exc:  # noqa: BLE001 — best-effort cache reader
+        print(f"Warning: Failed to load experiment cache: {exc}")
+    return metadata, well_rec_names
+
+
+def _discover_well_rec_names(
+    recording_key: str,
+    burst_root: Path,
+    curation_root: Path,
+) -> dict[str, str]:
+    """Walk task output directories to infer per-well rec name."""
+    discovered: dict[str, str] = {}
+    for root, terminal_dir in (
+        (burst_root, "burst_detection"),
+        (curation_root, "auto_curation"),
+    ):
+        recording_dir = root / recording_key
+        if not recording_dir.exists():
+            continue
+        for rec_dir in sorted(recording_dir.glob("rec*")):
+            if not rec_dir.is_dir():
+                continue
+            for well_dir in sorted(rec_dir.glob("well*")):
+                if (well_dir / terminal_dir).exists():
+                    discovered.setdefault(well_dir.name, rec_dir.name)
+    return discovered
+
+
+def _rec_name_candidates(
+    well_id_str: str,
+    rec_name: str,
+    well_rec_names: dict[str, str] | None,
+    burst_root: Path,
+    curation_root: Path,
+    recording_key: str,
+) -> list[str]:
+    """Order rec-name candidates; only include the user hint when its files exist."""
+    candidates: list[str] = []
+    rec_hint = rec_name if rec_name and rec_name.lower() != "auto" else None
+    mapped_rec_name = (well_rec_names or {}).get(well_id_str)
+
+    if rec_hint:
+        hinted_burst = (
+            burst_root / recording_key / rec_hint / well_id_str / "burst_detection"
+        )
+        hinted_curation = (
+            curation_root / recording_key / rec_hint / well_id_str / "auto_curation"
+        )
+        if hinted_burst.exists() or hinted_curation.exists():
+            candidates.append(rec_hint)
+
+    if mapped_rec_name and mapped_rec_name not in candidates:
+        candidates.append(mapped_rec_name)
+    return candidates
+
+
+def _load_well_record(
+    well_id_str: str,
+    recording_key: str,
+    rec_name: str,
+    burst_root: Path,
+    curation_root: Path,
+    well_metadata: dict[str, dict[str, Any]],
+    well_rec_names: dict[str, str] | None = None,
+) -> WellRecord:
+    """Load spike times + plot signals for one well; return a `WellRecord`."""
+    meta = well_metadata.get(well_id_str, {})
+    well_name = meta.get("well_name", "?")
+    groupname = meta.get("groupname", "?")
+    rec_names = _rec_name_candidates(
+        well_id_str, rec_name, well_rec_names, burst_root, curation_root, recording_key,
+    )
+    event_intervals = _load_event_intervals(
+        well_id_str, recording_key, rec_names, burst_root,
+    )
+
+    plot_signals = None
+    for candidate in rec_names:
+        path = burst_root / recording_key / candidate / well_id_str / "burst_detection" / "plot_signals.npy"
+        if path.exists():
+            try:
+                plot_signals = np.load(path, allow_pickle=True).item()
+            except Exception:  # noqa: BLE001
+                return _make_well_record(
+                    well_id=well_id_str, well_name=well_name,
+                    groupname=groupname, status="plot_signals error",
+                )
+            break
+
+    spike_times = None
+    for candidate in rec_names:
+        path = curation_root / recording_key / candidate / well_id_str / "auto_curation" / "curated_spike_times.npy"
+        if path.exists():
+            try:
+                spike_times = np.load(path, allow_pickle=True).item()
+            except Exception:  # noqa: BLE001
+                return _make_well_record(
+                    well_id=well_id_str, well_name=well_name,
+                    groupname=groupname, status="spike_times error",
+                )
+            break
+
+    if plot_signals is None and spike_times is None:
+        return _make_well_record(
+            well_id=well_id_str, well_name=well_name, groupname=groupname,
+            event_intervals=event_intervals, status="missing",
+        )
+    return _make_well_record(
+        well_id=well_id_str, well_name=well_name, groupname=groupname,
+        plot_signals=plot_signals, spike_times=spike_times,
+        event_intervals=event_intervals, status="ok",
+    )
+
+
+def _make_well_record(**kwargs: Any) -> WellRecord:
+    """Instantiate `WellRecord`, tolerating older test stubs without new fields."""
+    try:
+        return WellRecord(**kwargs)
+    except TypeError as exc:
+        if "event_intervals" not in str(exc):
+            raise
+        kwargs.pop("event_intervals", None)
+        return WellRecord(**kwargs)
+
+
+def _load_event_intervals(
+    well_id_str: str,
+    recording_key: str,
+    rec_names: list[str],
+    burst_root: Path,
+) -> dict[str, list[dict[str, Any]]]:
+    """Load per-event interval tables for one well from disk."""
+    event_intervals: dict[str, list[dict[str, Any]]] = {
+        key: [] for key in BURST_EVENT_TYPES
+    }
+    for candidate in rec_names:
+        burst_dir = burst_root / recording_key / candidate / well_id_str / "burst_detection"
+        if not burst_dir.exists():
+            continue
+        for event_key in event_intervals:
+            event_path = burst_dir / f"{event_key}.pkl"
+            if event_path.exists():
+                event_intervals[event_key] = _read_event_table(event_path)
+        break
+    return event_intervals
+
+
+def _read_event_table(event_path: Path) -> list[dict[str, Any]]:
+    """Read one event table; keep numerically-valid intervals only."""
+    try:
+        table = pd.read_pickle(event_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Warning: Failed to load event intervals from {event_path}: {exc}")
+        return []
+    if table is None or table.empty or "start" not in table or "end" not in table:
+        return []
+
+    intervals: list[dict[str, Any]] = []
+    for row in table.to_dict(orient="records"):
+        try:
+            start = float(row["start"])
+            end = float(row["end"])
+        except (TypeError, ValueError):
+            continue
+        if not (np.isfinite(start) and np.isfinite(end)) or end <= start:
+            continue
+        interval: dict[str, Any] = {}
+        for key, value in row.items():
+            safe = _json_safe_scalar(value)
+            if safe is not None:
+                interval[key] = safe
+        interval["start"] = start
+        interval["end"] = end
+        intervals.append(interval)
+    return intervals
+
+
+def _json_safe_scalar(value: Any) -> Any:
+    """Convert common numpy/pandas scalars to JSON-safe Python values."""
+    if value is None:
+        return None
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return None

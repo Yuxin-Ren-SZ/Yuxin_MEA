@@ -25,7 +25,7 @@
       "preprocessing_output_root": "./preprocessed_data",
       "output_root": "./spikesorted_data",
       "sorter": "kilosort4",
-      "docker_image": "",
+      "docker_image": null,
       "verbose": true,
       "remove_existing_folder": true,
       "delete_output_folder": false,
@@ -38,7 +38,7 @@
         "clear_cache": true,
         "invert_sign": true,
         "cluster_downsampling": 20,
-        "max_cluster_subset": 0,
+        "max_cluster_subset": null,
         "nblocks": 0,
         "dmin": 17,
         "do_correction": false
@@ -120,19 +120,6 @@
       "cluster_initial_components": 6,
       "cluster_min_events": 5,
       "cluster_min_separation": 1.5
-    },
-    "plate_viewer": {
-      "burst_detection_root": "./burst_detection_data",
-      "curation_output_root": "./curation_data",
-      "figures_root": "./figures",
-      "experiment_cache_path": "./data/analysis/experiment_cache.json",
-      "rec_name": "auto",
-      "display_mode": "both",
-      "marker_size": 5.0,
-      "line_width": 1.25,
-      "width_px": 2400,
-      "max_raster_points_per_well": 12000,
-      "max_synchrony_points": 3000
     }
   }
 }

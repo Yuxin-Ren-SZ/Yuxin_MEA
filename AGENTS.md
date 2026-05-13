@@ -11,7 +11,8 @@ Concise codebase map for future coding agents. Production code only.
   - `manager.py` — `ConfigManager` loader/writer.
   - `__init__.py` — public exports.
 - `src/yuxin_mea/dataset/` raw MEA discovery, metadata parse, recording/well cache (was `dataset_manager/`).
-- `src/yuxin_mea/pipeline/` per-well task registry, queue, status cache (was `pipeline_manager/`).
+- `src/yuxin_mea/pipeline/` per-well task registry, queue, status cache; abstract plate-level task infrastructure (was `pipeline_manager/`).
+  - `base_plate_level_task.py` — `BasePlateLevelTask` ABC for plate-aggregation tasks.
 - `src/yuxin_mea/tasks/` concrete analysis tasks (was `pipeline_tasks/`).
 - `src/yuxin_mea/analysis/` burst detector algorithm and output writer; burst diagnostic library; curation summary reader; synthetic validation generators (promoted from `pipeline_tasks/analysis/`).
   - `burst_detector.py`, `iterative_burst_detector.py`, `burst_output.py`, `plate_raster_synchrony.py`.
@@ -22,7 +23,7 @@ Concise codebase map for future coding agents. Production code only.
   - `__init__.py`, `__main__.py`, `cli.py`, `app.py`, `data.py`.
   - `components/layout.py` — navbar + page container + `no_config_banner()`.
   - `components/form_builder.py` — schema-driven Dash form renderer (Phase 3).
-  - `pages/{home,recordings,pipeline,burst_diagnostic}.py` — registered pages.
+  - `pages/{home,recordings,pipeline,plate_viewer,burst_diagnostic}.py` — registered pages.
   - `pages/settings.py` — schema-driven config editor (Phase 3).
 - `src/yuxin_mea/cli/` stub (empty; populated in later phase).
 - `config/` example/default pipeline config JSON.
@@ -34,7 +35,7 @@ Concise codebase map for future coding agents. Production code only.
 
 ## Main Flow
 
-raw data scan -> recording/well cache -> per-well task queue -> preprocessing -> sorting -> auto_merge -> analyzer -> auto_curation -> burst_detection
+raw data scan -> recording/well cache -> per-well task queue -> preprocessing -> sorting -> auto_merge -> analyzer -> auto_curation -> burst_detection/iterative_burst_detection
 
 ## Relations And Restrictions
 
@@ -132,6 +133,14 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `params_schema()`: optional rich schema dict for dashboard config builder (Phase 3). Default returns `{}`.
 - `resolve_params(config_params)`: shallow merge defaults with config; config wins.
 - `run(recording_key, well_id, data_path, params)`: execute task; return output path.
+
+`src/yuxin_mea/pipeline/base_plate_level_task.py`
+
+- `BasePlateLevelTask`: ABC for tasks that aggregate all 24 wells of a recording into one artifact.
+- `aggregate_records(well_records, params)`: abstract hook; produce per-recording artifact from 24 `WellRecord` objects.
+- `write_output(result, recording_key, params)`: abstract hook; persist artifact and return on-disk path.
+- `_run_template(recording_key, well_id, data_path, params)`: orchestrator that calls `load_plate_data()` → `aggregate_records()` → `write_output()`.
+- No concrete subclasses yet; scaffolding for future plate-level tasks (e.g., per-recording QC export).
 
 `src/yuxin_mea/pipeline/config_provider.py`
 
@@ -272,17 +281,6 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `build_output_path(output_root, recording_key, rec_name, well_id)`: output dir.
 - `run(...)`: load curated spike times, run iterative detector, write outputs with quality columns.
 
-`src/yuxin_mea/tasks/base_plate_viewer.py`
-
-- `BasePlateViewer`: ABC for plate raster/synchrony visualization.
-
-`src/yuxin_mea/tasks/plate_viewer.py`
-
-- `PlateViewerTask`: visualize all wells in a recording as interactive raster + burst overlay.
-- `default_params()`: figure and data source paths.
-- `params_schema()`: 11 fields (burst_detection_root, curation_output_root, figures_root, experiment_cache_path, rec_name, display_mode, marker_size, line_width, width_px, max_raster_points_per_well, max_synchrony_points).
-- `run(...)`: load burst outputs, build plate figure, save HTML.
-
 ## Analysis (algorithm code)
 
 `src/yuxin_mea/analysis/burst_detector.py`
@@ -323,7 +321,9 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 - `PlateViewerConfig`: display parameters for plate visualization.
 - `WellRecord`: per-well input data and metadata.
-- `build_plate_figure(...)`: construct interactive Plotly figure with well rasters + burst overlays.
+- `load_plate_data(burst_detection_root, curation_output_root, recording_key, rec_name, experiment_cache_path)`: assemble 24 `WellRecord` objects from per-well outputs; missing wells get status="missing".
+- `build_plate_figure(well_records, config)`: construct interactive Plotly figure with well rasters + burst overlays.
+- `write_plate_viewer_html(fig, path)`: export figure to standalone HTML.
 
 ## Analysis — burst diagnostic
 
@@ -434,20 +434,27 @@ Registered at `/pipeline` (order=2). (recording × well) × task status matrix w
 
 - Page layout, status→color map, Refresh button, conditional cell styling.
 
-`src/yuxin_mea/dashboard/pages/settings.py`
+`src/yuxin_mea/dashboard/pages/plate_viewer.py`
 
-Registered at `/settings` (order=10). Schema-driven config editor (Phase 3).
+Registered at `/plate-viewer` (order=3). 4×6 plate raster + synchrony viewer for one recording (Phase 5).
 
-- Tabs: Globals + one per task with non-empty schema.
-- Five callbacks: populate globals/tasks, mark dirty, toggle save buttons, save any form via pattern-matched IDs.
+- Recording dropdown + Load button + Export HTML button + collapsible Display settings panel (6 visualization controls with hardcoded defaults).
+- Three callbacks: populate dropdown from experiment cache, Load → render figure via `load_plate_data()` + `build_plate_figure()`, Export → write HTML to `<figure_root>/<recording_key>/plate_viewer.html`.
 
 `src/yuxin_mea/dashboard/pages/burst_diagnostic.py`
 
-Registered at `/burst-diagnostic` (order=3). Burst detector batch runner and diagnostic figure gallery.
+Registered at `/burst-diagnostic` (order=4). Burst detector batch runner and diagnostic figure gallery.
 
 - Root input + Load/Recompute buttons; recording + trace dropdowns; figure display callbacks.
 - Module-global `_LOADED_BATCHES` dict (single-user assumption).
 - Callbacks: prefill default root, load/recompute, batch_key→summary figures, (batch_key, recording, trace)→per-recording figures.
+
+`src/yuxin_mea/dashboard/pages/settings.py`
+
+Registered at `/settings` (order=10). Schema-driven config editor (Phase 3).
+
+- Tabs: Globals + one per task with non-empty schema (7 tasks: preprocessing, sorting, auto_merge, analyzer, auto_curation, burst_detection, iterative_burst_detection).
+- Five callbacks: populate globals/tasks, mark dirty, toggle save buttons, save any form via pattern-matched IDs.
 
 ## Scripts
 
@@ -465,9 +472,12 @@ Registered at `/burst-diagnostic` (order=3). Burst detector batch runner and dia
 - `tests/test_sorting_task.py`: Kilosort params, VRAM presets, output paths, pipeline scheduling.
 - `tests/test_burst_detection_task.py`: task paths, defaults, detector config handoff, missing curation file.
 - `tests/test_burst_detector.py`: detector schema, accuracy, parquet roundtrip, reference equivalence.
-- `tests/test_params_schema.py`: params_schema/default_params parity per task.
+- `tests/test_params_schema.py`: params_schema/default_params parity per task (7 tasks).
 - `tests/test_config_builder.py`: form rendering, validation, nested-dict reconstruction (Phase 3.1).
 - `tests/test_curation_summary.py`: curation reader/summarizer/aggregator (Phase 4).
 - `tests/test_synthetic_validation.py`: synthetic generators and scorer (Phase 4).
 - `tests/test_notebooks_v2.py`: notebooks/v2 execution validation (Phase 4).
+- `tests/test_base_plate_level_task.py`: `BasePlateLevelTask` abstract hooks and template orchestrator (Phase 5).
+- `tests/test_load_plate_data.py`: `load_plate_data()` well record assembly, missing well handling, cache integration (Phase 5).
+- `tests/test_plate_viewer_page.py`: page registration, order assertion, dropdown/load/export callbacks (Phase 5).
 - `tests/test_doc.md`: test/doc note.

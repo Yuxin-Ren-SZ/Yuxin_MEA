@@ -31,7 +31,6 @@ from yuxin_mea.tasks import (
     AutoMergeTask,
     BurstDetectionTask,
     IterativeBurstDetectionTask,
-    PlateViewerTask,
     PreprocessingTask,
     SortingTask,
 )
@@ -50,7 +49,6 @@ _TASK_CLASSES = [
     AutoCurationTask,
     BurstDetectionTask,
     IterativeBurstDetectionTask,
-    PlateViewerTask,
 ]
 
 _TASK_BY_NAME = {tc.task_name: tc for tc in _TASK_CLASSES}

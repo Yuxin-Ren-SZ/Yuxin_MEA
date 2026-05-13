@@ -187,7 +187,7 @@ def test_load_pipeline_df_pivots_status():
 
 def test_page_modules_import():
     from yuxin_mea.dashboard.pages import (  # noqa: F401
-        burst_diagnostic, home, pipeline, recordings,
+        burst_diagnostic, home, pipeline, plate_viewer, recordings,
     )
 
 
