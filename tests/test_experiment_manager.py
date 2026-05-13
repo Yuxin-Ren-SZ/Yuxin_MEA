@@ -9,10 +9,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from dataset_manager.cache_store import JsonCacheStore
-from dataset_manager.dataset_manager import DatasetManager
-from dataset_manager.metadata_extractor import RecordingMetadata, WellMetadata
-from dataset_manager.recording_entry import RecordingEntry, WellEntry
+from yuxin_mea.dataset.cache import JsonCacheStore
+from yuxin_mea.dataset.manager import DatasetManager
+from yuxin_mea.dataset.metadata import RecordingMetadata, WellMetadata
+from yuxin_mea.dataset.entries import RecordingEntry, WellEntry
 
 
 # ==============================================================================

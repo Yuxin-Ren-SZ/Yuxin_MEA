@@ -9,9 +9,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from .cache_store import BaseCacheStore, JsonCacheStore
-from .metadata_extractor import BaseMetadataExtractor, MxassayMetadataExtractor, RecordingMetadata
-from .recording_entry import RecordingEntry, WellEntry
+from .cache import BaseCacheStore, JsonCacheStore
+from .metadata import BaseMetadataExtractor, MxassayMetadataExtractor, RecordingMetadata
+from .entries import RecordingEntry, WellEntry
 
 logger = logging.getLogger(__name__)
 

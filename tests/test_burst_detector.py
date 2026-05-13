@@ -8,13 +8,13 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 
-from pipeline_tasks.analysis.burst_detector import (
+from yuxin_mea.analysis.burst_detector import (
     BurstDetectorConfig,
     BurstDetectorError,
     BurstResults,
     compute_network_bursts,
 )
-from pipeline_tasks.analysis.burst_output import PickleBurstOutputWriter
+from yuxin_mea.analysis.burst_output import PickleBurstOutputWriter
 
 
 # ---------------------------------------------------------------------------

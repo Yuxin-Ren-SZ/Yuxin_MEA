@@ -73,21 +73,21 @@ def _install_fake_spikeinterface(
     sys.modules["spikeinterface"] = spikeinterface
     sys.modules["spikeinterface.full"] = full
     sys.modules["spikeinterface.preprocessing"] = preprocessing
-    sys.modules.pop("pipeline_tasks.preprocessing", None)
+    sys.modules.pop("yuxin_mea.tasks.preprocessing", None)
 
     return calls
 
 
 def _import_task():
-    module = importlib.import_module("pipeline_tasks.preprocessing")
+    module = importlib.import_module("yuxin_mea.tasks.preprocessing")
     return module.PreprocessingTask
 
 
 class PreprocessingTaskTests(unittest.TestCase):
     def tearDown(self) -> None:
         for name in [
-            "pipeline_tasks.preprocessing",
-            "pipeline_tasks",
+            "yuxin_mea.tasks.preprocessing",
+            "yuxin_mea.tasks",
             "spikeinterface",
             "spikeinterface.full",
             "spikeinterface.preprocessing",

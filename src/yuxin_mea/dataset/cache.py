@@ -6,7 +6,7 @@ import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from .recording_entry import RecordingEntry, WellEntry
+from .entries import RecordingEntry, WellEntry
 
 CACHE_FILENAME = "experiment_cache.json"
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .base_task import BaseAnalysisTask
-from .cache_store import BasePipelineCacheStore, JsonPipelineCacheStore
+from .cache import BasePipelineCacheStore, JsonPipelineCacheStore
 from .config_provider import BaseConfigProvider, DummyConfigProvider
 from .pipeline_entry import PipelineEntry
 from .task_record import TaskRecord, TaskStatus

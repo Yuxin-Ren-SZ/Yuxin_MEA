@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pipeline_manager import BaseAnalysisTask
-from pipeline_tasks.preprocessing import PreprocessingTask
+from yuxin_mea.pipeline import BaseAnalysisTask
+from yuxin_mea.tasks.preprocessing import PreprocessingTask
 
 
 class BurstDetectionTask(BaseAnalysisTask):
@@ -77,11 +77,11 @@ class BurstDetectionTask(BaseAnalysisTask):
     ) -> Path:
         import numpy as np
 
-        from pipeline_tasks.analysis.burst_detector import (
+        from yuxin_mea.analysis.burst_detector import (
             BurstDetectorConfig,
             compute_network_bursts,
         )
-        from pipeline_tasks.analysis.burst_output import PickleBurstOutputWriter
+        from yuxin_mea.analysis.burst_output import PickleBurstOutputWriter
 
         p = self.resolve_params(params)
         rec_name, actual_well_id = self.split_compound_well_id(well_id)

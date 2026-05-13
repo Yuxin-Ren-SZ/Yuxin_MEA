@@ -4,9 +4,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from pipeline_manager import BaseAnalysisTask
-from pipeline_tasks.auto_merge import AutoMergeTask
-from pipeline_tasks.preprocessing import PreprocessingTask
+from yuxin_mea.pipeline import BaseAnalysisTask
+from yuxin_mea.tasks.auto_merge import AutoMergeTask
+from yuxin_mea.tasks.preprocessing import PreprocessingTask
 
 
 class AnalyzerTask(BaseAnalysisTask):

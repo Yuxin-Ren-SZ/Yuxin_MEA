@@ -17,16 +17,16 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
-from pipeline_manager.base_task import BaseAnalysisTask
+from yuxin_mea.pipeline.base_task import BaseAnalysisTask
 
 if TYPE_CHECKING:
-    from pipeline_tasks.analysis.plate_raster_synchrony import WellRecord
+    from yuxin_mea.analysis.plate_raster_synchrony import WellRecord
 
 
 def _load_viewer_components():
     """Lazily import plotly-backed visualization components."""
     try:
-        from pipeline_tasks.analysis.plate_raster_synchrony import (
+        from yuxin_mea.analysis.plate_raster_synchrony import (
             PlateViewerConfig,
             WellRecord,
             build_plate_figure,
@@ -394,7 +394,7 @@ class BasePlateViewer(BaseAnalysisTask):
     def _event_type_keys(self) -> list[str]:
         """Return event table keys from the viewer registry."""
         try:
-            from pipeline_tasks.analysis.plate_raster_synchrony import BURST_EVENT_TYPES
+            from yuxin_mea.analysis.plate_raster_synchrony import BURST_EVENT_TYPES
         except ModuleNotFoundError as exc:
             if exc.name == "plotly":
                 return ["burstlets", "network_bursts", "superbursts"]

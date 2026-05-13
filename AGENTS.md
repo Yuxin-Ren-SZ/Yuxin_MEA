@@ -4,14 +4,17 @@ Concise codebase map for future coding agents. Production code only.
 
 ## Repo Map
 
-- `dataset_manager/` raw MEA discovery, metadata parse, recording/well cache.
-- `pipeline_manager/` per-well task registry, queue, status cache.
-- `config_manager/` JSON config loader/provider.
-- `pipeline_tasks/` concrete analysis tasks.
-- `pipeline_tasks/analysis/` burst detector algorithm and output writer.
+- `src/yuxin_mea/` single namespace; installable as `yuxin_mea` via `pip install -e .`.
+- `src/yuxin_mea/config/` JSON config loader/provider (was `config_manager/`).
+- `src/yuxin_mea/dataset/` raw MEA discovery, metadata parse, recording/well cache (was `dataset_manager/`).
+- `src/yuxin_mea/pipeline/` per-well task registry, queue, status cache (was `pipeline_manager/`).
+- `src/yuxin_mea/tasks/` concrete analysis tasks (was `pipeline_tasks/`).
+- `src/yuxin_mea/analysis/` burst detector algorithm and output writer (promoted from `pipeline_tasks/analysis/`).
+- `src/yuxin_mea/dashboard/` stub (empty; populated in later phase).
+- `src/yuxin_mea/cli/` stub (empty; populated in later phase).
 - `config/` example/default pipeline config JSON.
 - `notebooks/` manual pipeline workflows.
-- `tests/` unit/integration tests for managers and tasks.
+- `tests/` unit/integration tests.
 - `scripts/` helper scripts.
 - `doc/architecture.md` older architecture note; partly stale naming.
 
@@ -40,7 +43,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 ## Config Manager
 
-`config_manager/config_manager.py`
+`src/yuxin_mea/config/manager.py`
 
 - `ConfigManager`: central JSON config provider; implements `BaseConfigProvider`.
 - `__init__`: init template seeds and loaded config stores.
@@ -55,14 +58,14 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 ## Dataset Manager
 
-`dataset_manager/recording_entry.py`
+`src/yuxin_mea/dataset/entries.py`
 
 - `WellEntry`: mutable well metadata holder.
 - `RecordingEntry`: frozen recording fields; mutable metadata/wells/h5 maps.
 - `RecordingEntry.cache_key`: recording identity string.
 - `RecordingEntry.from_path(...)`: parse `data.raw.h5` path into entry; root or sample layout.
 
-`dataset_manager/metadata_extractor.py`
+`src/yuxin_mea/dataset/metadata.py`
 
 - `WellMetadata`: parsed well id plus fields dict.
 - `RecordingMetadata`: recording fields plus selected wells.
@@ -74,7 +77,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `DummyMetadataExtractor`: offline fixed metadata.
 - `DummyMetadataExtractor.get(metadata_path)`: ignore path; return dummy recording/wells.
 
-`dataset_manager/_mxassay_decoder.py`
+`src/yuxin_mea/dataset/_mxassay_decoder.py`
 
 - `_qt_escaped_to_bytes(s)`: decode Qt escaped byte text.
 - `_decode_qt_variant(value)`: decode supported Qt `@Variant(...)` values.
@@ -87,7 +90,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `_json_default(obj)`: CLI JSON fallback.
 - `main()`: CLI decode command.
 
-`dataset_manager/cache_store.py`
+`src/yuxin_mea/dataset/cache.py`
 
 - `BaseCacheStore`: recording cache interface.
 - `BaseCacheStore.load()`: return cache dict.
@@ -101,7 +104,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `JsonCacheStore.save(entries)`: atomic JSON save.
 - `_entry_to_dict(entry)`: typed entry -> JSON dict.
 
-`dataset_manager/dataset_manager.py`
+`src/yuxin_mea/dataset/manager.py`
 
 - `DatasetManager`: discover/cache/query raw recordings.
 - `__init__(...)`: set roots/stores/extractor; initialize cache.
@@ -127,7 +130,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 
 ## Pipeline Manager
 
-`pipeline_manager/base_task.py`
+`src/yuxin_mea/pipeline/base_task.py`
 
 - `BaseAnalysisTask`: abstract pipeline task contract.
 - `__init_subclass__(...)`: validate concrete subclasses have `task_name`, `dependencies`.
@@ -135,36 +138,36 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `resolve_params(config_params)`: shallow merge defaults with config; config wins.
 - `run(recording_key, well_id, data_path, params)`: execute task; return output path.
 
-`pipeline_manager/config_provider.py`
+`src/yuxin_mea/pipeline/config_provider.py`
 
 - `BaseConfigProvider`: config snapshot interface.
 - `BaseConfigProvider.get_config(...)`: return current task config.
 - `DummyConfigProvider`: no-op config provider.
 - `DummyConfigProvider.get_config(...)`: always `{}`.
 
-`pipeline_manager/task_record.py`
+`src/yuxin_mea/pipeline/task_record.py`
 
 - `TaskStatus`: string constants `not_run`, `running`, `complete`, `failed`.
 - `TaskStatus.validate(value)`: reject unknown status.
 - `TaskRecord`: per-task mutable status/deps/output/error/config.
 
-`pipeline_manager/work_item.py`
+`src/yuxin_mea/pipeline/work_item.py`
 
 - `WorkItem`: immutable queued work triple.
 
-`pipeline_manager/pipeline_entry.py`
+`src/yuxin_mea/pipeline/pipeline_entry.py`
 
 - `PipelineEntry`: one recording/well plus task records.
 - `PipelineEntry.pipeline_key`: `recording_key/well_id`.
 
-`pipeline_manager/well_metadata.py`
+`src/yuxin_mea/pipeline/well_metadata.py`
 
 - `BaseWellMetadataProvider`: future per-well metadata interface.
 - `BaseWellMetadataProvider.get_metadata(...)`: return well metadata dict.
 - `DummyWellMetadataProvider`: no-op metadata provider.
 - `DummyWellMetadataProvider.get_metadata(...)`: always `{}`.
 
-`pipeline_manager/cache_store.py`
+`src/yuxin_mea/pipeline/cache.py`
 
 - `BasePipelineCacheStore`: pipeline cache interface.
 - `BasePipelineCacheStore.load()`: return entries by pipeline key.
@@ -178,7 +181,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `JsonPipelineCacheStore.load()`: load typed entries; missing file -> `{}`.
 - `JsonPipelineCacheStore.save(entries)`: atomic JSON save.
 
-`pipeline_manager/manager.py`
+`src/yuxin_mea/pipeline/manager.py`
 
 - `PipelineManager`: task DAG registry and per-well scheduler.
 - `__init__(analysis_dir, config_provider, cache_store)`: load cache; reset stale tasks.
@@ -201,9 +204,9 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `_require_entry(recording_key, well_id)`: entry or `KeyError`.
 - `_require_task(entry, task_name)`: task or `KeyError`.
 
-## Pipeline Tasks
+## Tasks
 
-`pipeline_tasks/preprocessing.py`
+`src/yuxin_mea/tasks/preprocessing.py`
 
 - `PreprocessingTask`: SpikeInterface preprocessing for one Maxwell stream.
 - `default_params()`: output/filter/reference/save defaults.
@@ -212,7 +215,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `_apply_common_reference(rec, spre, params)`: local/global common reference; local fallback to global.
 - `run(...)`: read Maxwell, convert unsigned, bandpass, reference, cast, save zarr.
 
-`pipeline_tasks/sorting.py`
+`src/yuxin_mea/tasks/sorting.py`
 
 - `SortingTask`: Kilosort sorting for preprocessed stream.
 - `default_params()`: sorter/output/VRAM preset defaults.
@@ -224,7 +227,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `_resolve_sorting_params(params)`: shallow merge plus nested preset merge.
 - `run(...)`: load preprocessed recording, run sorter, clean spikes/empty units, save sorting.
 
-`pipeline_tasks/auto_merge.py`
+`src/yuxin_mea/tasks/auto_merge.py`
 
 - `AutoMergeTask`: optional SpikeInterface unit merge.
 - `default_params()`: merge/output defaults.
@@ -232,7 +235,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `build_output_path(output_root, recording_key, rec_name, well_id)`: auto-merge path.
 - `run(...)`: pass-through save when disabled; else temp analyzer, auto-merge, cleanup.
 
-`pipeline_tasks/analyzer.py`
+`src/yuxin_mea/tasks/analyzer.py`
 
 - `AnalyzerTask`: build SortingAnalyzer and compute extensions.
 - `default_params()`: analyzer/output/extension defaults.
@@ -240,7 +243,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `build_output_path(output_root, recording_key, rec_name, well_id)`: analyzer path.
 - `run(...)`: load preprocessed + merged sorting; estimate sparsity; compute extensions.
 
-`pipeline_tasks/auto_curation.py`
+`src/yuxin_mea/tasks/auto_curation.py`
 
 - `AutoCurationTask`: metric threshold curation.
 - `default_params()`: curation thresholds and paths.
@@ -249,7 +252,7 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `_apply_thresholds(metrics, p)`: keep flags and rejection reasons.
 - `run(...)`: load analyzer metrics, mark curated, write parquet/log/spike times.
 
-`pipeline_tasks/burst_detection.py`
+`src/yuxin_mea/tasks/burst_detection.py`
 
 - `BurstDetectionTask`: network burst detection for curated units.
 - `default_params()`: burst detector and path defaults.
@@ -258,9 +261,28 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `build_output_path(output_root, recording_key, rec_name, well_id)`: burst output dir.
 - `run(...)`: load curated spike times, run detector, write outputs.
 
-## Burst Analysis
+`src/yuxin_mea/tasks/iterative_burst_detection.py`
 
-`pipeline_tasks/analysis/burst_detector.py`
+- `IterativeBurstDetectionTask`: Fisher LDA iterative network burst detection.
+- `default_params()`: iterative detector params.
+- `split_compound_well_id(well_id)`: delegate to preprocessing parser.
+- `build_curation_output_path(...)`: auto-curation input dir.
+- `build_output_path(output_root, recording_key, rec_name, well_id)`: output dir.
+- `run(...)`: load curated spike times, run iterative detector, write outputs with quality columns.
+
+`src/yuxin_mea/tasks/base_plate_viewer.py`
+
+- `BasePlateViewer`: ABC for plate raster/synchrony visualization.
+
+`src/yuxin_mea/tasks/plate_viewer.py`
+
+- `PlateViewerTask`: visualize all wells in a recording as interactive raster + burst overlay.
+- `default_params()`: figure and data source paths.
+- `run(...)`: load burst outputs, build plate figure, save HTML.
+
+## Analysis (algorithm code)
+
+`src/yuxin_mea/analysis/burst_detector.py`
 
 - `BurstDetectorError`: insufficient spike data error.
 - `BurstDetectorConfig`: frozen detector parameters; some filters kept but disabled.
@@ -274,15 +296,31 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `compute_network_bursts(spike_times, config)`: detect burstlets/network bursts/superbursts.
 - `compute_network_bursts._to_df(events)`: nested list-to-DataFrame helper.
 
-`pipeline_tasks/analysis/burst_output.py`
+`src/yuxin_mea/analysis/iterative_burst_detector.py`
+
+- `IterativeBurstConfig`: frozen iterative detector parameters.
+- `IterativeBurstError`: iteration failure error.
+- `IterativeBurstTrace`: convergence diagnostics.
+- `compute_iterative_bursts(spike_times, config)`: Fisher LDA iterative detection.
+
+`src/yuxin_mea/analysis/burst_output.py`
 
 - `BurstOutputWriter`: result persistence interface.
 - `BurstOutputWriter.write(results, output_dir)`: persist results.
 - `BurstOutputWriter.read(output_dir)`: reload results.
+- `PickleBurstOutputWriter`: pickle + JSON + npy implementation.
+- `PickleBurstOutputWriter.write(results, output_dir)`: write event pickles, metrics, diagnostics, plot signals.
+- `PickleBurstOutputWriter.read(output_dir)`: reconstruct `BurstResults`.
 - `ParquetBurstOutputWriter`: parquet + JSON + npy implementation.
 - `ParquetBurstOutputWriter.write(results, output_dir)`: write event parquet, metrics, diagnostics, plot signals.
 - `ParquetBurstOutputWriter.read(output_dir)`: reconstruct `BurstResults`.
 - `_atomic_json_write(data, dest)`: atomic JSON write.
+
+`src/yuxin_mea/analysis/plate_raster_synchrony.py`
+
+- `PlateViewerConfig`: display parameters for plate visualization.
+- `WellRecord`: per-well input data and metadata.
+- `build_plate_figure(...)`: construct interactive Plotly figure with well rasters + burst overlays.
 
 ## Scripts
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pipeline_tasks.base_plate_viewer import BasePlateViewer, _load_viewer_components
+from yuxin_mea.tasks.base_plate_viewer import BasePlateViewer, _load_viewer_components
 
 
 class PlateViewerTask(BasePlateViewer):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from pipeline_tasks.analysis.plate_raster_synchrony import (
+from yuxin_mea.analysis.plate_raster_synchrony import (
     PlateViewerConfig,
     WellRecord,
     build_plate_figure,

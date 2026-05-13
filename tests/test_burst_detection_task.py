@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 
-from pipeline_tasks.burst_detection import BurstDetectionTask
-from pipeline_tasks.analysis.burst_detector import BurstDetectorConfig, BurstResults
+from yuxin_mea.tasks.burst_detection import BurstDetectionTask
+from yuxin_mea.analysis.burst_detector import BurstDetectorConfig, BurstResults
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ class BurstDetectionTaskRunTests(unittest.TestCase):
 
         task = BurstDetectionTask()
         with patch(
-            "pipeline_tasks.analysis.burst_detector.compute_network_bursts",
+            "yuxin_mea.analysis.burst_detector.compute_network_bursts",
             return_value=fake_results,
         ) as mock_detector:
             output_path = task.run(_RECORDING_KEY, _WELL_ID, tmp_path / "data.h5", params)

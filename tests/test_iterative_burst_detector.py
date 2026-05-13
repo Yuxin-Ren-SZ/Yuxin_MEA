@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pipeline_tasks.analysis.iterative_burst_detector import (
+from yuxin_mea.analysis.iterative_burst_detector import (
     IterativeBurstConfig,
     IterativeBurstTrace,
     compute_iterative_bursts,

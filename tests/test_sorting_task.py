@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from pipeline_manager import PipelineManager
-from pipeline_manager.task_record import TaskStatus
-from pipeline_tasks import PreprocessingTask
+from yuxin_mea.pipeline import PipelineManager
+from yuxin_mea.pipeline.task_record import TaskStatus
+from yuxin_mea.tasks import PreprocessingTask
 
 
 class _FakeRecording:
@@ -84,20 +84,20 @@ def _install_fake_runtime(
     sys.modules["spikeinterface"] = spikeinterface
     sys.modules["spikeinterface.full"] = full
     sys.modules["torch"] = torch
-    sys.modules.pop("pipeline_tasks.sorting", None)
+    sys.modules.pop("yuxin_mea.tasks.sorting", None)
 
     return calls, recording, sorting
 
 
 def _import_task():
-    module = importlib.import_module("pipeline_tasks.sorting")
+    module = importlib.import_module("yuxin_mea.tasks.sorting")
     return module.SortingTask
 
 
 class SortingTaskTests(unittest.TestCase):
     def tearDown(self) -> None:
         for name in [
-            "pipeline_tasks.sorting",
+            "yuxin_mea.tasks.sorting",
             "spikeinterface",
             "spikeinterface.full",
             "torch",
@@ -106,7 +106,7 @@ class SortingTaskTests(unittest.TestCase):
 
     def test_task_exports_sorting_dependency(self):
         _install_fake_runtime()
-        from pipeline_tasks import SortingTask
+        from yuxin_mea.tasks import SortingTask
 
         self.assertEqual(SortingTask.task_name, "sorting")
         self.assertEqual(SortingTask.dependencies, ["preprocessing"])

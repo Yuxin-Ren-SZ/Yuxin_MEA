@@ -10,13 +10,13 @@ import pandas as pd
 
 
 def test_pipeline_tasks_import_does_not_require_viewer_runtime():
-    import pipeline_tasks
+    from yuxin_mea import tasks as pipeline_tasks
 
     assert pipeline_tasks.PreprocessingTask.task_name == "preprocessing"
 
 
 def test_dataset_manager_root_exports_public_collaborators():
-    import dataset_manager
+    from yuxin_mea import dataset as dataset_manager
 
     assert dataset_manager.JsonCacheStore is not None
     assert dataset_manager.BaseCacheStore is not None
@@ -25,7 +25,7 @@ def test_dataset_manager_root_exports_public_collaborators():
 
 
 def test_json_cache_store_accepts_string_analysis_dir():
-    from dataset_manager import JsonCacheStore
+    from yuxin_mea.dataset import JsonCacheStore
 
     with TemporaryDirectory() as tmp:
         store = JsonCacheStore(tmp)
@@ -34,7 +34,7 @@ def test_json_cache_store_accepts_string_analysis_dir():
 
 
 def test_analysis_exports_public_error_and_writer_alias():
-    from pipeline_tasks.analysis import (
+    from yuxin_mea.analysis import (
         BurstDetectorError,
         ParquetBurstOutputWriter,
         PickleBurstOutputWriter,
@@ -45,8 +45,8 @@ def test_analysis_exports_public_error_and_writer_alias():
 
 
 def test_config_template_creates_parent_directory():
-    from config_manager import ConfigManager
-    from pipeline_tasks import PreprocessingTask
+    from yuxin_mea.config import ConfigManager
+    from yuxin_mea.tasks import PreprocessingTask
 
     with TemporaryDirectory() as tmp:
         output = Path(tmp) / "nested" / "pipeline_config.json"
@@ -59,9 +59,9 @@ def test_config_template_creates_parent_directory():
 
 
 def test_pipeline_manager_filters_next_task_by_recording_key():
-    from pipeline_manager import PipelineManager
-    from pipeline_manager.task_record import TaskStatus
-    from pipeline_tasks import PreprocessingTask
+    from yuxin_mea.pipeline import PipelineManager
+    from yuxin_mea.pipeline.task_record import TaskStatus
+    from yuxin_mea.tasks import PreprocessingTask
 
     with TemporaryDirectory() as tmp:
         manager = PipelineManager(Path(tmp))
@@ -91,10 +91,10 @@ def test_pipeline_manager_filters_next_task_by_recording_key():
 
 
 def test_pipeline_manager_ignores_cached_unregistered_tasks():
-    from pipeline_manager import PipelineManager
-    from pipeline_manager.cache_store import JsonPipelineCacheStore
-    from pipeline_manager.task_record import TaskRecord, TaskStatus
-    from pipeline_tasks import PreprocessingTask
+    from yuxin_mea.pipeline import PipelineManager
+    from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
+    from yuxin_mea.pipeline.task_record import TaskRecord, TaskStatus
+    from yuxin_mea.tasks import PreprocessingTask
 
     with TemporaryDirectory() as tmp:
         analysis_dir = Path(tmp)
@@ -122,7 +122,7 @@ def test_pipeline_manager_ignores_cached_unregistered_tasks():
 
 
 def test_plate_viewer_loads_compound_upstream_paths():
-    from pipeline_tasks.plate_viewer import PlateViewerTask
+    from yuxin_mea.tasks.plate_viewer import PlateViewerTask
 
     @dataclass
     class StubWellRecord:
@@ -166,7 +166,7 @@ def test_plate_viewer_loads_compound_upstream_paths():
 
 
 def test_plate_viewer_loads_cache_metadata_and_rec_map():
-    from pipeline_tasks.plate_viewer import PlateViewerTask
+    from yuxin_mea.tasks.plate_viewer import PlateViewerTask
 
     recording_key = "SampleA/240415/PlateX/Network/001"
 
@@ -210,7 +210,7 @@ def test_plate_viewer_loads_cache_metadata_and_rec_map():
 
 
 def test_plate_viewer_loads_auto_rec_names_across_outputs():
-    from pipeline_tasks.plate_viewer import PlateViewerTask
+    from yuxin_mea.tasks.plate_viewer import PlateViewerTask
 
     @dataclass
     class StubWellRecord:
@@ -256,7 +256,7 @@ def test_plate_viewer_loads_auto_rec_names_across_outputs():
 
 
 def test_plate_viewer_loads_burst_event_intervals():
-    from pipeline_tasks.plate_viewer import PlateViewerTask
+    from yuxin_mea.tasks.plate_viewer import PlateViewerTask
 
     @dataclass
     class StubWellRecord:
@@ -309,7 +309,7 @@ def test_plate_viewer_loads_burst_event_intervals():
 
 
 def test_plate_viewer_event_intervals_tolerate_missing_files():
-    from pipeline_tasks.plate_viewer import PlateViewerTask
+    from yuxin_mea.tasks.plate_viewer import PlateViewerTask
 
     recording_key = "SampleA/240415/PlateX/Network/001"
     with TemporaryDirectory() as tmp:
@@ -325,7 +325,7 @@ def test_plate_viewer_event_intervals_tolerate_missing_files():
 
 
 def test_plate_viewer_resolves_cache_fallback_and_discovers_rec_names():
-    from pipeline_tasks.plate_viewer import PlateViewerTask
+    from yuxin_mea.tasks.plate_viewer import PlateViewerTask
 
     recording_key = "SampleA/240415/PlateX/Network/001"
 

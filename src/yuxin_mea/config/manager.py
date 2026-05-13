@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from pipeline_manager.config_provider import BaseConfigProvider
+from yuxin_mea.pipeline.config_provider import BaseConfigProvider
 
 logger = logging.getLogger(__name__)
 

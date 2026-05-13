@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pipeline_manager import BaseAnalysisTask
+from yuxin_mea.pipeline import BaseAnalysisTask
 
 
 class PreprocessingTask(BaseAnalysisTask):

@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pipeline_manager import BaseAnalysisTask
-from pipeline_tasks.analyzer import AnalyzerTask
-from pipeline_tasks.preprocessing import PreprocessingTask
+from yuxin_mea.pipeline import BaseAnalysisTask
+from yuxin_mea.tasks.analyzer import AnalyzerTask
+from yuxin_mea.tasks.preprocessing import PreprocessingTask
 
 
 class AutoCurationTask(BaseAnalysisTask):

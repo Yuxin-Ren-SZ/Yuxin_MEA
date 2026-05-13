@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 # These imports will fail until we create base_plate_viewer.py
-from pipeline_tasks.base_plate_viewer import BasePlateViewer
+from yuxin_mea.tasks.base_plate_viewer import BasePlateViewer
 
 
 class _FakeViewer(BasePlateViewer):
@@ -113,8 +113,8 @@ def test_base_plate_viewer_cannot_be_instantiated_without_hooks():
 # ---------------------------------------------------------------------------
 
 import plotly.graph_objects as go
-from pipeline_tasks.plate_viewer import PlateViewerTask
-from pipeline_tasks.analysis.plate_raster_synchrony import WellRecord
+from yuxin_mea.tasks.plate_viewer import PlateViewerTask
+from yuxin_mea.analysis.plate_raster_synchrony import WellRecord
 
 
 def _missing_well_records() -> list[WellRecord]:
