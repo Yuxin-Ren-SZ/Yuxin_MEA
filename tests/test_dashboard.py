@@ -175,4 +175,20 @@ def test_load_pipeline_df_pivots_status():
 
 
 def test_page_modules_import():
-    from yuxin_mea.dashboard.pages import home, recordings, pipeline  # noqa: F401
+    from yuxin_mea.dashboard.pages import (  # noqa: F401
+        burst_diagnostic, home, pipeline, recordings,
+    )
+
+
+def test_burst_diagnostic_page_registered():
+    """After build_app, dash.page_registry must include /burst-diagnostic."""
+    import dash
+
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        cfg = tmp_path / "pipeline_config.json"
+        _write_minimal_config(cfg, tmp_path)
+        build_app(cfg)  # registers pages as a side-effect of construction
+
+        paths = {p["path"] for p in dash.page_registry.values()}
+        assert "/burst-diagnostic" in paths

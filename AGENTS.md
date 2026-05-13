@@ -9,8 +9,13 @@ Concise codebase map for future coding agents. Production code only.
 - `src/yuxin_mea/dataset/` raw MEA discovery, metadata parse, recording/well cache (was `dataset_manager/`).
 - `src/yuxin_mea/pipeline/` per-well task registry, queue, status cache (was `pipeline_manager/`).
 - `src/yuxin_mea/tasks/` concrete analysis tasks (was `pipeline_tasks/`).
-- `src/yuxin_mea/analysis/` burst detector algorithm and output writer (promoted from `pipeline_tasks/analysis/`).
-- `src/yuxin_mea/dashboard/` stub (empty; populated in later phase).
+- `src/yuxin_mea/analysis/` burst detector algorithm and output writer; burst diagnostic library (promoted from `pipeline_tasks/analysis/`).
+  - `burst_detector.py`, `iterative_burst_detector.py`, `burst_output.py`, `plate_raster_synchrony.py`.
+  - `burst_diagnostic.py` — pure library for batch analysis/caching/diagnostics; no Dash imports.
+- `src/yuxin_mea/dashboard/` multipage Dash app for non-technical users; read-only browsing of dataset/pipeline/burst diagnostics.
+  - `__init__.py`, `__main__.py`, `cli.py`, `app.py`, `data.py`.
+  - `components/layout.py` — navbar + page container.
+  - `pages/{home,recordings,pipeline,burst_diagnostic}.py` — registered pages.
 - `src/yuxin_mea/cli/` stub (empty; populated in later phase).
 - `config/` example/default pipeline config JSON.
 - `notebooks/` manual pipeline workflows.
@@ -40,6 +45,8 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - Missing cached date dirs logged; cached entries kept.
 - Metadata dict keys dynamic; do not hardcode MaxWell annotation keys.
 - `auto_curation` writes `curated_spike_times.npy`; hard input contract for `burst_detection`.
+- Dashboard pages use pure cache loaders (`load_recordings_df`, `load_pipeline_df`) instead of managers to enforce read-only semantics.
+- Notebook scripts are CLI tools; `notebooks/07_iterative_burst_detector_diagnostic.py` is HTML-export-only (uses burst_diagnostic library).
 
 ## Config Manager
 
@@ -321,6 +328,97 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - `PlateViewerConfig`: display parameters for plate visualization.
 - `WellRecord`: per-well input data and metadata.
 - `build_plate_figure(...)`: construct interactive Plotly figure with well rasters + burst overlays.
+
+## Analysis — burst diagnostic
+
+`src/yuxin_mea/analysis/burst_diagnostic.py`
+
+Pure library (no Dash imports) for batch iterative burst analysis, caching, and diagnostic figures.
+
+- `BatchResults`: dataclass holding spike_times/traces/results for default + no_gate configs.
+- `BatchResults.recording_names`: sorted recording list for stable iteration.
+- `BatchResults.trace(name, kind)`: accessor for trace by config.
+- `BatchResults.result(name, kind)`: accessor for result by config.
+- `is_kilosort_dir(path)`: check for spike_times.npy + spike_clusters.npy + params.py.
+- `discover_real_spike_sources(root)`: find all Kilosort/curated spike-time sources under root.
+- `_read_kilosort_sample_rate(params_path)`: extract sample_rate/fs/sampling_rate from params.py.
+- `_read_kilosort_keep_clusters(ks_dir, labels)`: filter clusters by label (good/mua/noise).
+- `load_kilosort_spike_times(ks_dir, labels)`: load spike times, optionally filtered by cluster label.
+- `run_batch(sources, config_default, config_no_gate, labels, verbose)`: run detector on every source.
+- `save_html(fig, path, offline)`: write Plotly figure to HTML (CDN or offline).
+- `save_all_section_htmls(batch, output_dir, trace_kind, plot_all_iters, offline)`: generate all diagnostic HTML files.
+- `fig_kill_attribution(batch)`: survivors vs dropped at each stage, one subplot per recording.
+- `fig_cross_stage_flow(batch)`: stacked-bar cross-stage flow.
+- `fig_stage1_composite_slider(batch, recording, trace_kind)`: composite signal with iteration slider.
+- `fig_stage2_participation(batch)`: participation floor facet scatter.
+- `fig_stage3_bmi(batch)`: BMI/LLR gate facet scatter.
+- `fig_stage4_gmm_pca(batch, recording)`: GMM event clustering 2x2 PCA panels.
+- `fig_section_c_lda_pca(batch, recording, trace_kind, plot_all_iters)`: per-iteration LDA PCA.
+- `fig_section_d_boundary_shift(batch, recording, trace_kind)`: input vs output PCA boundary shift.
+- `fig_section_e_3d_pca(batch, recording, trace_kind)`: 3D PCA at converged iteration.
+- `fig_section_f_gmm_bic_sweep(batch, recording, trace_kind)`: multi-k GMM BIC sweep.
+- `fig_section_g_time_strip(batch, recording, trace_kind)`: bin-level cluster assignment time strip.
+- `_fit_gmm_bic_sweep(Xn, ks)`: fit GMMs for k 2–5; return fits/BIC/best_k.
+- `cache_key(root)`: deterministic SHA1 hash of absolute root path.
+- `cache_path(analysis_root, key)`: per-analysis cache location `<analysis_root>/burst_diagnostic_cache/<key>.pkl`.
+- `load_or_run_batch(root, analysis_root, force_recompute)`: return `(batch, came_from_cache)` with pickle caching.
+
+## Dashboard
+
+`src/yuxin_mea/dashboard/__init__.py`
+
+- `build_app`: multipage Dash app builder; public API export.
+
+`src/yuxin_mea/dashboard/__main__.py`
+
+- Entry point for `python -m yuxin_mea.dashboard`; delegates to `cli.main()`.
+
+`src/yuxin_mea/dashboard/cli.py`
+
+- `main(argv)`: argparse entry point; `--config`, `--host`, `--port`, `--debug`; console script `yuxin-mea-dashboard`.
+
+`src/yuxin_mea/dashboard/app.py`
+
+- `build_app(config_path)`: build Dash app; load config; stash resolved paths on `app.server.config["YUXIN_MEA"]`.
+- `_resolve_optional_path(value)`: coerce non-empty string to Path or None.
+
+`src/yuxin_mea/dashboard/data.py`
+
+Pure cache loaders (no manager instantiation) for read-only dashboard semantics.
+
+- `load_recordings_df(analysis_root)`: read `experiment_cache.json`; return row-per-recording DataFrame.
+- `load_pipeline_df(analysis_root)`: read `pipeline_cache.json`; return (recording × well) × task status matrix + task_names list.
+
+`src/yuxin_mea/dashboard/components/layout.py`
+
+- `build_layout()`: static app shell with navbar + page container.
+- `_nav_links()`: build nav links sorted by page order then name.
+
+`src/yuxin_mea/dashboard/pages/home.py`
+
+Registered at `/` (order=0). Shows config path, data roots, and cache entry counts.
+
+- Page layout with config summary + cache summary callbacks.
+
+`src/yuxin_mea/dashboard/pages/recordings.py`
+
+Registered at `/recordings` (order=1). Sortable/filterable recordings table from `experiment_cache.json`.
+
+- Page layout with Refresh button, DataTable with native filter/sort.
+
+`src/yuxin_mea/dashboard/pages/pipeline.py`
+
+Registered at `/pipeline` (order=2). (recording × well) × task status matrix with color coding.
+
+- Page layout, status→color map, Refresh button, conditional cell styling.
+
+`src/yuxin_mea/dashboard/pages/burst_diagnostic.py`
+
+Registered at `/burst-diagnostic` (order=3). Burst detector batch runner and diagnostic figure gallery.
+
+- Root input + Load/Recompute buttons; recording + trace dropdowns; figure display callbacks.
+- Module-global `_LOADED_BATCHES` dict (single-user assumption).
+- Callbacks: prefill default root, load/recompute, batch_key→summary figures, (batch_key, recording, trace)→per-recording figures.
 
 ## Scripts
 

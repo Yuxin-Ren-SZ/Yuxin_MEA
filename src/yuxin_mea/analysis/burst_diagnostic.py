@@ -1,19 +1,24 @@
-"""Burst detector diagnostic plotting + Dash dashboard.
+"""Burst detector diagnostic — pure library (no Dash imports).
 
 Public API:
 - ``BatchResults`` dataclass holding all detector outputs.
 - ``run_batch`` to execute the iterative burst detector on every Kilosort
   source under a root directory, with two configs (default + no-gate).
+- ``load_or_run_batch`` — caching wrapper: pickle to
+  ``<analysis_root>/burst_diagnostic_cache/<key>.pkl``.
 - ``fig_*`` functions, each returning a ``plotly.graph_objects.Figure``
   for one diagnostic plot.
 - ``save_html`` / ``save_all_section_htmls`` to write the figures to disk.
-- ``build_dashboard_app`` to assemble a Dash web app from a ``BatchResults``.
 
-This module is the extraction of the plotting/data-loading code that used
-to live inline in ``notebooks/07_iterative_burst_detector_diagnostic.ipynb``.
+The Dash-app construction lives in
+``yuxin_mea.dashboard.pages.burst_diagnostic`` and reuses the figure
+functions from this module. Keep this module free of ``dash`` imports so
+notebooks and unit tests can use the figures without a web-stack dependency.
 """
 from __future__ import annotations
 
+import hashlib
+import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,7 +31,7 @@ from plotly.subplots import make_subplots
 from sklearn.decomposition import PCA
 from sklearn.mixture import GaussianMixture
 
-from pipeline_tasks.analysis import (
+from yuxin_mea.analysis import (
     IterativeBurstConfig,
     IterativeBurstTrace,
     compute_iterative_bursts,
@@ -1354,152 +1359,58 @@ def save_all_section_htmls(
 
 
 # ---------------------------------------------------------------------------
-# Dash dashboard
+# Disk cache for BatchResults (so dashboard reloads don't recompute)
 # ---------------------------------------------------------------------------
 
+_CACHE_VERSION = 1  # Bump if BatchResults shape changes.
 
-def build_dashboard_app(
-    batch: BatchResults,
-    initial_recording: str | None = None,
-    initial_trace_kind: str = "default",
-):
-    """Assemble a Dash app that renders every plot for the batch.
 
-    Layout: a top control bar (recording + trace dropdowns) followed by three
-    tabs (Summary, Kill stages, LDA deep-dive). Dropdown changes trigger
-    callbacks that re-render the per-recording figures.
+def cache_key(root: Path) -> str:
+    """Deterministic cache key for a Kilosort root.
+
+    Hashes the absolute path string only — does not stat the input files.
+    Use the dashboard's Recompute button (or delete the cache file) when
+    the underlying spike-time data changes.
     """
-    from dash import Dash, dcc, html, Input, Output
+    h = hashlib.sha1(str(Path(root).resolve()).encode()).hexdigest()[:16]
+    return f"v{_CACHE_VERSION}_{h}"
 
-    if not batch.recording_names:
-        raise ValueError("BatchResults is empty — nothing to display.")
 
-    if initial_recording is None or initial_recording not in batch.recording_names:
-        initial_recording = batch.recording_names[0]
+def cache_path(analysis_root: Path, key: str) -> Path:
+    """Per-analysis cache location: <analysis_root>/burst_diagnostic_cache/<key>.pkl."""
+    return Path(analysis_root) / "burst_diagnostic_cache" / f"{key}.pkl"
 
-    total_burstlets = sum(len(r.burstlets) for r in batch.results.values())
-    total_net = sum(len(r.network_bursts) for r in batch.results.values())
 
-    app = Dash(__name__)
-    app.title = "Burst Detector Diagnostic"
+def load_or_run_batch(
+    root: Path,
+    analysis_root: Path | None,
+    *,
+    force_recompute: bool = False,
+) -> tuple[BatchResults, bool]:
+    """Return ``(batch, came_from_cache)``. Writes the cache on a fresh run.
 
-    # Cross-recording figures are pre-computed — they don't depend on dropdowns.
-    fig_kill = fig_kill_attribution(batch)
-    fig_xflow = fig_cross_stage_flow(batch)
-    fig_part = fig_stage2_participation(batch)
-    fig_bmi = fig_stage3_bmi(batch)
+    ``analysis_root=None`` disables on-disk caching and always runs fresh —
+    safe to call from a dashboard whose config has no ``analysis_root`` yet.
 
-    app.layout = html.Div(
-        style={"fontFamily": "sans-serif", "padding": "16px"},
-        children=[
-            html.Div(
-                [
-                    html.H2(
-                        "Iterative Burst Detector — Diagnostic Dashboard",
-                        style={"margin": "0"},
-                    ),
-                    html.Div(
-                        f"{len(batch.recording_names)} recordings  •  "
-                        f"{total_burstlets} burstlets  •  {total_net} network bursts",
-                        style={"color": "#555", "fontSize": "13px"},
-                    ),
-                ]
-            ),
-            html.Hr(),
-            html.Div(
-                [
-                    html.Label("Recording: ", style={"marginRight": "6px"}),
-                    dcc.Dropdown(
-                        id="recording-dropdown",
-                        options=[
-                            {"label": n, "value": n} for n in batch.recording_names
-                        ],
-                        value=initial_recording,
-                        clearable=False,
-                        style={"width": "260px", "display": "inline-block"},
-                    ),
-                    html.Span(style={"display": "inline-block", "width": "24px"}),
-                    html.Label("Trace: ", style={"marginRight": "6px"}),
-                    dcc.Dropdown(
-                        id="trace-dropdown",
-                        options=[
-                            {"label": "default", "value": "default"},
-                            {"label": "no_gate", "value": "no_gate"},
-                        ],
-                        value=initial_trace_kind,
-                        clearable=False,
-                        style={"width": "150px", "display": "inline-block"},
-                    ),
-                ],
-                style={"marginBottom": "12px"},
-            ),
-            dcc.Tabs(
-                id="tabs",
-                value="summary",
-                children=[
-                    dcc.Tab(
-                        label="Summary",
-                        value="summary",
-                        children=[
-                            dcc.Graph(figure=fig_kill),
-                            dcc.Graph(figure=fig_xflow),
-                        ],
-                    ),
-                    dcc.Tab(
-                        label="Kill stages",
-                        value="kill",
-                        children=[
-                            html.H4("Stage 1 — Composite signal (per recording)"),
-                            dcc.Graph(id="stage1-graph"),
-                            html.H4("Stage 2 — Participation floor"),
-                            dcc.Graph(figure=fig_part),
-                            html.H4("Stage 3 — BMI / LLR gate"),
-                            dcc.Graph(figure=fig_bmi),
-                            html.H4("Stage 4 — GMM event clustering"),
-                            dcc.Graph(id="stage4-graph"),
-                        ],
-                    ),
-                    dcc.Tab(
-                        label="LDA deep-dive",
-                        value="lda",
-                        children=[
-                            html.H4("Section C — LDA PCA per iteration"),
-                            dcc.Graph(id="section-c-graph"),
-                            html.H4("Section D — Boundary shift"),
-                            dcc.Graph(id="section-d-graph"),
-                            html.H4("Section E — 3D PCA at converged iteration"),
-                            dcc.Graph(id="section-e-graph"),
-                            html.H4("Section F — Multi-k GMM BIC sweep"),
-                            dcc.Graph(id="section-f-graph"),
-                            html.H4("Section G — GMM cluster time strip"),
-                            dcc.Graph(id="section-g-graph"),
-                        ],
-                    ),
-                ],
-            ),
-        ],
-    )
+    ``labels`` is intentionally not a parameter. The cache key hashes only
+    the path, so a label change would silently return stale data. Callers
+    needing non-default labels must invoke :func:`run_batch` directly and
+    own their own cache decisions.
+    """
+    sources = discover_real_spike_sources(root)
+    if not sources:
+        raise FileNotFoundError(f"No Kilosort sources under {root}")
 
-    @app.callback(
-        Output("stage1-graph", "figure"),
-        Output("stage4-graph", "figure"),
-        Output("section-c-graph", "figure"),
-        Output("section-d-graph", "figure"),
-        Output("section-e-graph", "figure"),
-        Output("section-f-graph", "figure"),
-        Output("section-g-graph", "figure"),
-        Input("recording-dropdown", "value"),
-        Input("trace-dropdown", "value"),
-    )
-    def _update_per_recording(recording: str, trace_kind: str):
-        return (
-            fig_stage1_composite_slider(batch, recording, trace_kind),
-            fig_stage4_gmm_pca(batch, recording),
-            fig_section_c_lda_pca(batch, recording, trace_kind, False),
-            fig_section_d_boundary_shift(batch, recording, trace_kind),
-            fig_section_e_3d_pca(batch, recording, trace_kind),
-            fig_section_f_gmm_bic_sweep(batch, recording, trace_kind),
-            fig_section_g_time_strip(batch, recording, trace_kind),
-        )
+    cache_file: Path | None = None
+    if analysis_root is not None:
+        cache_file = cache_path(analysis_root, cache_key(root))
+        if not force_recompute and cache_file.exists():
+            with cache_file.open("rb") as fh:
+                return pickle.load(fh), True
 
-    return app
+    batch = run_batch(sources, labels=frozenset({"good"}), verbose=False)
+    if cache_file is not None:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        with cache_file.open("wb") as fh:
+            pickle.dump(batch, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    return batch, False
