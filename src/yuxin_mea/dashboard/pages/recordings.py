@@ -6,6 +6,7 @@ import dash
 from dash import Input, Output, callback, dash_table, html
 from flask import current_app
 
+from yuxin_mea.dashboard.components import no_config_banner
 from yuxin_mea.dashboard.data import load_recordings_df
 
 
@@ -20,6 +21,7 @@ layout = html.Div(
             "Click column headers to sort; the row of filter boxes under each "
             "header filters on substring match."
         ),
+        html.Div(id="recordings-banner-slot"),
         html.Div(
             [
                 html.Button("Refresh", id="recordings-refresh", n_clicks=0),
@@ -43,15 +45,18 @@ layout = html.Div(
 
 
 @callback(
+    Output("recordings-banner-slot", "children"),
     Output("recordings-table", "data"),
     Output("recordings-table", "columns"),
     Output("recordings-status", "children"),
     Input("recordings-refresh", "n_clicks"),
 )
-def _refresh(_n_clicks: int) -> tuple[list[dict], list[dict], str]:
-    analysis_root = current_app.config["YUXIN_MEA"]["analysis_root"]
+def _refresh(_n_clicks: int):
+    ctx = current_app.config["YUXIN_MEA"]
+    banner = None if ctx.get("config_exists") else no_config_banner()
+    analysis_root = ctx["analysis_root"]
     if analysis_root is None:
-        return [], [], "analysis_root is not set in the config."
+        return banner, [], [], "analysis_root is not set in the config."
     df = load_recordings_df(analysis_root)
     columns = [{"name": c, "id": c} for c in df.columns]
-    return df.to_dict("records"), columns, f"{len(df)} recording(s)"
+    return banner, df.to_dict("records"), columns, f"{len(df)} recording(s)"

@@ -6,6 +6,7 @@ import dash
 from dash import Input, Output, callback, dash_table, html
 from flask import current_app
 
+from yuxin_mea.dashboard.components import no_config_banner
 from yuxin_mea.dashboard.data import load_pipeline_df
 
 
@@ -44,6 +45,7 @@ layout = html.Div(
             "the cache. Em-dash cells (—) mean that task was never "
             "registered for the entry. Filter and sort using the column headers."
         ),
+        html.Div(id="pipeline-banner-slot"),
         html.Div(
             [
                 html.Button("Refresh", id="pipeline-refresh", n_clicks=0),
@@ -71,21 +73,24 @@ layout = html.Div(
 
 
 @callback(
+    Output("pipeline-banner-slot", "children"),
     Output("pipeline-table", "data"),
     Output("pipeline-table", "columns"),
     Output("pipeline-table", "style_data_conditional"),
     Output("pipeline-status", "children"),
     Input("pipeline-refresh", "n_clicks"),
 )
-def _refresh(_n_clicks: int) -> tuple[list[dict], list[dict], list[dict], str]:
-    analysis_root = current_app.config["YUXIN_MEA"]["analysis_root"]
+def _refresh(_n_clicks: int):
+    ctx = current_app.config["YUXIN_MEA"]
+    banner = None if ctx.get("config_exists") else no_config_banner()
+    analysis_root = ctx["analysis_root"]
     if analysis_root is None:
-        return [], [], [], "analysis_root is not set in the config."
+        return banner, [], [], [], "analysis_root is not set in the config."
 
     df, task_names = load_pipeline_df(analysis_root)
     columns = [{"name": c, "id": c} for c in df.columns]
     style = _build_conditional_style(task_names)
-    return df.to_dict("records"), columns, style, f"{len(df)} pipeline entr(ies)"
+    return banner, df.to_dict("records"), columns, style, f"{len(df)} pipeline entr(ies)"
 
 
 def _build_conditional_style(task_names: list[str]) -> list[dict]:

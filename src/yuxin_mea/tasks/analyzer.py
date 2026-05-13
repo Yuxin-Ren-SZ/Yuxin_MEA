@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from yuxin_mea.config import ParamSpec
 from yuxin_mea.pipeline import BaseAnalysisTask
 from yuxin_mea.tasks.auto_merge import AutoMergeTask
 from yuxin_mea.tasks.preprocessing import PreprocessingTask
@@ -31,6 +32,54 @@ class AnalyzerTask(BaseAnalysisTask):
             "ms_after": 2.0,
             "unit_locations_method": "monopolar_triangulation",
             "n_jobs": 1,
+        }
+
+    @classmethod
+    def params_schema(cls) -> dict[str, ParamSpec]:
+        defaults = cls.default_params()
+        return {
+            "output_root": ParamSpec(
+                "path", defaults["output_root"],
+                "Directory where SortingAnalyzer outputs are written "
+                "(per recording/well).",
+            ),
+            "preprocessing_output_root": ParamSpec(
+                "path", defaults["preprocessing_output_root"],
+                "Root directory of the upstream PreprocessingTask Zarr outputs.",
+            ),
+            "auto_merge_output_root": ParamSpec(
+                "path", defaults["auto_merge_output_root"],
+                "Root directory of the upstream AutoMergeTask sorting outputs.",
+            ),
+            "radius_um": ParamSpec(
+                "float", defaults["radius_um"],
+                "Sparsity radius in µm used by estimate_sparsity (method='radius').",
+                min=0,
+            ),
+            "ms_before": ParamSpec(
+                "float", defaults["ms_before"],
+                "Waveform window before each spike, in milliseconds.",
+                min=0,
+            ),
+            "ms_after": ParamSpec(
+                "float", defaults["ms_after"],
+                "Waveform window after each spike, in milliseconds.",
+                min=0,
+            ),
+            "unit_locations_method": ParamSpec(
+                "str", defaults["unit_locations_method"],
+                "SpikeInterface method used to estimate unit locations.",
+                choices=[
+                    "monopolar_triangulation",
+                    "center_of_mass",
+                    "grid_convolution",
+                ],
+            ),
+            "n_jobs": ParamSpec(
+                "int", defaults["n_jobs"],
+                "Parallel worker count for analyzer.compute().",
+                min=1,
+            ),
         }
 
     @staticmethod

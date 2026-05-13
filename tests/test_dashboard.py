@@ -44,12 +44,23 @@ def _write_minimal_config(path: Path, analysis_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cli_fails_without_config(capsys):
-    rc = main(["--config", "/definitely/does/not/exist.json"])
-    assert rc == 2
+def test_cli_warns_on_missing_config_but_proceeds(capsys, monkeypatch):
+    """Phase 3: missing config no longer exits — dashboard launches in
+    config-only mode after a stderr warning."""
+    from unittest.mock import MagicMock
+
+    fake_app = MagicMock()
+    monkeypatch.setattr(
+        "yuxin_mea.dashboard.app.build_app",
+        lambda *a, **kw: fake_app,
+    )
+
+    rc = main(["--config", "/definitely/does/not/exist.json", "--port", "0"])
+    assert rc == 0
     err = capsys.readouterr().err
     assert "Config file not found" in err
-    assert "pipeline_config.example.json" in err
+    assert "config-only mode" in err
+    fake_app.run.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

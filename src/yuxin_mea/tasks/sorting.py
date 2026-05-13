@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from yuxin_mea.config import ParamSpec
 from yuxin_mea.pipeline import BaseAnalysisTask
 from yuxin_mea.tasks.preprocessing import PreprocessingTask
 
@@ -47,6 +48,169 @@ class SortingTask(BaseAnalysisTask):
                 "do_correction": False,
             },
             "sorter_kwargs": {},
+        }
+
+    @classmethod
+    def params_schema(cls) -> dict[str, ParamSpec]:
+        defaults = cls.default_params()
+        high_vram_defaults = defaults["high_vram_sorter_kwargs"]
+        low_vram_defaults = defaults["low_vram_sorter_kwargs"]
+        return {
+            "preprocessing_output_root": ParamSpec(
+                "path", defaults["preprocessing_output_root"],
+                "Root directory where the upstream PreprocessingTask wrote its "
+                "Zarr stores; used to locate the input recording.",
+            ),
+            "output_root": ParamSpec(
+                "path", defaults["output_root"],
+                "Directory where sorter output folders are written "
+                "(per recording/well).",
+            ),
+            "sorter": ParamSpec(
+                "str", defaults["sorter"],
+                "SpikeInterface sorter name passed to si.run_sorter().",
+                choices=[
+                    "kilosort4",
+                    "kilosort2",
+                    "kilosort3",
+                    "tridesclous2",
+                    "mountainsort5",
+                    "spykingcircus2",
+                ],
+            ),
+            "docker_image": ParamSpec(
+                "str", defaults["docker_image"],
+                "Docker image to run the sorter in. Leave blank to run "
+                "natively (None is passed to si.run_sorter()).",
+                nullable=True,
+            ),
+            "verbose": ParamSpec(
+                "bool", defaults["verbose"],
+                "Verbose logging from the sorter.",
+            ),
+            "remove_existing_folder": ParamSpec(
+                "bool", defaults["remove_existing_folder"],
+                "If True, delete a pre-existing sorter output folder before "
+                "running.",
+            ),
+            "delete_output_folder": ParamSpec(
+                "bool", defaults["delete_output_folder"],
+                "If True, delete the sorter output folder after sorting "
+                "finishes (forwarded to si.run_sorter()).",
+            ),
+            "overwrite": ParamSpec(
+                "bool", defaults["overwrite"],
+                "Overwrite the cleaned sorting output folder when saving.",
+            ),
+            "clean_excess_spikes": ParamSpec(
+                "bool", defaults["clean_excess_spikes"],
+                "Run si.remove_excess_spikes() to drop spikes past the "
+                "recording end.",
+            ),
+            "remove_empty_units": ParamSpec(
+                "bool", defaults["remove_empty_units"],
+                "Drop units with zero spikes after sorting.",
+            ),
+            "min_high_vram_gb": ParamSpec(
+                "float", defaults["min_high_vram_gb"],
+                "VRAM threshold (GB). At or above this, high_vram_sorter_kwargs "
+                "are used; otherwise low_vram_sorter_kwargs.",
+                min=0,
+            ),
+            "high_vram_sorter_kwargs": ParamSpec(
+                "dict", defaults["high_vram_sorter_kwargs"],
+                "Sorter kwargs preset for GPUs with >= min_high_vram_gb.",
+                nested_schema={
+                    "batch_size_seconds": ParamSpec(
+                        "float", high_vram_defaults["batch_size_seconds"],
+                        "Batch length in seconds; converted to samples via "
+                        "the recording sampling rate.",
+                        min=0,
+                    ),
+                    "clear_cache": ParamSpec(
+                        "bool", high_vram_defaults["clear_cache"],
+                        "Clear sorter internal caches between batches.",
+                    ),
+                    "invert_sign": ParamSpec(
+                        "bool", high_vram_defaults["invert_sign"],
+                        "Invert recording polarity before sorting.",
+                    ),
+                    "cluster_downsampling": ParamSpec(
+                        "int", high_vram_defaults["cluster_downsampling"],
+                        "Downsampling factor used during clustering.",
+                        min=1,
+                    ),
+                    "max_cluster_subset": ParamSpec(
+                        "int", high_vram_defaults["max_cluster_subset"],
+                        "Max spikes per cluster used in clustering. Leave "
+                        "blank for no limit (None).",
+                        min=0, nullable=True,
+                    ),
+                    "nblocks": ParamSpec(
+                        "int", high_vram_defaults["nblocks"],
+                        "Number of drift-correction blocks; 0 disables block "
+                        "drift correction.",
+                        min=0,
+                    ),
+                    "dmin": ParamSpec(
+                        "int", high_vram_defaults["dmin"],
+                        "Minimum vertical spacing (µm) between detected "
+                        "templates.",
+                        min=0,
+                    ),
+                    "do_correction": ParamSpec(
+                        "bool", high_vram_defaults["do_correction"],
+                        "Enable Kilosort drift correction.",
+                    ),
+                },
+            ),
+            "low_vram_sorter_kwargs": ParamSpec(
+                "dict", defaults["low_vram_sorter_kwargs"],
+                "Sorter kwargs preset for GPUs with < min_high_vram_gb.",
+                nested_schema={
+                    "batch_size_seconds": ParamSpec(
+                        "float", low_vram_defaults["batch_size_seconds"],
+                        "Batch length in seconds; converted to samples via "
+                        "the recording sampling rate.",
+                        min=0,
+                    ),
+                    "clear_cache": ParamSpec(
+                        "bool", low_vram_defaults["clear_cache"],
+                        "Clear sorter internal caches between batches.",
+                    ),
+                    "invert_sign": ParamSpec(
+                        "bool", low_vram_defaults["invert_sign"],
+                        "Invert recording polarity before sorting.",
+                    ),
+                    "cluster_downsampling": ParamSpec(
+                        "int", low_vram_defaults["cluster_downsampling"],
+                        "Downsampling factor used during clustering.",
+                        min=1,
+                    ),
+                    "max_cluster_subset": ParamSpec(
+                        "int", low_vram_defaults["max_cluster_subset"],
+                        "Max spikes per cluster used in clustering. Leave "
+                        "blank for no limit (None).",
+                        min=0, nullable=True,
+                    ),
+                    "nblocks": ParamSpec(
+                        "int", low_vram_defaults["nblocks"],
+                        "Number of drift-correction blocks; 0 disables block "
+                        "drift correction.",
+                        min=0,
+                    ),
+                    "do_correction": ParamSpec(
+                        "bool", low_vram_defaults["do_correction"],
+                        "Enable Kilosort drift correction.",
+                    ),
+                },
+            ),
+            "sorter_kwargs": ParamSpec(
+                "dict", defaults["sorter_kwargs"],
+                "Free-form raw overrides merged on top of the chosen VRAM "
+                "preset before being passed to si.run_sorter().",
+                nested_schema=None,
+            ),
         }
 
     @staticmethod

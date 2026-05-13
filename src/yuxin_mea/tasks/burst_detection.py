@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from yuxin_mea.config import ParamSpec
 from yuxin_mea.pipeline import BaseAnalysisTask
 from yuxin_mea.tasks.preprocessing import PreprocessingTask
 
@@ -31,6 +32,67 @@ class BurstDetectionTask(BaseAnalysisTask):
             "min_relative_height": 0.1,
             "extent_frac": 0.30,
             "network_merge_gap_min_s": 0.75,
+        }
+
+    @classmethod
+    def params_schema(cls) -> dict[str, ParamSpec]:
+        defaults = cls.default_params()
+        return {
+            "curation_output_root": ParamSpec(
+                "path", defaults["curation_output_root"],
+                "Root directory where AutoCurationTask writes "
+                "curated_spike_times.npy (per recording/well).",
+            ),
+            "output_root": ParamSpec(
+                "path", defaults["output_root"],
+                "Directory where burst-detection outputs (pickle bundle) "
+                "are written (per recording/well).",
+            ),
+            "gamma": ParamSpec(
+                "float", defaults["gamma"],
+                "Reserved tuning exponent for the parameter-free detector. "
+                "Currently inactive (see BurstDetectorConfig docstring); "
+                "kept for API stability.",
+                min=0,
+            ),
+            "min_burstlet_participation": ParamSpec(
+                "float", defaults["min_burstlet_participation"],
+                "Minimum fraction of units that must participate in a "
+                "burstlet for it to be kept. Currently inactive filter "
+                "(see BurstDetectorConfig docstring).",
+                min=0, max=1,
+            ),
+            "min_absolute_rate_hz": ParamSpec(
+                "float", defaults["min_absolute_rate_hz"],
+                "Minimum peak population firing rate (Hz) for a burstlet. "
+                "Currently inactive filter.",
+                min=0,
+            ),
+            "min_burst_density_hz": ParamSpec(
+                "float", defaults["min_burst_density_hz"],
+                "Minimum spike density (spikes per participating-unit-second) "
+                "within a burstlet. Currently inactive filter.",
+                min=0,
+            ),
+            "min_relative_height": ParamSpec(
+                "float", defaults["min_relative_height"],
+                "Minimum relative peak height (fraction of dynamic range) "
+                "required for a burstlet. Currently inactive filter.",
+                min=0, max=1,
+            ),
+            "extent_frac": ParamSpec(
+                "float", defaults["extent_frac"],
+                "Burstlet extent threshold as a fraction of its peak "
+                "synchrony; bin walks outward while the smoothed "
+                "participation signal stays above extent_frac * peak.",
+                min=0, max=1,
+            ),
+            "network_merge_gap_min_s": ParamSpec(
+                "float", defaults["network_merge_gap_min_s"],
+                "Lower bound (seconds) on the network-burst merge gap. "
+                "Actual gap is max(10 * biological_ISI, this value).",
+                min=0,
+            ),
         }
 
     @staticmethod

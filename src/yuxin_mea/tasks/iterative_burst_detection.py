@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from yuxin_mea.config import ParamSpec
 from yuxin_mea.pipeline import BaseAnalysisTask
 from yuxin_mea.tasks.preprocessing import PreprocessingTask
 
@@ -45,6 +46,117 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
             "cluster_initial_components": 6,
             "cluster_min_events": 5,
             "cluster_min_separation": 1.5,
+        }
+
+    @classmethod
+    def params_schema(cls) -> dict[str, ParamSpec]:
+        defaults = cls.default_params()
+        return {
+            "curation_output_root": ParamSpec(
+                "path", defaults["curation_output_root"],
+                "Root directory containing auto_curation outputs "
+                "(curated_spike_times.npy per recording/well).",
+            ),
+            "output_root": ParamSpec(
+                "path", defaults["output_root"],
+                "Directory where iterative burst detection results "
+                "(BurstResults pickles) are written per recording/well.",
+            ),
+            "permissive_mad_scale": ParamSpec(
+                "float", defaults["permissive_mad_scale"],
+                "MAD multiplier for the initial (permissive) participation "
+                "threshold. Lower values seed more candidates that later "
+                "iterations must eliminate.",
+                min=0,
+            ),
+            "permissive_percentile": ParamSpec(
+                "float", defaults["permissive_percentile"],
+                "Fallback initial percentile threshold when spread_mad is near "
+                "zero (e.g. 70.0 -> top 30% of bins).",
+                min=0, max=100,
+            ),
+            "mad_fallback_threshold": ParamSpec(
+                "float", defaults["mad_fallback_threshold"],
+                "If spread_mad falls below this value, use the percentile "
+                "fallback instead of the MAD-based seed threshold.",
+                min=0,
+            ),
+            "composite_mad_scale": ParamSpec(
+                "float", defaults["composite_mad_scale"],
+                "MAD multiplier applied to the composite signal background "
+                "to set the burst/non-burst threshold each iteration.",
+                min=0,
+            ),
+            "extent_frac": ParamSpec(
+                "float", defaults["extent_frac"],
+                "Edge-trimming fraction: candidate edges are trimmed inward "
+                "until composite exceeds max(threshold, extent_frac * peak).",
+                min=0,
+            ),
+            "merge_floor_frac": ParamSpec(
+                "float", defaults["merge_floor_frac"],
+                "Adjacent candidates are merged if their separating valley "
+                "is above merge_floor_frac * threshold.",
+                min=0,
+            ),
+            "network_merge_gap_min_s": ParamSpec(
+                "float", defaults["network_merge_gap_min_s"],
+                "Minimum gap (seconds) enforced for the network-burst merge "
+                "stage in the hierarchy.",
+                min=0,
+            ),
+            "max_iterations": ParamSpec(
+                "int", defaults["max_iterations"],
+                "Hard cap on refinement iterations (safety valve; typically "
+                "converges in 5-10 iterations).",
+                min=1,
+            ),
+            "convergence_eps": ParamSpec(
+                "float", defaults["convergence_eps"],
+                "Stop iterating when fewer than this fraction of bins flip "
+                "burst/non-burst label between iterations.",
+                min=0,
+            ),
+            "fisher_alpha_frac": ParamSpec(
+                "float", defaults["fisher_alpha_frac"],
+                "Ridge regularization for Fisher LDA within-class scatter: "
+                "alpha = fisher_alpha_frac * trace(S_W) / n_features.",
+                min=0,
+            ),
+            "ff_scale_multipliers": ParamSpec(
+                "list_float", defaults["ff_scale_multipliers"],
+                "Bin-size multipliers for multi-scale Fano Factor features. "
+                "Each multiplier produces one FF feature; clamped to [5,100] ms.",
+                min=1,
+            ),
+            "min_burst_modulation": ParamSpec(
+                "float", defaults["min_burst_modulation"],
+                "Minimum burstlet-level llr_aggregate required for an event "
+                "to survive. <= 0 disables the gate.",
+                min=0,
+            ),
+            "cluster_events": ParamSpec(
+                "bool", defaults["cluster_events"],
+                "After convergence, fit a GMM on per-event quality features "
+                "and discard noise-like clusters.",
+            ),
+            "cluster_initial_components": ParamSpec(
+                "int", defaults["cluster_initial_components"],
+                "Initial number of GMM components used before similarity-based "
+                "merging.",
+                min=1,
+            ),
+            "cluster_min_events": ParamSpec(
+                "int", defaults["cluster_min_events"],
+                "Minimum detected events required to attempt GMM clustering.",
+                min=1,
+            ),
+            "cluster_min_separation": ParamSpec(
+                "float", defaults["cluster_min_separation"],
+                "Maximum normalised Euclidean distance between component means "
+                "(standardized feature space) for them to be merged.",
+                min=0,
+            ),
         }
 
     @staticmethod

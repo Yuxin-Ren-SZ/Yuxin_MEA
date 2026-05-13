@@ -1,4 +1,8 @@
-"""Top-level app layout: navbar + active page container."""
+"""Top-level app layout: navbar + active page container.
+
+Also exports `no_config_banner()` for data pages to render when the
+dashboard is running in config-only mode (no `pipeline_config.json` yet).
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,27 @@ _NAVBAR_STYLE = {
 
 _LINK_STYLE = {"textDecoration": "none", "color": "#1f5aa6", "fontWeight": "500"}
 _TITLE_STYLE = {"marginRight": "32px", "fontWeight": "700", "color": "#222"}
+
+
+def no_config_banner() -> html.Div:
+    """Banner shown on data pages when the config file doesn't exist yet."""
+    return html.Div(
+        [
+            html.Strong("No config loaded. "),
+            html.Span("Go to "),
+            dcc.Link("Settings", href="/settings",
+                     style={"color": "#1f5aa6", "fontWeight": "600"}),
+            html.Span(" to fill in `data_root`, `analysis_root`, and per-task "
+                      "parameters, then Save."),
+        ],
+        style={
+            "backgroundColor": "#e3f2fd",
+            "border": "1px solid #90caf9",
+            "padding": "12px 16px",
+            "borderRadius": "4px",
+            "marginBottom": "16px",
+        },
+    )
 
 
 def build_layout() -> html.Div:

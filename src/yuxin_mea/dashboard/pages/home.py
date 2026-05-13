@@ -6,6 +6,7 @@ import dash
 from dash import Input, Output, callback, html
 from flask import current_app
 
+from yuxin_mea.dashboard.components import no_config_banner
 from yuxin_mea.dashboard.data import load_pipeline_df, load_recordings_df
 
 
@@ -30,6 +31,7 @@ layout = html.Div(
             "Use the Refresh button on each data page to reload after a "
             "pipeline run."
         ),
+        html.Div(id="home-banner-slot"),
         html.H4("Loaded configuration"),
         html.Div(id="home-config-summary"),
         html.H4("Cache contents", style={"marginTop": "24px"}),
@@ -39,15 +41,18 @@ layout = html.Div(
 
 
 @callback(
+    Output("home-banner-slot", "children"),
     Output("home-config-summary", "children"),
     Output("home-cache-summary", "children"),
     Input("home-config-summary", "id"),
 )
-def _render(_id: str) -> tuple[list, list]:
-    """Render config + cache summaries on initial page load."""
+def _render(_id: str):
+    """Render banner + config + cache summaries on initial page load."""
     ctx = current_app.config["YUXIN_MEA"]
+    banner = None if ctx.get("config_exists") else no_config_banner()
     config_block = [
         _row("config_path", ctx["config_path"]),
+        _row("config_exists", ctx.get("config_exists", False)),
         _row("data_root", ctx["data_root"] or "(not set)"),
         _row("analysis_root", ctx["analysis_root"] or "(not set)"),
     ]
@@ -66,4 +71,4 @@ def _render(_id: str) -> tuple[list, list]:
             _row("pipeline entries (pipeline_cache.json)", len(pipe_df)),
             _row("registered task columns", ", ".join(task_names) if task_names else "—"),
         ]
-    return config_block, cache_block
+    return banner, config_block, cache_block

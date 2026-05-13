@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from yuxin_mea.config import ParamSpec
 from yuxin_mea.pipeline import BaseAnalysisTask
 
 
@@ -27,6 +28,66 @@ class PreprocessingTask(BaseAnalysisTask):
             "chunk_duration": "1s",
             "progress_bar": True,
             "overwrite": True,
+        }
+
+    @classmethod
+    def params_schema(cls) -> dict[str, ParamSpec]:
+        defaults = cls.default_params()
+        return {
+            "output_root": ParamSpec(
+                "path", defaults["output_root"],
+                "Directory where preprocessed Zarr stores are written "
+                "(per recording/well).",
+            ),
+            "bandpass_freq_min": ParamSpec(
+                "int", defaults["bandpass_freq_min"],
+                "Bandpass low-cut frequency in Hz.",
+                min=0,
+            ),
+            "bandpass_freq_max": ParamSpec(
+                "int", defaults["bandpass_freq_max"],
+                "Bandpass high-cut frequency in Hz.",
+                min=0,
+            ),
+            "reference": ParamSpec(
+                "str", defaults["reference"],
+                "Common-reference scheme. 'local' subtracts a ring of neighbors; "
+                "'global' subtracts the array-wide median/mean.",
+                choices=["local", "global"],
+            ),
+            "operator": ParamSpec(
+                "str", defaults["operator"],
+                "Aggregation operator used to build the reference signal.",
+                choices=["median", "average"],
+            ),
+            "local_radius": ParamSpec(
+                "list_int", defaults["local_radius"],
+                "(inner, outer) probe radius in µm for local common reference. "
+                "Two integers, comma-separated.",
+            ),
+            "dtype": ParamSpec(
+                "str", defaults["dtype"],
+                "Output dtype. float32 is safest (int16 has bitten us — see "
+                "preprocessing.py:142).",
+                choices=["float32", "float64", "int16"],
+            ),
+            "n_jobs": ParamSpec(
+                "int", defaults["n_jobs"],
+                "Parallel worker count.",
+                min=1,
+            ),
+            "chunk_duration": ParamSpec(
+                "str", defaults["chunk_duration"],
+                "Zarr chunk size, e.g. '1s', '500ms'.",
+            ),
+            "progress_bar": ParamSpec(
+                "bool", defaults["progress_bar"],
+                "Show a tqdm progress bar during save.",
+            ),
+            "overwrite": ParamSpec(
+                "bool", defaults["overwrite"],
+                "Overwrite an existing output Zarr at the same path.",
+            ),
         }
 
     @staticmethod

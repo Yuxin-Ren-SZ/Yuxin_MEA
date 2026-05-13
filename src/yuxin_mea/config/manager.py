@@ -119,6 +119,53 @@ class ConfigManager(BaseConfigProvider):
         """
         return dict(self._task_loaded.get(task_name, {}))
 
+    def list_loaded_tasks(self) -> list[str]:
+        """Return task names that have a section in the loaded config (sorted)."""
+        return sorted(self._task_loaded.keys())
+
+    # ------------------------------------------------------------------
+    # Mutators — used by the dashboard config builder
+    # ------------------------------------------------------------------
+
+    def set_task_params(self, task_name: str, params: dict) -> None:
+        """Replace the in-memory params for *task_name*.
+
+        Replaces — does not merge. The config builder always emits the
+        complete set of schema keys, so a partial dict would silently drop
+        the un-emitted keys. Callers wanting to update a single key should
+        ``get_task_params()``, mutate, then ``set_task_params()``.
+
+        Call :meth:`save` to flush to disk.
+        """
+        self._task_loaded[task_name] = dict(params)
+
+    def set_globals(self, values: dict) -> None:
+        """Replace the in-memory loaded globals (atomic; not merged)."""
+        self._global_loaded = dict(values)
+
+    def validate_loaded(
+        self,
+        schemas: "dict[str, dict[str, Any]]",
+    ) -> dict[str, list[str]]:
+        """Find keys in the loaded config not declared in any task schema.
+
+        ``schemas`` is ``{task_name: params_schema_dict}``. Returns
+        ``{task_name: [unknown_keys]}`` for every loaded task that has at
+        least one unknown key. Empty dict ↔ every loaded key is known.
+
+        The dashboard's Settings page calls this on entry and surfaces a
+        banner so a stale config (e.g. a renamed param after a code update)
+        is visible to the user before they hit Save (which replaces the
+        task section and drops the unknown keys).
+        """
+        unknown: dict[str, list[str]] = {}
+        for name, loaded in self._task_loaded.items():
+            spec = schemas.get(name, {})
+            extras = [k for k in loaded if k not in spec]
+            if extras:
+                unknown[name] = sorted(extras)
+        return unknown
+
     # ------------------------------------------------------------------
     # BaseConfigProvider interface
     # ------------------------------------------------------------------

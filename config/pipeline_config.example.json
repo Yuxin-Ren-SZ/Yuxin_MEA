@@ -1,7 +1,8 @@
 {
   "global": {
     "data_root": "/Volumes/MEA_Backup/raw_data/rbs_maxtwo_desktop/harddisk20tbV2/Sadegh_Lab/CX138",
-    "analysis_root": "./data/analysis"
+    "analysis_root": "./data/analysis",
+    "figure_root": "./output/figures"
   },
   "tasks": {
     "preprocessing": {
@@ -24,7 +25,7 @@
       "preprocessing_output_root": "./preprocessed_data",
       "output_root": "./spikesorted_data",
       "sorter": "kilosort4",
-      "docker_image": null,
+      "docker_image": "",
       "verbose": true,
       "remove_existing_folder": true,
       "delete_output_folder": false,
@@ -37,7 +38,7 @@
         "clear_cache": true,
         "invert_sign": true,
         "cluster_downsampling": 20,
-        "max_cluster_subset": null,
+        "max_cluster_subset": 0,
         "nblocks": 0,
         "dmin": 17,
         "do_correction": false

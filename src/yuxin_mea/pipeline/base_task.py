@@ -69,6 +69,24 @@ class BaseAnalysisTask(ABC):
         """
         return {}
 
+    @classmethod
+    def params_schema(cls) -> dict[str, Any]:
+        """Optional rich schema for the dashboard config builder.
+
+        Override to return a `{param_name: ParamSpec}` dict (see
+        `yuxin_mea.config.schema.ParamSpec`). The dashboard's Settings page
+        renders one form field per entry, with widget choice + validation
+        derived from the spec.
+
+        Keys must match `default_params()` keys exactly. The pytest
+        `test_params_schema.py` enforces this.
+
+        Default implementation returns an empty dict — a task without a
+        schema is editable only by hand-editing the JSON file. Tasks
+        intended to be edited via the dashboard MUST override.
+        """
+        return {}
+
     def resolve_params(self, config_params: dict[str, Any]) -> dict[str, Any]:
         """Merge class-level defaults with config_params. Config-file values win.
 

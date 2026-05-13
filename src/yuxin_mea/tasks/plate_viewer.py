@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from yuxin_mea.config import ParamSpec
 from yuxin_mea.tasks.base_plate_viewer import BasePlateViewer, _load_viewer_components
 
 
@@ -38,6 +39,63 @@ class PlateViewerTask(BasePlateViewer):
             "width_px": 2400,
             "max_raster_points_per_well": 12000,
             "max_synchrony_points": 3000,
+        }
+
+    @classmethod
+    def params_schema(cls) -> dict[str, ParamSpec]:
+        defaults = cls.default_params()
+        return {
+            "burst_detection_root": ParamSpec(
+                "path", defaults["burst_detection_root"],
+                "Directory containing burst_detection outputs read per well.",
+            ),
+            "curation_output_root": ParamSpec(
+                "path", defaults["curation_output_root"],
+                "Directory containing curation outputs (spike times per well).",
+            ),
+            "figures_root": ParamSpec(
+                "path", defaults["figures_root"],
+                "Directory where the plate_viewer.html figure is written.",
+            ),
+            "experiment_cache_path": ParamSpec(
+                "path", defaults["experiment_cache_path"],
+                "JSON cache providing well group/name metadata for the plate.",
+            ),
+            "rec_name": ParamSpec(
+                "str", defaults["rec_name"],
+                "Maxwell rec_name to display. Empty string or 'auto' triggers "
+                "auto-detection from the recording.",
+            ),
+            "display_mode": ParamSpec(
+                "str", defaults["display_mode"],
+                "What to render per well: raster only, synchrony only, or both.",
+                choices=["raster", "synchrony", "both"],
+            ),
+            "marker_size": ParamSpec(
+                "float", defaults["marker_size"],
+                "Spike marker size (pixels) in the raster subplots.",
+                min=0,
+            ),
+            "line_width": ParamSpec(
+                "float", defaults["line_width"],
+                "Line width (pixels) for synchrony traces.",
+                min=0,
+            ),
+            "width_px": ParamSpec(
+                "int", defaults["width_px"],
+                "Total figure width in pixels (height is derived from this).",
+                min=1,
+            ),
+            "max_raster_points_per_well": ParamSpec(
+                "int", defaults["max_raster_points_per_well"],
+                "Cap on rendered spike markers per well (uniform downsample).",
+                min=1,
+            ),
+            "max_synchrony_points": ParamSpec(
+                "int", defaults["max_synchrony_points"],
+                "Cap on rendered synchrony samples per well (uniform downsample).",
+                min=1,
+            ),
         }
 
     def run(

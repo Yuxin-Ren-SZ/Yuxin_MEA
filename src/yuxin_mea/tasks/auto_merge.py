@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from yuxin_mea.config import ParamSpec
 from yuxin_mea.pipeline import BaseAnalysisTask
 from yuxin_mea.tasks.preprocessing import PreprocessingTask
 from yuxin_mea.tasks.sorting import SortingTask
@@ -35,6 +36,55 @@ class AutoMergeTask(BaseAnalysisTask):
             "presets": ["firing_rate_similarity", "template_similarity"],
             "radius_um": 50,
             "n_jobs": 1,
+        }
+
+    @classmethod
+    def params_schema(cls) -> dict[str, ParamSpec]:
+        defaults = cls.default_params()
+        return {
+            "output_root": ParamSpec(
+                "path", defaults["output_root"],
+                "Directory where the (possibly merged) sorting output is saved "
+                "per recording/well.",
+            ),
+            "sorting_output_root": ParamSpec(
+                "path", defaults["sorting_output_root"],
+                "Root directory of the upstream SortingTask outputs to load from.",
+            ),
+            "preprocessing_output_root": ParamSpec(
+                "path", defaults["preprocessing_output_root"],
+                "Root directory of the upstream PreprocessingTask outputs "
+                "(used as the recording when auto-merge is enabled).",
+            ),
+            "enabled": ParamSpec(
+                "bool", defaults["enabled"],
+                "If False, pass the sorting through unchanged; if True, run "
+                "SpikeInterface auto_merge_units before saving.",
+            ),
+            "presets": ParamSpec(
+                "list_str", defaults["presets"],
+                "SpikeInterface auto-merge preset(s) to apply (combined "
+                "recursively).",
+                choices=[
+                    "firing_rate_similarity",
+                    "template_similarity",
+                    "x_contaminations",
+                    "knn",
+                    "unit_locations",
+                ],
+                multiselect=True,
+            ),
+            "radius_um": ParamSpec(
+                "float", defaults["radius_um"],
+                "Sparsity radius in micrometers used when estimating template "
+                "sparsity for the temporary merge analyzer.",
+                min=0,
+            ),
+            "n_jobs": ParamSpec(
+                "int", defaults["n_jobs"],
+                "Parallel worker count for analyzer extensions and auto-merge.",
+                min=1,
+            ),
         }
 
     @staticmethod

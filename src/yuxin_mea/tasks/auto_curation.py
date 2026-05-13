@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from yuxin_mea.config import ParamSpec
 from yuxin_mea.pipeline import BaseAnalysisTask
 from yuxin_mea.tasks.analyzer import AnalyzerTask
 from yuxin_mea.tasks.preprocessing import PreprocessingTask
@@ -39,6 +40,49 @@ class AutoCurationTask(BaseAnalysisTask):
             "rp_contamination_max": 0.15,
             "firing_rate_min": 0.05,
             "amplitude_median_max": -20.0,
+        }
+
+    @classmethod
+    def params_schema(cls) -> dict[str, ParamSpec]:
+        defaults = cls.default_params()
+        return {
+            "curation_output_root": ParamSpec(
+                "path", defaults["curation_output_root"],
+                "Directory where curation outputs (quality_metrics.pkl, "
+                "rejection_log.pkl, curated_spike_times.npy) are written.",
+            ),
+            "analyzer_output_root": ParamSpec(
+                "path", defaults["analyzer_output_root"],
+                "Directory containing the upstream SortingAnalyzer outputs "
+                "from AnalyzerTask.",
+            ),
+            "enabled": ParamSpec(
+                "bool", defaults["enabled"],
+                "If True, apply threshold filters and mark failing units "
+                "curated=False. If False, pass through all units as "
+                "curated=True.",
+            ),
+            "presence_ratio_min": ParamSpec(
+                "float", defaults["presence_ratio_min"],
+                "Reject units with presence_ratio below this threshold.",
+                min=0, max=1,
+            ),
+            "rp_contamination_max": ParamSpec(
+                "float", defaults["rp_contamination_max"],
+                "Reject units with rp_contamination above this threshold.",
+                min=0, max=1,
+            ),
+            "firing_rate_min": ParamSpec(
+                "float", defaults["firing_rate_min"],
+                "Reject units with firing_rate (Hz) below this threshold.",
+                min=0,
+            ),
+            "amplitude_median_max": ParamSpec(
+                "float", defaults["amplitude_median_max"],
+                "Reject units with amplitude_median greater than this "
+                "threshold. Amplitudes are negative for real spikes, so "
+                "values closer to zero indicate weaker units.",
+            ),
         }
 
     @staticmethod
