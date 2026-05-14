@@ -25,34 +25,14 @@ from flask import current_app
 
 from yuxin_mea.config import ConfigManager, GLOBALS_SCHEMA
 from yuxin_mea.dashboard.components.form_builder import collect_values, render_form
-from yuxin_mea.tasks import (
-    AnalyzerTask,
-    AutoCurationTask,
-    AutoMergeTask,
-    BurstDetectionTask,
-    IterativeBurstDetectionTask,
-    PreprocessingTask,
-    SortingTask,
-)
+from yuxin_mea.tasks import TASK_CLASSES
 
 
 dash.register_page(__name__, path="/settings", name="Settings", order=10)
 
 
-# Canonical task order = pipeline DAG order. Settings tabs render in this
-# order regardless of how the loaded config sections were arranged.
-_TASK_CLASSES = [
-    PreprocessingTask,
-    SortingTask,
-    AutoMergeTask,
-    AnalyzerTask,
-    AutoCurationTask,
-    BurstDetectionTask,
-    IterativeBurstDetectionTask,
-]
-
-_TASK_BY_NAME = {tc.task_name: tc for tc in _TASK_CLASSES}
-_TASK_SCHEMAS = {tc.task_name: tc.params_schema() for tc in _TASK_CLASSES}
+_TASK_BY_NAME = {tc.task_name: tc for tc in TASK_CLASSES}
+_TASK_SCHEMAS = {tc.task_name: tc.params_schema() for tc in TASK_CLASSES}
 
 
 def _all_form_ids() -> list[str]:

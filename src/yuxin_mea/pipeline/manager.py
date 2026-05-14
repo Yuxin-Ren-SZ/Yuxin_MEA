@@ -47,8 +47,6 @@ class PipelineManager:
 
         self._cache: dict[str, PipelineEntry] = self._store.load()
         logger.info("Loaded %d pipeline entries from cache.", len(self._cache))
-        if self._cache:
-            self._reset_stale_tasks()
 
     # ------------------------------------------------------------------
     # Setup
@@ -120,12 +118,15 @@ class PipelineManager:
         type: str | None = None,
         retry_failed: bool = False,
         recording_keys: set[str] | list[str] | tuple[str, ...] | None = None,
+        task_names: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> list[WorkItem]:
         """Return up to n WorkItems whose dependencies are complete and status is NOT_RUN.
 
         retry_failed: when True, FAILED tasks are also returned for retry without
             requiring an explicit refresh() call first.
         recording_keys: optional recording-key allowlist used to scope cached work.
+        task_names: optional task-name allowlist; dependencies still gate eligibility,
+            so an allowlisted task whose upstream isn't complete is still skipped.
         type must be None (reserved for future parallelisation).
         """
         if type is not None:
@@ -133,6 +134,7 @@ class PipelineManager:
 
         eligible = {TaskStatus.NOT_RUN, TaskStatus.FAILED} if retry_failed else {TaskStatus.NOT_RUN}
         recording_key_filter = set(recording_keys) if recording_keys is not None else None
+        task_name_filter = set(task_names) if task_names is not None else None
 
         results: list[WorkItem] = []
         for entry in self._cache.values():
@@ -147,6 +149,8 @@ class PipelineManager:
                 if len(results) >= n:
                     break
                 if task_name not in self._forward_deps:
+                    continue
+                if task_name_filter is not None and task_name not in task_name_filter:
                     continue
                 if record.status not in eligible:
                     continue
@@ -284,15 +288,22 @@ class PipelineManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _reset_stale_tasks(self) -> None:
-        # TEMPORARY FIX (issue #2): On startup from cache, any task that is not
-        # COMPLETE is reset to NOT_RUN.  This recovers tasks left in RUNNING (or
-        # FAILED) when the process crashed between marking a task running and
-        # marking it complete/failed.
-        #
-        # TODO: Replace with lease/heartbeat-based recovery so that FAILED tasks
-        #       preserve their error history and in-flight tasks owned by other
-        #       live workers are not incorrectly reset.
+    def recover_from_crash(self) -> int:
+        """Reset every non-COMPLETE task to NOT_RUN and persist.
+
+        Call before starting a fresh worker if the previous run crashed
+        between marking a task RUNNING and marking it COMPLETE / FAILED.
+        Returns the number of records that were flipped.
+
+        Deliberately NOT called from `__init__` — constructing a manager is
+        a side-effect-free read of the cache, so dashboards can build one
+        per callback without racing a live worker. The CLI calls this once
+        at startup of an actual run; dry-run skips it.
+
+        TODO: Replace with lease/heartbeat-based recovery so FAILED tasks
+        preserve their error history and so we don't trample tasks owned
+        by another live worker.
+        """
         changed = 0
         for entry in self._cache.values():
             for record in entry.tasks.values():
@@ -303,9 +314,10 @@ class PipelineManager:
         if changed:
             self._store.save(self._cache)
             logger.warning(
-                "TEMPORARY FIX (issue #2): reset %d stale task(s) to NOT_RUN on startup.",
+                "recover_from_crash: reset %d stale task(s) to NOT_RUN.",
                 changed,
             )
+        return changed
 
     def _make_task_record(self, task_name: str) -> TaskRecord:
         return TaskRecord(

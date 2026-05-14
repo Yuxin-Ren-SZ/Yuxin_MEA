@@ -14,6 +14,7 @@ dependencies = []
 
 [project.scripts]
 yuxin-mea-dashboard = "yuxin_mea.dashboard.cli:main"
+yuxin-mea-run = "yuxin_mea.cli.run:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
