@@ -305,9 +305,11 @@ class SortingTask(BaseAnalysisTask):
         sorter_output.parent.mkdir(parents=True, exist_ok=True)
 
         recording = si.load(preprocessed_path)
-        # TODO Replace with better excetipn message
-        if type(recording) != si.BaseRecording:
-            raise ValueError(f"Expected a BaseRecording, got {type(recording)}")
+        if not isinstance(recording, si.BaseRecording):
+            raise ValueError(
+                f"Expected a BaseRecording subclass at {preprocessed_path}, "
+                f"got {type(recording).__name__}"
+            )
         
         total_vram_gb = self._detect_total_vram_gb(torch)
         sorter_params = self._build_kilosort_params(
@@ -333,9 +335,11 @@ class SortingTask(BaseAnalysisTask):
             **sorter_params,
         )
 
-        # TODO Replace with better excetipn message
-        if type(sorting) != si.BaseSorting:
-            raise ValueError(f"Expected a BaseSorting, got {type(sorting)}")
+        if not isinstance(sorting, si.BaseSorting):
+            raise ValueError(
+                f"Expected a BaseSorting subclass from run_sorter, "
+                f"got {type(sorting).__name__}"
+            )
 
         if bool(p["clean_excess_spikes"]):
             sorting = si.remove_excess_spikes(sorting, recording)
