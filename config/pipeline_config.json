@@ -1,0 +1,21 @@
+{
+  "global": {},
+  "tasks": {
+    "preprocessing": {
+      "output_root": "./preprocessed_data",
+      "bandpass_freq_min": 300,
+      "bandpass_freq_max": 3000,
+      "reference": "local",
+      "operator": "median",
+      "local_radius": [
+        0,
+        250
+      ],
+      "dtype": "float32",
+      "n_jobs": 6,
+      "chunk_duration": "1s",
+      "progress_bar": true,
+      "overwrite": true
+    }
+  }
+}
