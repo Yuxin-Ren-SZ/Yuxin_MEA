@@ -26,70 +26,123 @@ dash.register_page(__name__, path="/recordings", name="Recordings", order=1)
 _FILTER_COLUMNS = ["sample_id", "date", "plate_id", "scan_type", "run_id"]
 
 
+# Shared DataTable styling — design tokens via inline CSS-var references
+# (DataTable doesn't honor stylesheet classes for its internal cells, but
+# CSS variables resolve through `inherit`).
+_TABLE_STYLE_CELL = {
+    "fontFamily": "var(--font-mono)",
+    "fontSize": "12px",
+    "padding": "8px 12px",
+    "backgroundColor": "var(--bg-elev)",
+    "color": "var(--ink)",
+    "border": "0",
+    "borderBottom": "1px solid var(--line-soft)",
+    "textAlign": "left",
+}
+_TABLE_STYLE_HEADER = {
+    "fontFamily": "var(--font-mono)",
+    "fontSize": "10px",
+    "fontWeight": "600",
+    "textTransform": "uppercase",
+    "letterSpacing": "0.06em",
+    "backgroundColor": "var(--bg)",
+    "color": "var(--ink-3)",
+    "border": "0",
+    "borderBottom": "1px solid var(--line)",
+    "padding": "8px 12px",
+}
+
+
 def _filter_row() -> html.Div:
     return html.Div(
         [
             html.Div(
                 [
-                    html.Label(col, style={"fontSize": "12px", "color": "#555"}),
+                    html.Label(col, className="section-label"),
                     dcc.Dropdown(
                         id={"recordings-filter": col},
                         options=[],
                         value=None,
                         multi=True,
                         placeholder=f"any {col}",
-                        style={"minWidth": "140px"},
                     ),
                 ],
                 style={"flex": "1 1 140px"},
             )
             for col in _FILTER_COLUMNS
         ],
-        style={
-            "display": "flex",
-            "gap": "12px",
-            "alignItems": "flex-end",
-            "marginBottom": "12px",
-        },
+        style={"display": "flex", "gap": "12px", "alignItems": "flex-end"},
     )
 
 
 layout = html.Div(
     [
-        html.H2("Recordings", style={"marginTop": "0"}),
-        html.P(
-            "Every recording known to the dataset cache. Use the dropdowns to "
-            "filter by sample/date/plate/scan/run; the table is also "
-            "filterable per-column. Select rows then click "
-            "“Queue selected wells” to register every well under those "
-            "recordings on the pipeline. "
-            "Note: Scan disk uses the data_root from the dashboard's launch "
-            "config — restart the dashboard after changing data_root via Settings."
-        ),
-        html.Div(id="recordings-banner-slot"),
-        _filter_row(),
         html.Div(
             [
-                html.Button("Refresh", id="recordings-refresh", n_clicks=0),
-                html.Button(
-                    "Scan disk",
-                    id="recordings-scan",
-                    n_clicks=0,
-                    title="Walk data_root, rebuild experiment_cache.json",
-                    style={"marginLeft": "8px"},
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Span("workspace"),
+                                html.Span("dataset_manager"),
+                                html.Span("recordings"),
+                            ],
+                            className="breadcrumb",
+                        ),
+                        html.H1("Recordings"),
+                        html.Div(
+                            "Every recording known to the dataset cache. "
+                            "Filter, then queue selected wells onto the pipeline.",
+                            className="subtitle",
+                        ),
+                    ]
                 ),
-                html.Button(
-                    "Queue selected wells",
-                    id="recordings-queue",
-                    n_clicks=0,
-                    title="Register every well under selected recordings with the pipeline",
-                    style={"marginLeft": "8px"},
-                ),
-                html.Span(
-                    id="recordings-status",
-                    style={"marginLeft": "12px", "color": "#555"},
+                html.Div(
+                    [
+                        html.Button(
+                            [html.Span("↻", className="glyph"), "Refresh"],
+                            id="recordings-refresh",
+                            n_clicks=0,
+                            className="btn",
+                        ),
+                        html.Button(
+                            [html.Span("⇣", className="glyph"), "Scan disk"],
+                            id="recordings-scan",
+                            n_clicks=0,
+                            title="Walk data_root, rebuild experiment_cache.json",
+                            className="btn",
+                        ),
+                        html.Button(
+                            [html.Span("▸", className="glyph"), "Queue selected"],
+                            id="recordings-queue",
+                            n_clicks=0,
+                            title="Register every well under selected recordings with the pipeline",
+                            className="btn primary",
+                        ),
+                    ],
+                    className="view-actions",
                 ),
             ],
+            className="view-head",
+        ),
+        html.Div(id="recordings-banner-slot"),
+        html.Div(
+            [
+                html.Div(
+                    [html.Span("filters", className="h-title")],
+                    className="card-head",
+                ),
+                html.Div(_filter_row(), className="card-body"),
+            ],
+            className="card",
+            style={"marginBottom": "12px"},
+        ),
+        html.Div(
+            html.Span(
+                id="recordings-status",
+                style={"color": "var(--ink-3)", "fontFamily": "var(--font-mono)",
+                       "fontSize": "11px"},
+            ),
             style={"marginBottom": "12px"},
         ),
         dash_table.DataTable(
@@ -102,10 +155,11 @@ layout = html.Div(
             sort_action="native",
             page_size=25,
             style_table={"overflowX": "auto"},
-            style_cell={"fontFamily": "monospace", "fontSize": "13px", "padding": "4px 8px"},
-            style_header={"fontWeight": "600", "backgroundColor": "#f4f6f8"},
+            style_cell=_TABLE_STYLE_CELL,
+            style_header=_TABLE_STYLE_HEADER,
         ),
-    ]
+    ],
+    className="page",
 )
 
 

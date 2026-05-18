@@ -44,25 +44,64 @@ def _all_form_ids() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-layout = html.Div([
-    html.H2("Settings", style={"marginTop": "0"}),
-    html.P(
-        "Edit the pipeline config from the browser. Each tab has its own "
-        "Save button. Changes take effect on the next pipeline run — "
-        "data_root, analysis_root, and figure_root changes require a "
-        "dashboard restart."
-    ),
-    html.Div(id="settings-unknown-keys-banner"),
-    dcc.Tabs(id="settings-tabs", value="globals", children=[
-        dcc.Tab(label="Globals", value="globals",
-                children=[html.Div(id="settings-tab-globals")]),
-        *[
-            dcc.Tab(label=name, value=f"task-{name}",
-                    children=[html.Div(id={"settings-tab": name})])
-            for name in _TASK_BY_NAME
-        ],
-    ]),
-])
+layout = html.Div(
+    [
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Span("workspace"),
+                                html.Span("config_manager"),
+                                html.Span("pipeline_config.json"),
+                            ],
+                            className="breadcrumb",
+                        ),
+                        html.H1("Settings"),
+                        html.Div(
+                            "Per-tab Save. data_root / analysis_root / "
+                            "figure_root changes require a dashboard restart.",
+                            className="subtitle",
+                        ),
+                    ]
+                ),
+            ],
+            className="view-head",
+        ),
+        html.Div(id="settings-unknown-keys-banner"),
+        dcc.Tabs(
+            id="settings-tabs",
+            value="globals",
+            parent_className="tab-strip",
+            className="dash-tabs-container",
+            children=[
+                dcc.Tab(
+                    label="Globals",
+                    value="globals",
+                    className="tab--regular",
+                    selected_className="tab--selected",
+                    children=[html.Div(id="settings-tab-globals",
+                                       style={"marginTop": "16px"})],
+                ),
+                *[
+                    dcc.Tab(
+                        label=name,
+                        value=f"task-{name}",
+                        className="tab--regular",
+                        selected_className="tab--selected",
+                        children=[
+                            html.Div(id={"settings-tab": name},
+                                     style={"marginTop": "16px"})
+                        ],
+                    )
+                    for name in _TASK_BY_NAME
+                ],
+            ],
+        ),
+    ],
+    className="page",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -95,23 +134,27 @@ def _populate_globals(_id: str):
 def _build_unknown_keys_banner(unknown: dict[str, list[str]]):
     if not unknown:
         return None
-    items = [html.Li(f"{task}: {', '.join(keys)}") for task, keys in unknown.items()]
+    items = [
+        html.Li(
+            f"{task}: {', '.join(keys)}",
+            style={"fontFamily": "var(--font-mono)", "fontSize": "11px"},
+        )
+        for task, keys in unknown.items()
+    ]
     return html.Div(
         [
-            html.Strong("⚠ Stale config keys detected. "),
-            html.Span(
-                "These keys are in the loaded config but not in any task schema. "
-                "They will be dropped on the next Save."
+            html.Div(
+                [
+                    html.Strong("Stale config keys detected. "),
+                    html.Span(
+                        "These keys are in the loaded config but not in any "
+                        "task schema. They will be dropped on the next Save."
+                    ),
+                ]
             ),
-            html.Ul(items, style={"margin": "8px 0 0 0"}),
+            html.Ul(items, style={"margin": "8px 0 0 0", "paddingLeft": "18px"}),
         ],
-        style={
-            "backgroundColor": "#fff8e1",
-            "border": "1px solid #ffd54f",
-            "padding": "12px 16px",
-            "borderRadius": "4px",
-            "marginBottom": "16px",
-        },
+        className="banner warn",
     )
 
 

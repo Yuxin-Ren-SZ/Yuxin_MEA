@@ -50,58 +50,99 @@ _EMPTY_FIGURE = go.Figure().update_layout(
         "xref": "paper", "yref": "paper",
         "x": 0.5, "y": 0.5,
         "showarrow": False,
-        "font": {"size": 14, "color": "#888"},
+        "font": {"size": 14, "color": "#84807a"},
     }],
+    xaxis={"visible": False},
+    yaxis={"visible": False},
     margin={"l": 20, "r": 20, "t": 20, "b": 20},
     height=200,
 )
 
 
 layout = html.Div([
-    html.H2("Burst diagnostic", style={"marginTop": "0"}),
-    html.P(
-        "Run the iterative burst detector on every Kilosort source under a "
-        "root directory and inspect per-stage diagnostics. First Load on a "
-        "given root may take a few minutes; subsequent loads come from a "
-        "pickle cache under `<analysis_root>/burst_diagnostic_cache/`."
+    html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Span("workspace"),
+                            html.Span("analysis"),
+                            html.Span("burst_diagnostic"),
+                        ],
+                        className="breadcrumb",
+                    ),
+                    html.H1("Burst diagnostic"),
+                    html.Div(
+                        "Iterative burst detector per-stage diagnostics. First "
+                        "load may take a few minutes; cached afterwards.",
+                        className="subtitle",
+                    ),
+                ]
+            ),
+        ],
+        className="view-head",
     ),
-    html.Div(id="burst-diag-default-status", style={"color": "#555", "marginBottom": "8px"}),
+    html.Div(id="burst-diag-default-status",
+             style={"color": "var(--ink-3)", "fontFamily": "var(--font-mono)",
+                    "fontSize": "11px", "marginBottom": "8px"}),
     html.Div([
         dcc.Input(
             id="burst-diag-root-input", value="", type="text",
             placeholder="Kilosort root directory",
-            style={"width": "480px", "marginRight": "8px", "fontFamily": "monospace"},
+            style={"flex": "1 1 480px", "marginRight": "8px",
+                   "fontFamily": "var(--font-mono)", "fontSize": "12px",
+                   "padding": "4px 10px",
+                   "background": "var(--bg)", "color": "var(--ink)",
+                   "border": "1px solid var(--line)", "borderRadius": "4px",
+                   "minHeight": "28px"},
         ),
-        html.Button("Load", id="burst-diag-load-btn", n_clicks=0),
-        html.Button("Recompute", id="burst-diag-recompute-btn",
-                    n_clicks=0, style={"marginLeft": "8px"}),
+        html.Button([html.Span("↻", className="glyph"), "Load"],
+                    id="burst-diag-load-btn", n_clicks=0, className="btn primary"),
+        html.Button([html.Span("⟳", className="glyph"), "Recompute"],
+                    id="burst-diag-recompute-btn", n_clicks=0,
+                    className="btn", style={"marginLeft": "8px"}),
         html.Span(id="burst-diag-load-status",
-                  style={"marginLeft": "12px", "color": "#555"}),
-    ], style={"marginBottom": "12px"}),
+                  style={"marginLeft": "12px", "color": "var(--ink-3)",
+                         "fontFamily": "var(--font-mono)", "fontSize": "11px"}),
+    ], style={"display": "flex", "alignItems": "center", "gap": "6px",
+              "marginBottom": "12px"}),
     html.Div([
-        html.Label("Recording: ", style={"marginRight": "6px"}),
-        dcc.Dropdown(
-            id="burst-diag-recording-dropdown", options=[], value=None,
-            clearable=False,
-            style={"width": "260px", "display": "inline-block"},
+        html.Label("Recording", className="section-label",
+                   style={"marginRight": "6px", "marginBottom": "0"}),
+        html.Div(
+            dcc.Dropdown(
+                id="burst-diag-recording-dropdown", options=[], value=None,
+                clearable=False,
+            ),
+            style={"width": "260px"},
         ),
         html.Span(style={"display": "inline-block", "width": "24px"}),
-        html.Label("Trace: ", style={"marginRight": "6px"}),
-        dcc.Dropdown(
-            id="burst-diag-trace-dropdown",
-            options=[{"label": "default", "value": "default"},
-                     {"label": "no_gate", "value": "no_gate"}],
-            value="default", clearable=False,
-            style={"width": "150px", "display": "inline-block"},
+        html.Label("Trace", className="section-label",
+                   style={"marginRight": "6px", "marginBottom": "0"}),
+        html.Div(
+            dcc.Dropdown(
+                id="burst-diag-trace-dropdown",
+                options=[{"label": "default", "value": "default"},
+                         {"label": "no_gate", "value": "no_gate"}],
+                value="default", clearable=False,
+            ),
+            style={"width": "150px"},
         ),
-    ], style={"marginBottom": "12px"}),
+    ], style={"display": "flex", "alignItems": "center", "gap": "8px",
+              "marginBottom": "12px"}),
     dcc.Store(id="burst-diag-batch-key", data=None),
-    dcc.Tabs(id="burst-diag-tabs", value="summary", children=[
-        dcc.Tab(label="Summary", value="summary", children=[
+    dcc.Tabs(id="burst-diag-tabs", value="summary",
+             parent_className="tab-strip", children=[
+        dcc.Tab(label="Summary", value="summary",
+                className="tab--regular", selected_className="tab--selected",
+                children=[
             dcc.Graph(id="burst-diag-fig-kill", figure=_EMPTY_FIGURE),
             dcc.Graph(id="burst-diag-fig-xflow", figure=_EMPTY_FIGURE),
         ]),
-        dcc.Tab(label="Kill stages", value="kill", children=[
+        dcc.Tab(label="Kill stages", value="kill",
+                className="tab--regular", selected_className="tab--selected",
+                children=[
             html.H4("Stage 1 — Composite signal"),
             dcc.Graph(id="burst-diag-fig-stage1", figure=_EMPTY_FIGURE),
             html.H4("Stage 2 — Participation floor"),
@@ -111,7 +152,9 @@ layout = html.Div([
             html.H4("Stage 4 — GMM event clustering"),
             dcc.Graph(id="burst-diag-fig-stage4", figure=_EMPTY_FIGURE),
         ]),
-        dcc.Tab(label="LDA deep-dive", value="lda", children=[
+        dcc.Tab(label="LDA deep-dive", value="lda",
+                className="tab--regular", selected_className="tab--selected",
+                children=[
             html.H4("Section C — LDA PCA per iteration"),
             dcc.Graph(id="burst-diag-fig-c", figure=_EMPTY_FIGURE),
             html.H4("Section D — Boundary shift"),

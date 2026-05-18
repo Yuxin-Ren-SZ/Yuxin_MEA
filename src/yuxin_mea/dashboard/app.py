@@ -9,6 +9,28 @@ from dash import Dash
 from yuxin_mea.config import ConfigManager
 
 from .components.layout import build_layout
+from .theme import apply_default_theme
+
+
+_INDEX_STRING = """\
+<!DOCTYPE html>
+<html data-theme="warm">
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+"""
 
 
 def build_app(config_path: Path) -> Dash:
@@ -32,12 +54,15 @@ def build_app(config_path: Path) -> Dash:
     data_root = _resolve_optional_path(cm.get_global("data_root"))
     figure_root = _resolve_optional_path(cm.get_global("figure_root"))
 
+    apply_default_theme()
+
     app = Dash(
         __name__,
         use_pages=True,
         pages_folder="pages",
         title="yuxin_mea dashboard",
         suppress_callback_exceptions=True,
+        index_string=_INDEX_STRING,
     )
     app.server.config["YUXIN_MEA"] = {
         "config_path": config_path,

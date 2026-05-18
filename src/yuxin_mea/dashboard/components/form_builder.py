@@ -35,34 +35,43 @@ def render_form(
     values: dict[str, Any],
     title: str | None = None,
 ) -> html.Div:
-    """Build a form Div: header + Save button + N rendered fields + status."""
-    header = []
-    if title:
-        header.append(html.H3(title, style={"marginTop": "0"}))
+    """Build a form card: head + per-field `.form-row`s + Save action row."""
     save_btn = html.Button(
         "Save",
         id={"form": form_id, "key": "save"},
         n_clicks=0,
         disabled=True,
-        style={"marginRight": "12px"},
+        className="btn primary",
     )
     status = html.Span(
         id={"form": form_id, "key": "status"},
-        style={"color": "#555"},
+        style={"color": "var(--ink-3)", "fontFamily": "var(--font-mono)",
+               "fontSize": "11px"},
     )
-    return html.Div(
-        [
-            *header,
-            html.Div([save_btn, status], style={"marginBottom": "16px"}),
-            dcc.Store(id={"form": form_id, "key": "dirty"}, data=False),
-            html.Div(
-                [render_field(form_id, name, spec, values.get(name, spec.default))
-                 for name, spec in schema.items()],
-                style={"display": "flex", "flexDirection": "column", "gap": "12px"},
-            ),
-        ],
-        style={"padding": "8px 0"},
+
+    head = (
+        html.Div(
+            [html.Span(title, className="h-title")],
+            className="card-head",
+        )
+        if title
+        else None
     )
+
+    rows = [
+        render_field(form_id, name, spec, values.get(name, spec.default))
+        for name, spec in schema.items()
+    ]
+
+    children = [c for c in (head, html.Div(rows, className="card-body flush")) if c]
+    children.append(
+        html.Div(
+            [save_btn, status],
+            className="form-actions",
+        )
+    )
+    children.append(dcc.Store(id={"form": form_id, "key": "dirty"}, data=False))
+    return html.Div(children, className="card")
 
 
 def render_field(
@@ -71,21 +80,23 @@ def render_field(
     spec: ParamSpec,
     value: Any,
 ) -> html.Div:
-    """One label + widget + per-field error slot."""
+    """One `.form-row`: label (left) + widget + per-field error (right)."""
     widget = _build_widget(form_id, name, spec, value)
-    label = html.Label(
+    label_block = html.Div(
         [
-            html.Span(name, style={"fontWeight": "600"}),
+            html.Label(name),
             _description_node(spec),
-        ],
-        style={"display": "block", "marginBottom": "4px"},
+        ]
     )
     error = html.Div(
         id={"form": form_id, "field-error": name},
-        style={"color": "#c62828", "fontSize": "12px", "marginTop": "4px",
-               "minHeight": "14px"},
+        className="field-error",
+        style={"minHeight": "14px"},
     )
-    return html.Div([label, widget, error])
+    return html.Div(
+        [label_block, html.Div([widget, error])],
+        className="form-row",
+    )
 
 
 def collect_values(
@@ -156,10 +167,7 @@ def _field_id(form_id: str, name: str) -> dict[str, str]:
 def _description_node(spec: ParamSpec) -> Any:
     if not spec.description:
         return ""
-    return html.Span(
-        f"  {spec.description}",
-        style={"fontWeight": "400", "color": "#666", "fontSize": "12px"},
-    )
+    return html.Div(spec.description, className="desc")
 
 
 def _build_widget(form_id: str, name: str, spec: ParamSpec, value: Any) -> Any:
@@ -170,7 +178,6 @@ def _build_widget(form_id: str, name: str, spec: ParamSpec, value: Any) -> Any:
             options=[{"label": str(c), "value": c} for c in spec.choices],
             value=value if value is not None else spec.default,
             clearable=False,
-            style={"maxWidth": "320px"},
             **common,
         )
 
@@ -188,7 +195,6 @@ def _build_widget(form_id: str, name: str, spec: ParamSpec, value: Any) -> Any:
             value=value if value is not None else spec.default,
             step=step,
             min=spec.min, max=spec.max,
-            style={"width": "160px"},
             **common,
         )
 
@@ -197,7 +203,6 @@ def _build_widget(form_id: str, name: str, spec: ParamSpec, value: Any) -> Any:
             options=[{"label": str(c), "value": c} for c in spec.choices],
             value=list(value) if value else list(spec.default or []),
             multi=spec.multiselect,
-            style={"maxWidth": "480px"},
             **common,
         )
 
@@ -208,15 +213,14 @@ def _build_widget(form_id: str, name: str, spec: ParamSpec, value: Any) -> Any:
             type="text",
             value=display,
             placeholder="comma-separated",
-            style={"width": "320px"},
             **common,
         )
 
     if spec.type == "dict":
         # Recurse into nested_schema if provided; otherwise render as JSON
         # textarea. Keep nested forms simple (no Save button — outer form
-        # is responsible). For Phase 3 simplicity, dicts without a
-        # nested_schema fall back to a JSON textarea.
+        # is responsible). Dicts without a nested_schema fall back to a
+        # JSON textarea.
         if spec.nested_schema is not None:
             children = [
                 render_field(form_id, f"{name}.{sub_name}", sub_spec,
@@ -225,14 +229,15 @@ def _build_widget(form_id: str, name: str, spec: ParamSpec, value: Any) -> Any:
             ]
             return html.Details(
                 [
-                    html.Summary(f"{len(children)} nested fields",
-                                 style={"cursor": "pointer", "color": "#1f5aa6"}),
+                    html.Summary(
+                        f"{len(children)} nested fields",
+                        style={"cursor": "pointer", "color": "var(--ink-2)",
+                               "fontFamily": "var(--font-mono)", "fontSize": "11px"},
+                    ),
                     html.Div(
                         children,
-                        style={"borderLeft": "2px solid #ddd",
-                               "paddingLeft": "12px", "marginTop": "8px",
-                               "display": "flex", "flexDirection": "column",
-                               "gap": "10px"},
+                        style={"borderLeft": "2px solid var(--line)",
+                               "paddingLeft": "12px", "marginTop": "8px"},
                     ),
                 ],
                 open=False,
@@ -241,7 +246,11 @@ def _build_widget(form_id: str, name: str, spec: ParamSpec, value: Any) -> Any:
         import json as _json
         return dcc.Textarea(
             value=_json.dumps(value or {}, indent=2),
-            style={"width": "480px", "minHeight": "120px", "fontFamily": "monospace"},
+            style={"width": "100%", "minHeight": "120px",
+                   "fontFamily": "var(--font-mono)", "fontSize": "12px",
+                   "background": "var(--bg)", "color": "var(--ink)",
+                   "border": "1px solid var(--line)", "borderRadius": "4px",
+                   "padding": "8px 10px"},
             **common,
         )
 
@@ -249,6 +258,5 @@ def _build_widget(form_id: str, name: str, spec: ParamSpec, value: Any) -> Any:
     return dcc.Input(
         type="text",
         value="" if value is None else str(value),
-        style={"width": "480px", "fontFamily": "monospace" if spec.type == "path" else "inherit"},
         **common,
     )

@@ -28,128 +28,172 @@ _TASK_OPTIONS = [{"label": cls.task_name, "value": cls.task_name} for cls in TAS
 _PREVIEW_LIMIT = 25
 
 
+def _field(label: str, child) -> html.Div:
+    return html.Div(
+        [html.Label(label, className="section-label"), child],
+        style={"flex": "1 1 240px"},
+    )
+
+
 layout = html.Div(
     [
-        html.H2("Run", style={"marginTop": "0"}),
-        html.P(
-            "Build the `yuxin-mea-run` invocation for the work you want to "
-            "drain. The preview shows work items that are eligible RIGHT NOW "
-            "given your selections — downstream tasks unlock as upstream "
-            "tasks complete in a real run, so the live count there will "
-            "usually exceed the preview count."
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Span("workspace"),
+                                html.Span("yuxin-mea-run"),
+                                html.Span("preview"),
+                            ],
+                            className="breadcrumb",
+                        ),
+                        html.H1("Run"),
+                        html.Div(
+                            "Build the yuxin-mea-run invocation. Preview shows "
+                            "work items eligible right now; downstream tasks "
+                            "unlock as upstream completes.",
+                            className="subtitle",
+                        ),
+                    ]
+                ),
+            ],
+            className="view-head",
         ),
         html.Div(id="run-banner-slot"),
         html.Div(
             [
                 html.Div(
-                    [
-                        html.Label("Tasks (empty = all)", style={"fontSize": "12px", "color": "#555"}),
-                        dcc.Dropdown(
-                            id="run-tasks",
-                            options=_TASK_OPTIONS,
-                            value=[],
-                            multi=True,
-                            placeholder="any task",
-                        ),
-                    ],
-                    style={"flex": "1 1 320px"},
+                    [html.Span("selection", className="h-title")],
+                    className="card-head",
                 ),
                 html.Div(
-                    [
-                        html.Label("Recordings (empty = all)", style={"fontSize": "12px", "color": "#555"}),
-                        dcc.Dropdown(
-                            id="run-recordings",
-                            options=[],
-                            value=[],
-                            multi=True,
-                            placeholder="any recording",
-                        ),
-                    ],
-                    style={"flex": "2 1 480px"},
-                ),
-                html.Div(
-                    [
-                        html.Label("Options", style={"fontSize": "12px", "color": "#555"}),
-                        dcc.Checklist(
-                            id="run-flags",
-                            options=[
-                                {"label": " retry failed", "value": "retry"},
-                            ],
-                            value=[],
-                        ),
-                        html.Div(
-                            [
-                                html.Label(
-                                    "max-tasks",
-                                    style={"fontSize": "12px", "color": "#555", "marginRight": "6px"},
+                    html.Div(
+                        [
+                            _field(
+                                "Tasks (empty = all)",
+                                dcc.Dropdown(
+                                    id="run-tasks",
+                                    options=_TASK_OPTIONS,
+                                    value=[],
+                                    multi=True,
+                                    placeholder="any task",
                                 ),
-                                dcc.Input(
-                                    id="run-max",
-                                    type="number",
-                                    min=1,
-                                    step=1,
-                                    placeholder="unlimited",
-                                    style={"width": "100px"},
+                            ),
+                            _field(
+                                "Recordings (empty = all)",
+                                dcc.Dropdown(
+                                    id="run-recordings",
+                                    options=[],
+                                    value=[],
+                                    multi=True,
+                                    placeholder="any recording",
                                 ),
-                            ],
-                            style={"marginTop": "4px"},
-                        ),
-                    ],
-                    style={"flex": "1 1 220px"},
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("Options", className="section-label"),
+                                    dcc.Checklist(
+                                        id="run-flags",
+                                        options=[{"label": " retry failed", "value": "retry"}],
+                                        value=[],
+                                        style={"fontFamily": "var(--font-mono)",
+                                               "fontSize": "12px",
+                                               "color": "var(--ink-2)"},
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Label(
+                                                "max-tasks",
+                                                style={
+                                                    "fontFamily": "var(--font-mono)",
+                                                    "fontSize": "11px",
+                                                    "color": "var(--ink-3)",
+                                                    "marginRight": "6px",
+                                                },
+                                            ),
+                                            dcc.Input(
+                                                id="run-max",
+                                                type="number",
+                                                min=1,
+                                                step=1,
+                                                placeholder="unlimited",
+                                                style={"width": "120px"},
+                                            ),
+                                        ],
+                                        style={"marginTop": "8px"},
+                                    ),
+                                ],
+                                style={"flex": "1 1 220px"},
+                            ),
+                        ],
+                        style={
+                            "display": "flex",
+                            "gap": "16px",
+                            "alignItems": "flex-start",
+                            "flexWrap": "wrap",
+                        },
+                    ),
+                    className="card-body",
                 ),
             ],
-            style={
-                "display": "flex",
-                "gap": "16px",
-                "alignItems": "flex-start",
-                "marginBottom": "16px",
-            },
+            className="card",
+            style={"marginBottom": "16px"},
         ),
-        html.H4("Preview"),
         html.Div(
-            id="run-preview-summary",
-            style={"marginBottom": "6px", "fontSize": "14px"},
+            [
+                html.Div(
+                    [
+                        html.Span("preview", className="h-title"),
+                        html.Span(
+                            id="run-preview-summary",
+                            className="h-actions",
+                            style={"color": "var(--ink-2)",
+                                   "fontFamily": "var(--font-mono)",
+                                   "fontSize": "11px",
+                                   "textTransform": "none",
+                                   "letterSpacing": "0"},
+                        ),
+                    ],
+                    className="card-head",
+                ),
+                html.Div(
+                    html.Pre(id="run-preview-list", className="code"),
+                    className="card-body",
+                ),
+            ],
+            className="card",
+            style={"marginBottom": "16px"},
         ),
-        html.Pre(
-            id="run-preview-list",
-            style={
-                "backgroundColor": "#f6f8fa",
-                "border": "1px solid #d0d7de",
-                "padding": "10px 12px",
-                "borderRadius": "4px",
-                "fontSize": "12px",
-                "maxHeight": "240px",
-                "overflow": "auto",
-            },
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Span("command", className="h-title"),
+                        html.Div(
+                            dcc.Clipboard(
+                                target_id="run-command",
+                                title="Copy command",
+                                style={"display": "inline-block",
+                                       "fontSize": "16px",
+                                       "cursor": "pointer",
+                                       "color": "var(--ink-3)"},
+                            ),
+                            className="h-actions",
+                        ),
+                    ],
+                    className="card-head",
+                ),
+                html.Div(
+                    html.Pre(id="run-command", className="code terminal"),
+                    className="card-body",
+                ),
+            ],
+            className="card",
         ),
-        html.H4("Command"),
-        html.Pre(
-            id="run-command",
-            style={
-                "backgroundColor": "#0d1117",
-                "color": "#c9d1d9",
-                "padding": "12px 14px",
-                "borderRadius": "4px",
-                "fontSize": "13px",
-                "whiteSpace": "pre",
-                "overflowX": "auto",
-            },
-        ),
-        dcc.Clipboard(
-            target_id="run-command",
-            title="Copy command",
-            style={
-                "display": "inline-block",
-                "fontSize": "16px",
-                "cursor": "pointer",
-                "marginTop": "6px",
-            },
-        ),
-        html.Span(
-            " ← click the icon to copy the command, then paste in a terminal.",
-            style={"fontSize": "12px", "color": "#555"},
-        ),
-    ]
+    ],
+    className="page",
 )
 
 
@@ -226,7 +270,6 @@ def _build(tasks_selected, recordings_selected, flags, max_tasks):
         task_names=task_names,
     ))
 
-    # Also report cache size so the user knows whether they need to queue wells first.
     cache_df, _task_cols = load_pipeline_df(Path(analysis_root))
     summary = (
         f"{total} eligible work item(s) right now "

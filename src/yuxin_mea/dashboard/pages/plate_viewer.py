@@ -44,8 +44,10 @@ _EMPTY_FIG = go.Figure().update_layout(
         "text": "(pick a recording and click Load)",
         "xref": "paper", "yref": "paper",
         "x": 0.5, "y": 0.5, "showarrow": False,
-        "font": {"size": 14, "color": "#888"},
+        "font": {"size": 14, "color": "#84807a"},
     }],
+    xaxis={"visible": False},
+    yaxis={"visible": False},
     margin={"l": 20, "r": 20, "t": 20, "b": 20},
     height=300,
 )
@@ -125,35 +127,58 @@ def _display_settings_panel() -> html.Details:
 
 
 layout = html.Div([
-    html.H2("Plate viewer", style={"marginTop": "0"}),
-    html.P(
-        "4×6 plate raster + synchrony view for one recording. "
-        "Reads existing burst_detection and curation outputs; nothing is "
-        "computed from scratch."
+    html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Span("workspace"),
+                            html.Span("analysis"),
+                            html.Span("plate_viewer"),
+                        ],
+                        className="breadcrumb",
+                    ),
+                    html.H1("Plate viewer"),
+                    html.Div(
+                        "4×6 plate raster + synchrony. Reads burst_detection "
+                        "and curation outputs; nothing computed from scratch.",
+                        className="subtitle",
+                    ),
+                ]
+            ),
+        ],
+        className="view-head",
     ),
     html.Div(id="plate-viewer-banner-slot"),
     html.Div(
         [
-            html.Label("Recording: ", style={"marginRight": "6px"}),
-            dcc.Dropdown(
-                id="plate-viewer-recording-dropdown",
-                options=[], value=None, clearable=False,
-                style={"width": "420px", "display": "inline-block",
-                       "verticalAlign": "middle"},
+            html.Label("Recording", className="section-label",
+                       style={"marginBottom": "0"}),
+            html.Div(
+                dcc.Dropdown(
+                    id="plate-viewer-recording-dropdown",
+                    options=[], value=None, clearable=False,
+                ),
+                style={"flex": "1 1 420px"},
             ),
-            html.Button("Load", id="plate-viewer-load-btn", n_clicks=0,
-                        style={"marginLeft": "12px"}),
-            html.Button("Export HTML", id="plate-viewer-export-btn", n_clicks=0,
-                        style={"marginLeft": "8px"}),
+            html.Button([html.Span("↻", className="glyph"), "Load"],
+                        id="plate-viewer-load-btn", n_clicks=0,
+                        className="btn primary"),
+            html.Button([html.Span("⤓", className="glyph"), "Export HTML"],
+                        id="plate-viewer-export-btn", n_clicks=0,
+                        className="btn"),
             html.Span(id="plate-viewer-status",
-                      style={"marginLeft": "12px", "color": "#555"}),
+                      style={"color": "var(--ink-3)",
+                             "fontFamily": "var(--font-mono)", "fontSize": "11px"}),
         ],
-        style={"marginBottom": "12px"},
+        style={"display": "flex", "alignItems": "center", "gap": "8px",
+               "marginBottom": "12px", "flexWrap": "wrap"},
     ),
     _display_settings_panel(),
     dcc.Graph(id="plate-viewer-fig", figure=_EMPTY_FIG,
               style={"height": "80vh", "marginTop": "16px"}),
-])
+], className="page")
 
 
 # ---------------------------------------------------------------------------

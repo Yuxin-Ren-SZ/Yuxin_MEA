@@ -16,63 +16,94 @@ dash.register_page(__name__, path="/", name="Home", order=0)
 
 
 _STATUSES = ("not_run", "running", "complete", "failed")
-_STATUS_COLORS = {
-    "complete": "#c8e6c9",
-    "running":  "#bbdefb",
-    "failed":   "#ffcdd2",
-    "not_run":  "#eceff1",
+# Map each status to its pill modifier so KPI tiles pick up the matching
+# soft background + accent color.
+_STATUS_PILL = {
+    "complete": "ok",
+    "running": "run",
+    "failed": "fail",
+    "not_run": "idle",
 }
 
 
-def _row(label: str, value: object) -> html.Div:
-    return html.Div(
-        [
-            html.Span(f"{label}: ", style={"fontWeight": "600", "color": "#555"}),
-            html.Span(str(value), style={"fontFamily": "monospace"}),
-        ],
-        style={"margin": "4px 0"},
-    )
+def _kv(label: str, value: object) -> list:
+    return [html.Dt(label), html.Dd(str(value), className="path")]
 
 
-def _status_chip(status: str, count: int) -> html.Div:
+def _kpi(label: str, value: int, pill_kind: str) -> html.Div:
     return html.Div(
         [
+            html.Div(label, className="label"),
+            html.Div(str(value), className="value"),
             html.Div(
-                str(count),
-                style={"fontSize": "22px", "fontWeight": "600", "fontFamily": "monospace"},
+                [html.Span(pill_kind, className=f"pill {pill_kind}")],
+                className="sub",
             ),
-            html.Div(status, style={"fontSize": "12px", "color": "#555"}),
         ],
-        style={
-            "backgroundColor": _STATUS_COLORS[status],
-            "border": "1px solid #bbb",
-            "borderRadius": "4px",
-            "padding": "10px 14px",
-            "minWidth": "84px",
-            "textAlign": "center",
-        },
+        className="kpi",
     )
 
 
 layout = html.Div(
     [
-        html.H2("Home", style={"marginTop": "0"}),
-        html.P(
-            "Read-only view of the dataset and pipeline caches. Use the "
-            "Recordings page to queue wells; the Run page builds the CLI "
-            "command for `yuxin-mea-run` to drain the queue."
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Span("workspace"),
+                                html.Span("analysis_root"),
+                                html.Span("home"),
+                            ],
+                            className="breadcrumb",
+                        ),
+                        html.H1("Analysis operations"),
+                        html.Div(
+                            "Read-only view of dataset and pipeline caches.",
+                            className="subtitle",
+                        ),
+                    ]
+                ),
+            ],
+            className="view-head",
         ),
         html.Div(id="home-banner-slot"),
-        html.H4("Loaded configuration"),
-        html.Div(id="home-config-summary"),
-        html.H4("Cache contents", style={"marginTop": "24px"}),
-        html.Div(id="home-cache-summary"),
-        html.H4("Pipeline status", style={"marginTop": "24px"}),
         html.Div(
-            id="home-status-chips",
-            style={"display": "flex", "gap": "12px", "flexWrap": "wrap"},
+            [
+                html.Div(
+                    [html.Span("loaded configuration", className="h-title")],
+                    className="card-head",
+                ),
+                html.Div(
+                    html.Dl(id="home-config-summary", className="kv"),
+                    className="card-body",
+                ),
+            ],
+            className="card",
+            style={"marginBottom": "16px"},
         ),
-    ]
+        html.Div(
+            [
+                html.Div(
+                    [html.Span("cache contents", className="h-title")],
+                    className="card-head",
+                ),
+                html.Div(
+                    html.Dl(id="home-cache-summary", className="kv"),
+                    className="card-body",
+                ),
+            ],
+            className="card",
+            style={"marginBottom": "16px"},
+        ),
+        html.Div(
+            "pipeline status",
+            className="section-label",
+        ),
+        html.Div(id="home-status-chips", className="kpi-grid"),
+    ],
+    className="page",
 )
 
 
@@ -87,34 +118,35 @@ def _render(_id: str):
     """Render banner + config + cache + status summaries on page load."""
     ctx = current_app.config["YUXIN_MEA"]
     banner = None if ctx.get("config_exists") else no_config_banner()
-    config_block = [
-        _row("config_path", ctx["config_path"]),
-        _row("config_exists", ctx.get("config_exists", False)),
-        _row("data_root", ctx["data_root"] or "(not set)"),
-        _row("analysis_root", ctx["analysis_root"] or "(not set)"),
-    ]
+    config_block: list = []
+    for label, value in [
+        ("config_path", ctx["config_path"]),
+        ("config_exists", ctx.get("config_exists", False)),
+        ("data_root", ctx["data_root"] or "(not set)"),
+        ("analysis_root", ctx["analysis_root"] or "(not set)"),
+    ]:
+        config_block.extend(_kv(label, value))
 
     analysis_root = ctx["analysis_root"]
     if analysis_root is None:
-        cache_block = [html.P(
-            "analysis_root is not set in the config — no caches to summarize.",
-            style={"color": "#888"},
-        )]
-        chips: list = [html.Span("—", style={"color": "#888"})]
-        return banner, config_block, cache_block, chips
+        cache_block = _kv("status", "analysis_root not set — no caches to summarize.")
+        empty_kpis = [_kpi(s, 0, _STATUS_PILL[s]) for s in _STATUSES]
+        return banner, config_block, cache_block, empty_kpis
 
     n_rec = len(load_recordings_df(Path(analysis_root)))
     pipe_df, task_names = load_pipeline_df(Path(analysis_root))
-    cache_block = [
-        _row("recordings (experiment_cache.json)", n_rec),
-        _row("pipeline entries (pipeline_cache.json)", len(pipe_df)),
-        _row("registered task columns", ", ".join(task_names) if task_names else "—"),
-    ]
+    cache_block: list = []
+    for label, value in [
+        ("recordings (experiment_cache.json)", n_rec),
+        ("pipeline entries (pipeline_cache.json)", len(pipe_df)),
+        ("registered task columns", ", ".join(task_names) if task_names else "—"),
+    ]:
+        cache_block.extend(_kv(label, value))
 
     counts = {s: 0 for s in _STATUSES}
     for col in task_names:
         for value in pipe_df[col]:
             if value in counts:
                 counts[value] += 1
-    chips = [_status_chip(s, counts[s]) for s in _STATUSES]
+    chips = [_kpi(s, counts[s], _STATUS_PILL[s]) for s in _STATUSES]
     return banner, config_block, cache_block, chips

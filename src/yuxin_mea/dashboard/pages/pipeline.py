@@ -21,53 +21,122 @@ from yuxin_mea.tasks import TASK_CLASSES
 dash.register_page(__name__, path="/pipeline", name="Pipeline", order=2)
 
 
-_STATUS_COLORS = {
-    "complete": "#c8e6c9",
-    "running":  "#bbdefb",
-    "failed":   "#ffcdd2",
-    "not_run":  "#eceff1",
+# Soft accent backgrounds + matching text colors mirror the `mea-chip`
+# `.cell-btn.<status>` palette in styles.css. Plain hex (oklch) so
+# `style_data_conditional` can hand them straight to Dash's renderer.
+_STATUS_STYLE = {
+    "complete": {"bg": "oklch(0.62 0.1 155 / 0.16)", "fg": "oklch(0.42 0.1 155)"},
+    "running":  {"bg": "oklch(0.7 0.13 80 / 0.18)",  "fg": "oklch(0.45 0.13 80)"},
+    "failed":   {"bg": "oklch(0.6 0.16 28 / 0.16)",  "fg": "oklch(0.43 0.16 28)"},
+    "not_run":  {"bg": "rgba(132,128,122,0.14)",     "fg": "#84807a"},
 }
 
 
-def _legend_swatch(status: str, color: str) -> html.Div:
-    return html.Div(
+def _legend_swatch(status: str) -> html.Div:
+    s = _STATUS_STYLE[status]
+    return html.Span(
         [
             html.Span(
-                style={
-                    "display": "inline-block", "width": "14px", "height": "14px",
-                    "backgroundColor": color, "marginRight": "6px",
-                    "border": "1px solid #bbb", "verticalAlign": "middle",
-                }
+                className="swatch",
+                style={"background": s["bg"], "borderColor": s["fg"]},
             ),
-            html.Span(status, style={"fontSize": "13px", "verticalAlign": "middle"}),
-        ]
+            status,
+        ],
+        style={"display": "inline-flex", "alignItems": "center"},
     )
 
 
 _TASK_NAMES = [cls.task_name for cls in TASK_CLASSES]
 
 
+_TABLE_STYLE_CELL = {
+    "fontFamily": "var(--font-mono)",
+    "fontSize": "12px",
+    "padding": "8px 12px",
+    "backgroundColor": "var(--bg-elev)",
+    "color": "var(--ink)",
+    "border": "0",
+    "borderBottom": "1px solid var(--line-soft)",
+    "textAlign": "left",
+}
+_TABLE_STYLE_HEADER = {
+    "fontFamily": "var(--font-mono)",
+    "fontSize": "10px",
+    "fontWeight": "600",
+    "textTransform": "uppercase",
+    "letterSpacing": "0.06em",
+    "backgroundColor": "var(--bg)",
+    "color": "var(--ink-3)",
+    "border": "0",
+    "borderBottom": "1px solid var(--line)",
+    "padding": "8px 12px",
+}
+
+
 layout = html.Div(
     [
-        html.H2("Pipeline status", style={"marginTop": "0"}),
-        html.P(
-            "One row per (recording, well). One column per task name seen in "
-            "the cache. Em-dash cells (—) mean that task was never "
-            "registered for the entry. Filter and sort using the column "
-            "headers. Select a row, pick a task, and click Reset to flip "
-            "that task — and every downstream task — back to NOT_RUN."
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Span("workspace"),
+                                html.Span("pipeline_manager"),
+                                html.Span("pipeline_cache.json"),
+                            ],
+                            className="breadcrumb",
+                        ),
+                        html.H1("Pipeline status"),
+                        html.Div(
+                            "One row per (recording, well); one column per task. "
+                            "Reset cascades to dependents.",
+                            className="subtitle",
+                        ),
+                    ]
+                ),
+                html.Div(
+                    [
+                        html.Button(
+                            [html.Span("↻", className="glyph"), "Refresh"],
+                            id="pipeline-refresh",
+                            n_clicks=0,
+                            className="btn",
+                        ),
+                    ],
+                    className="view-actions",
+                ),
+            ],
+            className="view-head",
         ),
         html.Div(id="pipeline-banner-slot"),
         html.Div(
             [
-                html.Button("Refresh", id="pipeline-refresh", n_clicks=0),
-                html.Span(id="pipeline-status", style={"marginLeft": "12px", "color": "#555"}),
+                html.Div(
+                    [
+                        html.Span("legend", className="h-title"),
+                        html.Span(
+                            id="pipeline-status",
+                            className="h-actions",
+                            style={"color": "var(--ink-3)",
+                                   "fontFamily": "var(--font-mono)",
+                                   "fontSize": "11px",
+                                   "textTransform": "none",
+                                   "letterSpacing": "0"},
+                        ),
+                    ],
+                    className="card-head",
+                ),
+                html.Div(
+                    html.Div(
+                        [_legend_swatch(s) for s in _STATUS_STYLE],
+                        className="legend",
+                    ),
+                    className="card-body",
+                ),
             ],
+            className="card",
             style={"marginBottom": "12px"},
-        ),
-        html.Div(
-            [_legend_swatch(status, color) for status, color in _STATUS_COLORS.items()],
-            style={"display": "flex", "gap": "16px", "marginBottom": "12px"},
         ),
         dash_table.DataTable(
             id="pipeline-table",
@@ -79,36 +148,51 @@ layout = html.Div(
             sort_action="native",
             page_size=25,
             style_table={"overflowX": "auto"},
-            style_cell={"fontFamily": "monospace", "fontSize": "13px", "padding": "4px 8px"},
-            style_header={"fontWeight": "600", "backgroundColor": "#f4f6f8"},
+            style_cell=_TABLE_STYLE_CELL,
+            style_header=_TABLE_STYLE_HEADER,
         ),
         html.Div(
             [
-                html.Span(
-                    "Reset task on selected row:",
-                    style={"marginRight": "8px", "fontSize": "13px"},
+                html.Div(
+                    [
+                        html.Span("reset task on selected row", className="h-title"),
+                    ],
+                    className="card-head",
                 ),
-                dcc.Dropdown(
-                    id="pipeline-reset-task",
-                    options=[{"label": n, "value": n} for n in _TASK_NAMES],
-                    value=None,
-                    placeholder="pick a task",
-                    style={"width": "260px", "display": "inline-block", "verticalAlign": "middle"},
-                ),
-                html.Button(
-                    "Reset (cascade dependents)",
-                    id="pipeline-reset-btn",
-                    n_clicks=0,
-                    style={"marginLeft": "8px"},
-                ),
-                html.Span(
-                    id="pipeline-reset-status",
-                    style={"marginLeft": "12px", "color": "#555"},
+                html.Div(
+                    [
+                        html.Div(
+                            dcc.Dropdown(
+                                id="pipeline-reset-task",
+                                options=[{"label": n, "value": n} for n in _TASK_NAMES],
+                                value=None,
+                                placeholder="pick a task",
+                            ),
+                            style={"flex": "1 1 260px"},
+                        ),
+                        html.Button(
+                            [html.Span("⟲", className="glyph"),
+                             "Reset (cascade dependents)"],
+                            id="pipeline-reset-btn",
+                            n_clicks=0,
+                            className="btn primary",
+                        ),
+                        html.Span(
+                            id="pipeline-reset-status",
+                            style={"color": "var(--ink-3)",
+                                   "fontFamily": "var(--font-mono)",
+                                   "fontSize": "11px"},
+                        ),
+                    ],
+                    className="card-body",
+                    style={"display": "flex", "alignItems": "center", "gap": "12px"},
                 ),
             ],
+            className="card",
             style={"marginTop": "16px"},
         ),
-    ]
+    ],
+    className="page",
 )
 
 
@@ -168,11 +252,14 @@ def _reset(_n_clicks: int, table_data, selected_rows, task_name: str | None):
 
 
 def _build_conditional_style(task_names: list[str]) -> list[dict]:
-    return [
-        {
-            "if": {"filter_query": f'{{{col}}} = "{status}"', "column_id": col},
-            "backgroundColor": color,
-        }
-        for col in task_names
-        for status, color in _STATUS_COLORS.items()
-    ]
+    rules: list[dict] = []
+    for col in task_names:
+        for status, style in _STATUS_STYLE.items():
+            rules.append(
+                {
+                    "if": {"filter_query": f'{{{col}}} = "{status}"', "column_id": col},
+                    "backgroundColor": style["bg"],
+                    "color": style["fg"],
+                }
+            )
+    return rules
