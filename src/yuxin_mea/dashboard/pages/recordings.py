@@ -118,11 +118,11 @@ layout = html.Div(
                         html.Div(
                             html.Div(id="recordings-list", className="rec-list"),
                             className="card-body flush",
-                            style={"maxHeight": "600px", "padding": "0"},
+                            style={"padding": "0"},
                         ),
                     ],
                     className="card",
-                    style={"width": "300px", "flexShrink": "0", "overflow": "hidden"},
+                    style={"width": "300px", "flexShrink": "0"},
                 ),
 
                 # Right: metadata + wells

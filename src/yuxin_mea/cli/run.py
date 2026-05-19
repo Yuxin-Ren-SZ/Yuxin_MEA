@@ -17,6 +17,7 @@ import logging
 import sys
 import time
 import traceback
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from pathlib import Path
 
 from yuxin_mea.config import ConfigManager
@@ -69,7 +70,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-tasks",
         type=int,
         default=None,
-        help="Stop after this many tasks (useful for smoke tests).",
+        help="Stop after this many tasks complete (useful for smoke tests). "
+             "This is a cap on total work — distinct from --jobs which sets "
+             "how many workers run concurrently.",
+    )
+    p.add_argument(
+        "--jobs", "-j",
+        type=int,
+        default=1,
+        help="Concurrent worker processes (default 1 = sequential). "
+             "Each worker re-loads its own ConfigManager/DatasetManager; the "
+             "parent owns all pipeline cache writes.",
     )
     p.add_argument(
         "--dry-run",
@@ -173,6 +184,75 @@ def _run_one(
     )
 
 
+def _run_one_worker(work_item: WorkItem, config_path: Path) -> dict:
+    """Run a single task in a child process. Pickle-safe (top-level fn).
+
+    The worker rebuilds ConfigManager + DatasetManager from disk — it does
+    NOT touch the pipeline cache. The parent process owns all status writes
+    so concurrent workers can't race on pipeline_cache.json.
+    """
+    cm = ConfigManager()
+    for cls in TASK_CLASSES:
+        cm.register_task(cls)
+    cm.load(config_path)
+    data_root = cm.get_global("data_root")
+    analysis_root = cm.get_global("analysis_root")
+    if not data_root or not analysis_root:
+        return {
+            "status": TaskStatus.FAILED,
+            "output_path": None,
+            "error": "data_root or analysis_root unset in config",
+            "elapsed": 0.0,
+        }
+    dataset_mgr = DatasetManager(Path(data_root), Path(analysis_root))
+
+    task_cls = next(
+        (c for c in TASK_CLASSES if c.task_name == work_item.task_name),
+        None,
+    )
+    if task_cls is None:
+        return {
+            "status": TaskStatus.FAILED,
+            "output_path": None,
+            "error": f"unknown task {work_item.task_name!r}",
+            "elapsed": 0.0,
+        }
+
+    params = cm.get_task_params(work_item.task_name)
+    try:
+        data_path = _resolve_recording_path(dataset_mgr, work_item.recording_key)
+    except KeyError as exc:
+        return {
+            "status": TaskStatus.FAILED,
+            "output_path": None,
+            "error": str(exc),
+            "elapsed": 0.0,
+        }
+
+    task = task_cls()
+    t0 = time.time()
+    try:
+        output_path = task.run(
+            work_item.recording_key,
+            work_item.well_id,
+            data_path,
+            params,
+        )
+    except Exception:
+        return {
+            "status": TaskStatus.FAILED,
+            "output_path": None,
+            "error": traceback.format_exc(),
+            "elapsed": time.time() - t0,
+        }
+    return {
+        "status": TaskStatus.COMPLETE,
+        "output_path": output_path,
+        "error": None,
+        "elapsed": time.time() - t0,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(
@@ -229,6 +309,40 @@ def main(argv: list[str] | None = None) -> int:
             n_recovered,
         )
 
+    if args.jobs is None or args.jobs <= 1:
+        n_ran, n_failed = _drain_serial(
+            cm, dataset_mgr, pipeline_mgr,
+            task_allow=task_allow,
+            rec_allow=rec_allow,
+            retry_failed=args.retry_failed,
+            max_tasks=args.max_tasks,
+        )
+    else:
+        n_ran, n_failed = _drain_parallel(
+            pipeline_mgr,
+            config_path=args.config,
+            jobs=args.jobs,
+            task_allow=task_allow,
+            rec_allow=rec_allow,
+            retry_failed=args.retry_failed,
+            max_tasks=args.max_tasks,
+        )
+
+    print(f"Done. Ran {n_ran} task(s); {n_failed} failed.")
+    return 0 if n_failed == 0 else 1
+
+
+def _drain_serial(
+    cm: ConfigManager,
+    dataset_mgr: DatasetManager,
+    pipeline_mgr: PipelineManager,
+    *,
+    task_allow: list[str] | None,
+    rec_allow: list[str] | None,
+    retry_failed: bool,
+    max_tasks: int | None,
+) -> tuple[int, int]:
+    """Single-worker drain — preserves the pre-concurrency behavior verbatim."""
     task_instances: dict[str, object] = {cls.task_name: cls() for cls in TASK_CLASSES}
 
     n_ran = 0
@@ -239,14 +353,13 @@ def main(argv: list[str] | None = None) -> int:
     # most once per invocation, while still letting future invocations retry.
     attempted: set[tuple[str, str, str]] = set()
     while True:
-        if args.max_tasks is not None and n_ran >= args.max_tasks:
-            logger.info("Reached --max-tasks=%d, stopping.", args.max_tasks)
+        if max_tasks is not None and n_ran >= max_tasks:
+            logger.info("Reached --max-tasks=%d, stopping.", max_tasks)
             break
 
-        # Ask for several at once so we can skip already-attempted work items.
         batch = pipeline_mgr.get_next_task(
             n=max(1, len(attempted) + 1),
-            retry_failed=args.retry_failed,
+            retry_failed=retry_failed,
             recording_keys=rec_allow,
             task_names=task_allow,
         )
@@ -268,9 +381,107 @@ def main(argv: list[str] | None = None) -> int:
         ).tasks[work_item.task_name]
         if record.status == TaskStatus.FAILED:
             n_failed += 1
+    return n_ran, n_failed
 
-    print(f"Done. Ran {n_ran} task(s); {n_failed} failed.")
-    return 0 if n_failed == 0 else 1
+
+def _drain_parallel(
+    pipeline_mgr: PipelineManager,
+    *,
+    config_path: Path,
+    jobs: int,
+    task_allow: list[str] | None,
+    rec_allow: list[str] | None,
+    retry_failed: bool,
+    max_tasks: int | None,
+) -> tuple[int, int]:
+    """Parallel drain via ProcessPoolExecutor.
+
+    The parent owns the pipeline cache: it marks RUNNING before submit and
+    writes COMPLETE/FAILED on each future's resolution. Workers re-load their
+    own ConfigManager/DatasetManager and return a plain dict — they never
+    touch pipeline_cache.json.
+    """
+    n_ran = 0
+    n_failed = 0
+    attempted: set[tuple[str, str, str]] = set()
+
+    def _fetch_eligible(slots: int) -> list[WorkItem]:
+        # Over-fetch so we can skip in-flight + already-attempted items.
+        n_need = slots + len(attempted) + 1
+        batch = pipeline_mgr.get_next_task(
+            n=n_need,
+            retry_failed=retry_failed,
+            recording_keys=rec_allow,
+            task_names=task_allow,
+        )
+        out: list[WorkItem] = []
+        for w in batch:
+            key = (w.recording_key, w.well_id, w.task_name)
+            if key in attempted:
+                continue
+            out.append(w)
+            if len(out) >= slots:
+                break
+        return out
+
+    with ProcessPoolExecutor(max_workers=jobs) as ex:
+        futures: dict[Future, WorkItem] = {}
+
+        def _refill() -> None:
+            while True:
+                if max_tasks is not None and (n_ran + len(futures)) >= max_tasks:
+                    return
+                slots = jobs - len(futures)
+                if slots <= 0:
+                    return
+                next_items = _fetch_eligible(slots)
+                if not next_items:
+                    return
+                for w in next_items:
+                    if max_tasks is not None and (n_ran + len(futures)) >= max_tasks:
+                        return
+                    key = (w.recording_key, w.well_id, w.task_name)
+                    attempted.add(key)
+                    pipeline_mgr.update_status(w, TaskStatus.RUNNING)
+                    fut = ex.submit(_run_one_worker, w, config_path)
+                    futures[fut] = w
+
+        _refill()
+        while futures:
+            done, _pending = wait(list(futures.keys()), return_when=FIRST_COMPLETED)
+            for fut in done:
+                w = futures.pop(fut)
+                try:
+                    result = fut.result()
+                except Exception:
+                    result = {
+                        "status": TaskStatus.FAILED,
+                        "output_path": None,
+                        "error": traceback.format_exc(),
+                        "elapsed": 0.0,
+                    }
+                if result["status"] == TaskStatus.COMPLETE:
+                    pipeline_mgr.update_status(
+                        w, TaskStatus.COMPLETE, output_path=result["output_path"]
+                    )
+                    logger.info(
+                        "Task COMPLETE %s/%s/%s in %.1fs → %s",
+                        w.recording_key, w.well_id, w.task_name,
+                        result["elapsed"], result["output_path"],
+                    )
+                else:
+                    pipeline_mgr.update_status(
+                        w, TaskStatus.FAILED, error=result["error"]
+                    )
+                    logger.error(
+                        "Task FAILED %s/%s/%s",
+                        w.recording_key, w.well_id, w.task_name,
+                    )
+                    n_failed += 1
+                n_ran += 1
+            _refill()
+
+    return n_ran, n_failed
 
 
 if __name__ == "__main__":

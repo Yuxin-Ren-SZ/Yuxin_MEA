@@ -244,6 +244,10 @@ class PipelineManager:
         prefix = f"{recording_key}/"
         return [e for k, e in self._cache.items() if k.startswith(prefix)]
 
+    def all_entries(self) -> list[PipelineEntry]:
+        """Snapshot of every entry in the cache (for cross-recording iteration)."""
+        return list(self._cache.values())
+
     # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
@@ -252,37 +256,79 @@ class PipelineManager:
         self,
         task_name:     str,
         recording_key: str | None = None,
-        well_id:       str | None = None,
-    ) -> None:
+        well_ids:      list[str] | None = None,
+        status_filter: set[str] | None = None,
+    ) -> int:
         """Reset task_name (and all transitive dependents) to NOT_RUN.
 
         Scope:
-            refresh("sorting")                          → all wells
-            refresh("sorting", recording_key=...)       → all wells for that recording
-            refresh("sorting", recording_key=..., well_id=...)  → one well only
+            refresh("sorting")                                     → all wells
+            refresh("sorting", recording_key=...)                  → all wells for that recording
+            refresh("sorting", recording_key=..., well_ids=[...])  → those wells only
+            refresh("sorting", status_filter={TaskStatus.FAILED})  → only failed records
+
+        Returns the number of TaskRecords that were actually reset (across the
+        full dependency cascade). 0 means nothing matched the filter.
         """
         if task_name not in self._forward_deps:
             raise ValueError(f"Unknown task {task_name!r}.")
 
         tasks_to_reset = self._cascade_tasks(task_name)
 
-        if recording_key is not None and well_id is not None:
-            entries = [e for e in [self.get_entry(recording_key, well_id)] if e]
-        elif recording_key is not None:
+        if recording_key is not None:
             entries = self.get_entries_for_recording(recording_key)
         else:
             entries = list(self._cache.values())
 
+        if well_ids:
+            wanted = set(well_ids)
+            entries = [e for e in entries if e.well_id in wanted]
+
+        n_reset = 0
         for entry in entries:
             for t in tasks_to_reset:
-                if t in entry.tasks:
-                    self._reset_task_record(entry.tasks[t])
+                record = entry.tasks.get(t)
+                if record is None:
+                    continue
+                if status_filter is not None and record.status not in status_filter:
+                    continue
+                self._reset_task_record(record)
+                n_reset += 1
 
-        self._store.save(self._cache)
+        if n_reset:
+            self._store.save(self._cache)
         logger.info(
-            "Refreshed %s (cascade: %s) for %d entries.",
-            task_name, tasks_to_reset, len(entries),
+            "Refreshed %s (cascade: %s) for %d entries → %d record(s) reset.",
+            task_name, tasks_to_reset, len(entries), n_reset,
         )
+        return n_reset
+
+    def bulk_refresh(
+        self,
+        task_names:     list[str],
+        recording_keys: list[str] | None = None,
+        well_ids:       list[str] | None = None,
+        status_filter:  set[TaskStatus] | None = None,
+    ) -> dict[str, int]:
+        """Reset multiple tasks across multiple recordings; return per-task counts.
+
+        Iterates the (task × recording) cartesian product. ``recording_keys=None``
+        scopes each task to all recordings; ``well_ids`` and ``status_filter``
+        narrow each call further (matching refresh() semantics).
+        """
+        results: dict[str, int] = {}
+        scopes: list[str | None] = list(recording_keys) if recording_keys else [None]
+        for task_name in task_names:
+            n = 0
+            for rk in scopes:
+                n += self.refresh(
+                    task_name,
+                    recording_key=rk,
+                    well_ids=well_ids,
+                    status_filter=status_filter,
+                )
+            results[task_name] = n
+        return results
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -335,8 +381,15 @@ class PipelineManager:
                 return False
         return True
 
+    def cascade_tasks(self, task_name: str) -> list[str]:
+        """Return task_name + all transitively dependent task names (BFS).
+
+        Public because the dashboard's bulk-reset preview needs to count
+        records-that-would-be-reset across the full cascade without writing.
+        """
+        return self._cascade_tasks(task_name)
+
     def _cascade_tasks(self, task_name: str) -> list[str]:
-        """Return task_name + all transitively dependent task names (BFS)."""
         result: list[str] = []
         queue: deque[str] = deque([task_name])
         visited: set[str] = {task_name}

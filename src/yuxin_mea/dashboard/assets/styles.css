@@ -954,7 +954,10 @@ pre.code.terminal {
 
 /* ============ Master/detail for Datasets ============ */
 .rec-list {
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Fill viewport minus topbar (~52px) + view-head (~120px) + page padding. */
+  max-height: calc(100vh - 240px);
   border-right: 1px solid var(--line);
 }
 .rec-group-header {

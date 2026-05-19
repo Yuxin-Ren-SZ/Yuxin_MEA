@@ -189,6 +189,123 @@ layout = html.Div(
             ],
             style={"display": "flex", "gap": "20px", "alignItems": "flex-start"},
         ),
+
+        # ── bulk reset card ─────────────────────────────────────────────
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Span("bulk reset · filter and refresh()", className="h-title"),
+                        html.Span(
+                            "Cascades dependents. Tells you what would change before it writes.",
+                            className="h-actions",
+                            style={"color": "var(--ink-3)",
+                                   "fontFamily": "var(--font-mono)",
+                                   "fontSize": "11px",
+                                   "textTransform": "none",
+                                   "letterSpacing": "0"},
+                        ),
+                    ],
+                    className="card-head",
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Div(
+                                    [
+                                        html.Label("Tasks", className="section-label"),
+                                        dcc.Dropdown(
+                                            id="bulk-reset-tasks",
+                                            options=[{"label": tn, "value": tn} for tn in _TASK_NAMES],
+                                            value=[],
+                                            multi=True,
+                                            placeholder="pick one or more tasks",
+                                        ),
+                                    ],
+                                    style={"flex": "1 1 240px"},
+                                ),
+                                html.Div(
+                                    [
+                                        html.Label("Recordings (empty = all)", className="section-label"),
+                                        dcc.Dropdown(
+                                            id="bulk-reset-recordings",
+                                            options=[],
+                                            value=[],
+                                            multi=True,
+                                            placeholder="any recording",
+                                        ),
+                                    ],
+                                    style={"flex": "1 1 240px"},
+                                ),
+                                html.Div(
+                                    [
+                                        html.Label("Wells (empty = all in scope)", className="section-label"),
+                                        dcc.Dropdown(
+                                            id="bulk-reset-wells",
+                                            options=[],
+                                            value=[],
+                                            multi=True,
+                                            placeholder="any well",
+                                        ),
+                                    ],
+                                    style={"flex": "1 1 240px"},
+                                ),
+                                html.Div(
+                                    [
+                                        html.Label("Status (empty = any)", className="section-label"),
+                                        dcc.Dropdown(
+                                            id="bulk-reset-statuses",
+                                            options=[
+                                                {"label": s, "value": s}
+                                                for s in (_STATUS_OK, _STATUS_RUN, _STATUS_FAIL, _STATUS_IDLE)
+                                            ],
+                                            value=[],
+                                            multi=True,
+                                            placeholder="any status",
+                                        ),
+                                    ],
+                                    style={"flex": "1 1 180px"},
+                                ),
+                            ],
+                            style={
+                                "display": "flex",
+                                "gap": "16px",
+                                "alignItems": "flex-start",
+                                "flexWrap": "wrap",
+                            },
+                        ),
+                        html.Div(
+                            [
+                                html.Button(
+                                    [html.Span("…", className="glyph"), "Preview"],
+                                    id="bulk-reset-preview",
+                                    n_clicks=0,
+                                    className="btn",
+                                ),
+                                html.Button(
+                                    [html.Span("⟲", className="glyph"), "Reset selected"],
+                                    id="bulk-reset-execute",
+                                    n_clicks=0,
+                                    className="btn primary",
+                                ),
+                                html.Span(
+                                    id="bulk-reset-status",
+                                    style={"fontFamily": "var(--font-mono)",
+                                           "fontSize": "11px",
+                                           "color": "var(--ink-3)"},
+                                ),
+                            ],
+                            style={"display": "flex", "alignItems": "center",
+                                   "gap": "8px", "marginTop": "14px"},
+                        ),
+                    ],
+                    className="card-body",
+                ),
+            ],
+            className="card",
+            style={"marginTop": "16px"},
+        ),
     ],
     className="page",
 )
@@ -631,8 +748,144 @@ def _reset_task(_n: int, selected_cell: dict):
         return "Reset: analysis_root not configured."
 
     try:
-        pm.refresh(task_name, recording_key=recording_key, well_id=well_id)
+        n = pm.refresh(task_name, recording_key=recording_key, well_ids=[well_id])
     except (ValueError, KeyError) as exc:
         return f"Reset failed: {exc}"
 
-    return f"Reset {task_name} (+ dependents). Click refresh() to redraw."
+    return f"Reset {task_name} (+ dependents) — {n} record(s). Click refresh() to redraw."
+
+
+# ---------------------------------------------------------------------------
+# Bulk reset card
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("bulk-reset-recordings", "options"),
+    Input("pipeline-refresh", "n_clicks"),
+)
+def _populate_bulk_recordings(_n: int):
+    """Populate the recordings multi-select from the pipeline cache.
+
+    Re-fires on refresh() so newly-queued recordings appear without a
+    full page reload.
+    """
+    ctx_app = current_app.config["YUXIN_MEA"]
+    analysis_root = ctx_app.get("analysis_root")
+    if not analysis_root:
+        return []
+    pipe_df, _ = load_pipeline_df(Path(analysis_root))
+    if pipe_df.empty or "recording_key" not in pipe_df.columns:
+        return []
+    keys = sorted(set(pipe_df["recording_key"].tolist()))
+    return [{"label": k, "value": k} for k in keys]
+
+
+@callback(
+    Output("bulk-reset-wells", "options"),
+    Input("bulk-reset-recordings", "value"),
+)
+def _populate_bulk_wells(recording_keys: list[str] | None):
+    """Enumerate well_ids for the selected recordings. Empty selection → no
+    options (the UI treats empty wells as "all in scope")."""
+    if not recording_keys:
+        return []
+    pm = load_pipeline_mgr()
+    if pm is None:
+        return []
+    wells: set[str] = set()
+    for rk in recording_keys:
+        for entry in pm.get_entries_for_recording(rk):
+            wells.add(entry.well_id)
+    return [{"label": w, "value": w} for w in sorted(wells)]
+
+
+def _filter_entries(pm, recording_keys, well_ids):
+    if recording_keys:
+        entries = []
+        for rk in recording_keys:
+            entries.extend(pm.get_entries_for_recording(rk))
+    else:
+        entries = pm.all_entries()
+    if well_ids:
+        wanted = set(well_ids)
+        entries = [e for e in entries if e.well_id in wanted]
+    return entries
+
+
+def _count_would_reset(pm, tasks, recording_keys, well_ids, statuses):
+    """Dry-run count: how many records would each task reset, including cascade?"""
+    counts: dict[str, int] = {}
+    entries = _filter_entries(pm, recording_keys, well_ids)
+    status_set = set(statuses) if statuses else None
+    for task in tasks:
+        try:
+            cascade = pm.cascade_tasks(task)
+        except (KeyError, ValueError):
+            counts[task] = 0
+            continue
+        n = 0
+        for e in entries:
+            for t in cascade:
+                rec = e.tasks.get(t)
+                if rec is None:
+                    continue
+                if status_set is not None and rec.status not in status_set:
+                    continue
+                n += 1
+        counts[task] = n
+    return counts
+
+
+@callback(
+    Output("bulk-reset-status", "children"),
+    Input("bulk-reset-preview", "n_clicks"),
+    State("bulk-reset-tasks", "value"),
+    State("bulk-reset-recordings", "value"),
+    State("bulk-reset-wells", "value"),
+    State("bulk-reset-statuses", "value"),
+    prevent_initial_call=True,
+)
+def _bulk_reset_preview(_n, tasks, recordings, wells, statuses):
+    if not tasks:
+        return "Preview: pick at least one task."
+    pm = load_pipeline_mgr()
+    if pm is None:
+        return "Preview: analysis_root not configured."
+    counts = _count_would_reset(pm, tasks, recordings, wells, statuses)
+    total = sum(counts.values())
+    if total == 0:
+        return "Preview: nothing matches the filter."
+    breakdown = ", ".join(f"{t}={n}" for t, n in counts.items() if n)
+    return f"Preview: would reset {total} record(s) — {breakdown}."
+
+
+@callback(
+    Output("bulk-reset-status", "children", allow_duplicate=True),
+    Input("bulk-reset-execute", "n_clicks"),
+    State("bulk-reset-tasks", "value"),
+    State("bulk-reset-recordings", "value"),
+    State("bulk-reset-wells", "value"),
+    State("bulk-reset-statuses", "value"),
+    prevent_initial_call=True,
+)
+def _bulk_reset_execute(_n, tasks, recordings, wells, statuses):
+    if not tasks:
+        return "Reset: pick at least one task."
+    pm = load_pipeline_mgr()
+    if pm is None:
+        return "Reset: analysis_root not configured."
+    status_set = set(statuses) if statuses else None
+    try:
+        counts = pm.bulk_refresh(
+            task_names=tasks,
+            recording_keys=recordings or None,
+            well_ids=wells or None,
+            status_filter=status_set,
+        )
+    except (ValueError, KeyError) as exc:
+        return f"Reset failed: {exc}"
+    total = sum(counts.values())
+    if total == 0:
+        return "Reset: nothing matched the filter."
+    breakdown = ", ".join(f"{t}={n}" for t, n in counts.items() if n)
+    return f"Reset {total} record(s) — {breakdown}. Click refresh() to redraw."

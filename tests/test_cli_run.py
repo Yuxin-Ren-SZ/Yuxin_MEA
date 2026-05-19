@@ -18,6 +18,7 @@ def test_parser_smoke():
         "--recordings", "rec1,rec2",
         "--retry-failed",
         "--max-tasks", "5",
+        "--jobs", "4",
         "--dry-run",
     ])
     assert args.config == Path("/tmp/c.json")
@@ -25,7 +26,14 @@ def test_parser_smoke():
     assert args.recordings == "rec1,rec2"
     assert args.retry_failed is True
     assert args.max_tasks == 5
+    assert args.jobs == 4
     assert args.dry_run is True
+
+
+def test_parser_jobs_defaults_to_one():
+    parser = build_parser()
+    args = parser.parse_args(["--config", "/tmp/c.json"])
+    assert args.jobs == 1
 
 
 def test_parser_requires_config():
@@ -80,3 +88,21 @@ def test_unknown_task_filter_rejected(tmp_path, capsys):
     assert rc == 2
     err = capsys.readouterr().err
     assert "nonexistent_task" in err
+
+
+def test_parallel_drain_empty_queue(tmp_path, capsys):
+    """--jobs N with no eligible work must clean up the pool and exit 0."""
+    analysis = tmp_path / "analysis"
+    data = tmp_path / "data"
+    analysis.mkdir()
+    data.mkdir()
+    config = tmp_path / "pipeline_config.json"
+    config.write_text(json.dumps({
+        "global": {"data_root": str(data), "analysis_root": str(analysis)},
+        "tasks": {},
+    }))
+
+    rc = main(["--config", str(config), "--jobs", "2"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Ran 0 task(s)" in out

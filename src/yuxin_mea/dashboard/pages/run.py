@@ -105,7 +105,29 @@ layout = html.Div(
                                     html.Div(
                                         [
                                             html.Label(
-                                                "max-tasks",
+                                                "jobs (concurrent workers)",
+                                                style={
+                                                    "fontFamily": "var(--font-mono)",
+                                                    "fontSize": "11px",
+                                                    "color": "var(--ink-3)",
+                                                    "marginRight": "6px",
+                                                },
+                                            ),
+                                            dcc.Input(
+                                                id="run-jobs",
+                                                type="number",
+                                                min=1,
+                                                step=1,
+                                                value=1,
+                                                style={"width": "80px"},
+                                            ),
+                                        ],
+                                        style={"marginTop": "8px"},
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Label(
+                                                "max-tasks (cap, optional)",
                                                 style={
                                                     "fontFamily": "var(--font-mono)",
                                                     "fontSize": "11px",
@@ -234,13 +256,16 @@ def _populate_recordings(_id: str):
     Input("run-recordings", "value"),
     Input("run-flags", "value"),
     Input("run-max", "value"),
+    Input("run-jobs", "value"),
 )
-def _build(tasks_selected, recordings_selected, flags, max_tasks):
+def _build(tasks_selected, recordings_selected, flags, max_tasks, jobs):
     ctx = current_app.config["YUXIN_MEA"]
     config_path = ctx.get("config_path")
     analysis_root = ctx.get("analysis_root")
 
-    cmd = _build_command(config_path, tasks_selected, recordings_selected, flags, max_tasks)
+    cmd = _build_command(
+        config_path, tasks_selected, recordings_selected, flags, max_tasks, jobs,
+    )
 
     if analysis_root is None:
         return "analysis_root is not set in the config.", "", cmd
@@ -296,6 +321,7 @@ def _build_command(
     recordings_selected: list[str] | None,
     flags: list[str] | None,
     max_tasks: int | None,
+    jobs: int | None,
 ) -> str:
     """Render the literal `yuxin-mea-run ...` invocation, one flag per line."""
     config_str = str(config_path) if config_path else "<set --config>"
@@ -308,6 +334,9 @@ def _build_command(
         flag_groups.append("--retry-failed")
     if max_tasks:
         flag_groups.append(f"--max-tasks {int(max_tasks)}")
+    # jobs=1 is the CLI default — omit to keep the command terse.
+    if jobs and int(jobs) > 1:
+        flag_groups.append(f"--jobs {int(jobs)}")
 
     if len(flag_groups) == 1:
         return f"yuxin-mea-run {flag_groups[0]}"
