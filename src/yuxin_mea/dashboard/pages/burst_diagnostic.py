@@ -181,26 +181,48 @@ layout = html.Div([
     Input("burst-diag-root-input", "id"),
 )
 def _prefill_default_root(_id: str):
+    """Try a chain of candidate locations and pick the first that exists.
+
+    The burst diagnostic prefers `curated_spike_times.npy` over raw Kilosort
+    triples, so curation outputs come first in the chain. Falls back to
+    conventional analysis_root subdirs when the config doesn't declare them.
+    """
     yuxin_ctx = current_app.config.get("YUXIN_MEA", {})
     analysis_root = yuxin_ctx.get("analysis_root")
     config_path = yuxin_ctx.get("config_path")
-    if analysis_root is None or config_path is None:
+    if analysis_root is None:
         return "", "(analysis_root not set in config — set the Kilosort root manually.)"
 
     cm = ConfigManager()
-    cm.load(config_path)
-    sorting_params = cm.get_task_params("sorting")
-    if not sorting_params:
-        return "", "Sorting task not registered in the config — set the Kilosort root manually."
+    if config_path is not None:
+        cm.load(config_path)
 
-    out = sorting_params.get("output_root")
-    if not out:
-        return "", "Sorting task has no `output_root` — set the Kilosort root manually."
+    def _resolve(raw: str | None) -> Path | None:
+        if not raw:
+            return None
+        p = Path(raw)
+        if not p.is_absolute():
+            p = Path(analysis_root) / p
+        return p
 
-    p = Path(out)
-    if not p.is_absolute():
-        p = analysis_root / p
-    return str(p), f"Default from `sorting.output_root`: {p}"
+    # Ordered candidates: (label, path)
+    candidates: list[tuple[str, Path | None]] = [
+        ("auto_curation.output_root",
+         _resolve(cm.get_task_params("auto_curation").get("output_root") if cm.get_task_params("auto_curation") else None)),
+        ("sorting.output_root",
+         _resolve(cm.get_task_params("sorting").get("output_root") if cm.get_task_params("sorting") else None)),
+        ("analysis_root/curation_data", Path(analysis_root) / "curation_data"),
+        ("analysis_root/spikesorted_data", Path(analysis_root) / "spikesorted_data"),
+    ]
+
+    for label, path in candidates:
+        if path is not None and path.exists():
+            return str(path), f"Default from `{label}`: {path}"
+
+    return "", (
+        "No spike-source directory found via config or convention. "
+        "Tried: " + ", ".join(label for label, _ in candidates) + "."
+    )
 
 
 # ---------------------------------------------------------------------------

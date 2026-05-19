@@ -697,3 +697,319 @@ pre.code.terminal {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 5px; border: 2px solid var(--bg); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ============ Table scroll wrapper ============ */
+.tbl-wrap { overflow: auto; }
+
+/* ============ Badges ============ */
+.badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink-3);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.badge.api { color: oklch(0.45 0.13 240); border-color: oklch(0.55 0.1 240 / 0.4); }
+.badge.exp { color: oklch(0.5 0.13 25); border-color: oklch(0.55 0.1 25 / 0.4); }
+:root[data-theme="dark"] .badge.api { color: oklch(0.78 0.1 240); }
+:root[data-theme="dark"] .badge.exp { color: oklch(0.8 0.12 25); }
+
+/* ============ KPI sparkline ============ */
+.kpi .spark {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 70px;
+  height: 28px;
+  opacity: 0.5;
+}
+
+/* ============ Pipeline DAG ============ */
+.dag {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  padding: 16px;
+  overflow-x: auto;
+}
+.dag-node {
+  position: relative;
+  flex: 1;
+  min-width: 130px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  border-radius: var(--radius);
+  padding: 12px 12px 10px;
+}
+.dag-node.selected {
+  border-color: var(--ink);
+  background: var(--bg);
+}
+/* Arrows are rendered explicitly in Python (one per actual dep edge),
+   so no CSS auto-connector between all adjacent siblings. */
+.dag-arrow {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  flex-shrink: 0;
+  color: var(--line-strong);
+  font-size: 14px;
+  padding: 0 2px;
+  user-select: none;
+}
+.dag-node .idx {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+}
+.dag-node .name {
+  font-weight: 600;
+  font-size: 13px;
+  margin: 2px 0 8px;
+  letter-spacing: -0.01em;
+}
+.dag-node .meter {
+  display: flex;
+  gap: 1px;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-deep);
+  margin-bottom: 6px;
+}
+.dag-node .meter > span { display: block; height: 100%; }
+.dag-node .stats {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+}
+.dag-node .stats b { color: var(--ink-2); font-weight: 600; }
+
+/* ============ Pipeline status matrix ============ */
+.matrix {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+}
+.matrix th {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-3);
+  font-weight: 600;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  text-align: center;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.matrix th.well-col {
+  text-align: left;
+  padding-left: 14px;
+  width: 200px;
+}
+.matrix td {
+  padding: 4px 4px;
+  text-align: center;
+  border-bottom: 1px solid var(--line-soft);
+}
+.matrix td.well-cell {
+  text-align: left;
+  padding: 6px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  border-right: 1px solid var(--line-soft);
+}
+.matrix tbody tr:hover { background: var(--bg-deep); }
+.matrix tr.selected { background: var(--bg-deep); }
+
+/* ============ Cell-btn (status dot buttons in matrix) ============ */
+.cell-btn {
+  display: inline-flex;
+  width: 26px;
+  height: 22px;
+  border-radius: 4px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  cursor: pointer;
+  position: relative;
+}
+.cell-btn .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--idle);
+}
+.cell-btn.complete { background: var(--ok-soft); border-color: oklch(0.62 0.1 155 / 0.4); }
+.cell-btn.complete .dot { background: var(--ok); }
+.cell-btn.running { background: var(--run-soft); border-color: oklch(0.7 0.13 80 / 0.4); }
+.cell-btn.running .dot { background: var(--run); animation: cell-pulse 1.2s infinite; }
+.cell-btn.failed { background: var(--fail-soft); border-color: oklch(0.6 0.16 28 / 0.4); }
+.cell-btn.failed .dot { background: var(--fail); }
+.cell-btn.not_run .dot { background: var(--ink-4); }
+.cell-btn.blocked { opacity: 0.45; }
+.cell-btn.blocked .dot { background: transparent; border: 1px dashed var(--ink-4); width: 7px; height: 7px; }
+.cell-btn.selected { outline: 2px solid var(--ink); outline-offset: -1px; }
+
+@keyframes cell-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ============ Filter toggle group ============ */
+.toggle-group {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.toggle-group button {
+  padding: 5px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-elev);
+  color: var(--ink-2);
+  border-right: 1px solid var(--line);
+  border-top: none;
+  border-bottom: none;
+  border-left: none;
+  cursor: pointer;
+}
+.toggle-group button:last-child { border-right: none; }
+.toggle-group button:hover { background: var(--bg-deep); color: var(--ink); }
+.toggle-group button.active {
+  background: var(--ink);
+  color: var(--bg-elev);
+}
+
+/* ============ Inspector panel ============ */
+.inspector {
+  width: 360px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
+.inspector-head {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.inspector-body {
+  padding: 14px 16px;
+  overflow: auto;
+  flex: 1;
+}
+
+/* ============ Config section tree ============ */
+.tree {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.tree-node {
+  display: flex;
+  align-items: center;
+  padding: 5px 10px;
+  cursor: pointer;
+  border-radius: 4px;
+  gap: 6px;
+}
+.tree-node:hover { background: var(--bg-deep); }
+.tree-node.active { background: var(--bg-deep); color: var(--ink); }
+.tree-node .chev { width: 12px; color: var(--ink-3); font-size: 10px; }
+.tree-node .leaf { width: 12px; color: var(--ink-4); font-size: 10px; }
+.tree-node .lbl { flex: 1; }
+.tree-node .val { color: var(--ink-3); font-size: 11px; }
+
+/* ============ Events log ============ */
+.events { display: flex; flex-direction: column; }
+.event {
+  display: grid;
+  grid-template-columns: 70px 60px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12px;
+}
+.event:last-child { border-bottom: none; }
+.event .t { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }
+.event .msg { color: var(--ink-2); }
+
+/* ============ Split layouts ============ */
+.split-h { display: grid; grid-template-columns: 280px 1fr; gap: 0; }
+
+/* ============ Master/detail for Datasets ============ */
+.rec-list {
+  overflow: auto;
+  border-right: 1px solid var(--line);
+}
+.rec-group-header {
+  padding: 8px 14px 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line-soft);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.rec-card {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.rec-card:hover { background: var(--bg-deep); }
+.rec-card.active {
+  background: var(--bg-deep);
+  border-left-color: var(--ink);
+}
+.rec-card-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 3px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+.rec-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+}
+.rec-progress {
+  height: 4px;
+  background: var(--bg);
+  border-radius: 2px;
+  overflow: hidden;
+  display: flex;
+  gap: 1px;
+}
+.rec-progress span { display: block; height: 100%; }

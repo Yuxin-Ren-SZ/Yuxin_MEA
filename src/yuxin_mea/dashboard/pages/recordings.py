@@ -1,82 +1,46 @@
-"""Recordings explorer — filter, queue, and (re)scan the dataset cache.
+"""Recordings page — master/detail browser matching the mea-chip design.
 
-The page reads `experiment_cache.json` for display (via `data.load_recordings_df`,
-which never mutates state) and uses the per-callback `DatasetManager` /
-`PipelineManager` constructors in `dashboard.context` only when the user
-actively clicks "Scan disk" or "Queue selected wells".
+Left rail: recording cards grouped by sample_id, each with a pipeline
+progress bar.  Right pane: metadata KV grid + wells table with per-task
+cell-btn status dots.
+
+Selection state lives in a dcc.Store; a pattern-matched callback on the
+card buttons writes to it; a second callback renders the detail pane.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import dash
-from dash import Input, Output, State, callback, dash_table, dcc, html
+from dash import ALL, Input, Output, State, callback, clientside_callback, dcc, html
 from flask import current_app
 
 from yuxin_mea.dashboard.components import no_config_banner
 from yuxin_mea.dashboard.context import load_dataset_mgr, load_pipeline_mgr
-from yuxin_mea.dashboard.data import load_recordings_df
+from yuxin_mea.dashboard.data import load_recordings_detail
+from yuxin_mea.tasks import TASK_CLASSES
 
 
 dash.register_page(__name__, path="/recordings", name="Recordings", order=1)
 
-
-# Columns the filter dropdowns operate on (must be present in load_recordings_df).
-_FILTER_COLUMNS = ["sample_id", "date", "plate_id", "scan_type", "run_id"]
-
-
-# Shared DataTable styling — design tokens via inline CSS-var references
-# (DataTable doesn't honor stylesheet classes for its internal cells, but
-# CSS variables resolve through `inherit`).
-_TABLE_STYLE_CELL = {
-    "fontFamily": "var(--font-mono)",
-    "fontSize": "12px",
-    "padding": "8px 12px",
-    "backgroundColor": "var(--bg-elev)",
-    "color": "var(--ink)",
-    "border": "0",
-    "borderBottom": "1px solid var(--line-soft)",
-    "textAlign": "left",
-}
-_TABLE_STYLE_HEADER = {
-    "fontFamily": "var(--font-mono)",
-    "fontSize": "10px",
-    "fontWeight": "600",
-    "textTransform": "uppercase",
-    "letterSpacing": "0.06em",
-    "backgroundColor": "var(--bg)",
-    "color": "var(--ink-3)",
-    "border": "0",
-    "borderBottom": "1px solid var(--line)",
-    "padding": "8px 12px",
-}
+_TASK_NAMES = [tc.task_name for tc in TASK_CLASSES]
+_STATUS_OK = "complete"
+_STATUS_RUN = "running"
+_STATUS_FAIL = "failed"
 
 
-def _filter_row() -> html.Div:
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.Label(col, className="section-label"),
-                    dcc.Dropdown(
-                        id={"recordings-filter": col},
-                        options=[],
-                        value=None,
-                        multi=True,
-                        placeholder=f"any {col}",
-                    ),
-                ],
-                style={"flex": "1 1 140px"},
-            )
-            for col in _FILTER_COLUMNS
-        ],
-        style={"display": "flex", "gap": "12px", "alignItems": "flex-end"},
-    )
-
+# ---------------------------------------------------------------------------
+# Static layout shell — data injected by callbacks
+# ---------------------------------------------------------------------------
 
 layout = html.Div(
     [
+        dcc.Store(id="recordings-selected-key", data=""),
+        dcc.Store(id="recordings-data-store", data={}),
+
+        # ── view-head ────────────────────────────────────────────────────
         html.Div(
             [
                 html.Div(
@@ -89,35 +53,31 @@ layout = html.Div(
                             ],
                             className="breadcrumb",
                         ),
-                        html.H1("Recordings"),
-                        html.Div(
-                            "Every recording known to the dataset cache. "
-                            "Filter, then queue selected wells onto the pipeline.",
-                            className="subtitle",
-                        ),
+                        html.H1("Datasets"),
+                        html.Div(id="recordings-subtitle", className="subtitle"),
                     ]
                 ),
                 html.Div(
                     [
                         html.Button(
-                            [html.Span("↻", className="glyph"), "Refresh"],
-                            id="recordings-refresh",
-                            n_clicks=0,
-                            className="btn",
-                        ),
-                        html.Button(
                             [html.Span("⇣", className="glyph"), "Scan disk"],
                             id="recordings-scan",
                             n_clicks=0,
-                            title="Walk data_root, rebuild experiment_cache.json",
                             className="btn",
+                            title="Walk data_root and rebuild experiment_cache.json",
                         ),
                         html.Button(
                             [html.Span("▸", className="glyph"), "Queue selected"],
-                            id="recordings-queue",
+                            id="recordings-queue-btn",
                             n_clicks=0,
-                            title="Register every well under selected recordings with the pipeline",
                             className="btn primary",
+                            title="Register all wells under the selected recording",
+                        ),
+                        html.Button(
+                            [html.Span("↻", className="glyph"), "refresh()"],
+                            id="recordings-refresh",
+                            n_clicks=0,
+                            className="btn",
                         ),
                     ],
                     className="view-actions",
@@ -125,38 +85,57 @@ layout = html.Div(
             ],
             className="view-head",
         ),
+
         html.Div(id="recordings-banner-slot"),
+
+        # ── status strip ─────────────────────────────────────────────────
+        html.Div(
+            id="recordings-status",
+            style={
+                "fontFamily": "var(--font-mono)",
+                "fontSize": "11px",
+                "color": "var(--ink-3)",
+                "minHeight": "16px",
+            },
+        ),
+
+        # ── master/detail body ───────────────────────────────────────────
         html.Div(
             [
+                # Left: recording list
                 html.Div(
-                    [html.Span("filters", className="h-title")],
-                    className="card-head",
+                    [
+                        html.Div(
+                            [
+                                html.Span("recordings", className="h-title"),
+                                html.Div(
+                                    html.Span(id="recordings-count", className="badge"),
+                                    className="h-actions",
+                                ),
+                            ],
+                            className="card-head",
+                        ),
+                        html.Div(
+                            html.Div(id="recordings-list", className="rec-list"),
+                            className="card-body flush",
+                            style={"maxHeight": "600px", "padding": "0"},
+                        ),
+                    ],
+                    className="card",
+                    style={"width": "300px", "flexShrink": "0", "overflow": "hidden"},
                 ),
-                html.Div(_filter_row(), className="card-body"),
+
+                # Right: metadata + wells
+                html.Div(
+                    [
+                        html.Div(id="recordings-detail-meta"),
+                        html.Div(id="recordings-detail-wells"),
+                    ],
+                    className="col",
+                    style={"flex": "1", "minWidth": "0", "gap": "16px"},
+                ),
             ],
-            className="card",
-            style={"marginBottom": "12px"},
-        ),
-        html.Div(
-            html.Span(
-                id="recordings-status",
-                style={"color": "var(--ink-3)", "fontFamily": "var(--font-mono)",
-                       "fontSize": "11px"},
-            ),
-            style={"marginBottom": "12px"},
-        ),
-        dash_table.DataTable(
-            id="recordings-table",
-            columns=[],
-            data=[],
-            row_selectable="multi",
-            selected_rows=[],
-            filter_action="native",
-            sort_action="native",
-            page_size=25,
-            style_table={"overflowX": "auto"},
-            style_cell=_TABLE_STYLE_CELL,
-            style_header=_TABLE_STYLE_HEADER,
+            style={"display": "flex", "gap": "20px", "alignItems": "flex-start"},
         ),
     ],
     className="page",
@@ -164,123 +143,419 @@ layout = html.Div(
 
 
 # ---------------------------------------------------------------------------
-# Refresh / scan: the table content + the filter dropdown choices.
+# Helper builders
+# ---------------------------------------------------------------------------
+
+def _cell_btn(status: str | None) -> html.Button:
+    s = status or "not_run"
+    return html.Button(
+        html.Span(className="dot"),
+        className=f"cell-btn {s}",
+        title=s,
+        style={"cursor": "default"},
+    )
+
+
+def _rec_progress_bar(wells: list[str], well_pipeline_status: dict) -> html.Div:
+    statuses = [
+        well_pipeline_status.get(w, {})
+        for w in wells
+    ]
+    total = max(1, len(wells) * len(_TASK_NAMES))
+    done = sum(
+        1 for s in statuses for tn in _TASK_NAMES if s.get(tn) == _STATUS_OK
+    )
+    running = sum(
+        1 for s in statuses for tn in _TASK_NAMES if s.get(tn) == _STATUS_RUN
+    )
+    failed = sum(
+        1 for s in statuses for tn in _TASK_NAMES if s.get(tn) == _STATUS_FAIL
+    )
+    ok_pct = f"{100 * done / total:.1f}%"
+    run_pct = f"{100 * running / total:.1f}%"
+    fail_pct = f"{100 * failed / total:.1f}%"
+    pct_int = int(100 * done / total)
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span(style={"background": "var(--ok)", "width": ok_pct}),
+                    html.Span(style={"background": "var(--run)", "width": run_pct}),
+                    html.Span(style={"background": "var(--fail)", "width": fail_pct}),
+                ],
+                className="rec-progress",
+            ),
+            html.Div(
+                f"{pct_int}% pipeline complete",
+                style={
+                    "marginTop": "3px",
+                    "fontFamily": "var(--font-mono)",
+                    "fontSize": "10px",
+                    "color": "var(--ink-4)",
+                },
+            ),
+        ]
+    )
+
+
+def _build_rec_card(rec: dict, well_pipeline_status: dict, selected_key: str) -> html.Button:
+    cache_key = rec["cache_key"]
+    wells = [f"{cache_key}/{w}" for w in rec["wells"]]
+    is_active = cache_key == selected_key
+    return html.Button(
+        [
+            html.Div(
+                [
+                    html.Span(
+                        f"{rec['plate_id']} · {rec['run_id']}",
+                        style={"fontFamily": "var(--font-mono)", "fontSize": "12px", "fontWeight": "600"},
+                    ),
+                    html.Span(
+                        rec["date"],
+                        style={"fontFamily": "var(--font-mono)", "fontSize": "10px", "color": "var(--ink-3)"},
+                    ),
+                ],
+                className="rec-card-title",
+            ),
+            html.Div(
+                [
+                    html.Span(rec["scan_type"], className="badge"),
+                    html.Span(
+                        f"{rec['n_wells']} wells",
+                        style={"fontFamily": "var(--font-mono)", "fontSize": "10px", "color": "var(--ink-3)"},
+                    ),
+                ],
+                className="rec-card-meta",
+            ),
+            _rec_progress_bar(wells, well_pipeline_status),
+        ],
+        id={"rec-card": cache_key},
+        n_clicks=0,
+        className=f"rec-card {'active' if is_active else ''}",
+    )
+
+
+def _build_meta_card(rec: dict) -> html.Div:
+    def kv(label: str, value: str, path: bool = False) -> list:
+        return [
+            html.Dt(label),
+            html.Dd(value, className="path" if path else ""),
+        ]
+
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span(f"recording · {rec['run_id']}", className="h-title"),
+                    html.Div(
+                        [
+                            html.Span(rec["scan_type"], className="badge"),
+                        ],
+                        className="h-actions",
+                    ),
+                ],
+                className="card-head",
+            ),
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Dl(
+                                kv("sample_id", rec["sample_id"])
+                                + kv("date", rec["date"])
+                                + kv("plate_id", rec["plate_id"])
+                                + kv("scan_type", rec["scan_type"])
+                                + kv("run_id", rec["run_id"]),
+                                className="kv",
+                            ),
+                            html.Dl(
+                                kv("file_size", f"{rec['file_size_mb']} MB")
+                                + kv("n_wells", str(rec["n_wells"])),
+                                className="kv",
+                            ),
+                        ],
+                        style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "0 28px"},
+                    ),
+                    html.Div(
+                        html.Dl(
+                            kv("cache_key", rec["cache_key"], path=True)
+                            + kv("data_path", rec["data_path"], path=True),
+                            className="kv",
+                            style={"gridTemplateColumns": "90px 1fr"},
+                        ),
+                        style={
+                            "marginTop": "12px",
+                            "paddingTop": "12px",
+                            "borderTop": "1px solid var(--line-soft)",
+                        },
+                    ),
+                ],
+                className="card-body",
+            ),
+        ],
+        className="card",
+    )
+
+
+def _build_wells_table(rec: dict, well_pipeline_status: dict) -> html.Div:
+    cache_key = rec["cache_key"]
+    n_tasks = len(_TASK_NAMES)
+    rows = []
+    for compound_well in rec["wells"]:
+        pk = f"{cache_key}/{compound_well}"
+        task_map = well_pipeline_status.get(pk, {})
+        # One <td> per task so each dot aligns with its column header
+        task_cells = [
+            html.Td(
+                _cell_btn(task_map.get(tn)),
+                style={"padding": "4px 4px", "textAlign": "center"},
+            )
+            for tn in _TASK_NAMES
+        ]
+        rows.append(
+            html.Tr(
+                [html.Td(compound_well, className="mono", style={"padding": "6px 12px", "fontSize": "11px"})]
+                + task_cells
+            )
+        )
+
+    empty = [
+        html.Tr(
+            html.Td(
+                "No wells — recording not yet queued onto the pipeline.",
+                colSpan=1 + n_tasks,
+                style={
+                    "padding": "32px 24px",
+                    "textAlign": "center",
+                    "color": "var(--ink-3)",
+                    "fontFamily": "var(--font-mono)",
+                    "fontSize": "12px",
+                },
+            )
+        )
+    ] if not rows else []
+
+    # One <th> per task — matches the one <td> per task in each row
+    task_headers = [
+        html.Th(
+            tn.replace("_", " "),
+            style={"padding": "8px 4px", "textAlign": "center", "fontSize": "9px", "width": "36px"},
+        )
+        for tn in _TASK_NAMES
+    ]
+
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span(f"wells · {len(rec['wells'])}", className="h-title"),
+                ],
+                className="card-head",
+            ),
+            html.Div(
+                html.Div(
+                    html.Table(
+                        [
+                            html.Thead(
+                                html.Tr(
+                                    [
+                                        html.Th(
+                                            "compound well_id",
+                                            className="well-col",
+                                            style={"padding": "8px 12px", "textAlign": "left", "width": "200px"},
+                                        ),
+                                    ]
+                                    + task_headers
+                                )
+                            ),
+                            html.Tbody(rows + empty),
+                        ],
+                        className="tbl",
+                    ),
+                    className="tbl-wrap",
+                ),
+                className="card-body flush",
+            ),
+        ],
+        className="card",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Callbacks
 # ---------------------------------------------------------------------------
 
 
 @callback(
     Output("recordings-banner-slot", "children"),
-    Output("recordings-table", "data"),
-    Output("recordings-table", "columns"),
+    Output("recordings-subtitle", "children"),
+    Output("recordings-count", "children"),
+    Output("recordings-list", "children"),
+    Output("recordings-data-store", "data"),
+    Output("recordings-selected-key", "data"),
     Output("recordings-status", "children"),
-    Output({"recordings-filter": "sample_id"}, "options"),
-    Output({"recordings-filter": "date"}, "options"),
-    Output({"recordings-filter": "plate_id"}, "options"),
-    Output({"recordings-filter": "scan_type"}, "options"),
-    Output({"recordings-filter": "run_id"}, "options"),
     Input("recordings-refresh", "n_clicks"),
     Input("recordings-scan", "n_clicks"),
-    Input({"recordings-filter": "sample_id"}, "value"),
-    Input({"recordings-filter": "date"}, "value"),
-    Input({"recordings-filter": "plate_id"}, "value"),
-    Input({"recordings-filter": "scan_type"}, "value"),
-    Input({"recordings-filter": "run_id"}, "value"),
+    State("recordings-selected-key", "data"),
 )
-def _refresh(
-    _refresh_clicks: int,
-    _scan_clicks: int,
-    f_sample, f_date, f_plate, f_scan, f_run,
-):
-    ctx = current_app.config["YUXIN_MEA"]
-    banner = None if ctx.get("config_exists") else no_config_banner()
-    analysis_root = ctx["analysis_root"]
+def _populate(_r: int, _s: int, current_key: str):
+    ctx_app = current_app.config["YUXIN_MEA"]
+    banner = None if ctx_app.get("config_exists") else no_config_banner()
+    analysis_root = ctx_app.get("analysis_root")
+    status_msg = ""
+
     if analysis_root is None:
-        return banner, [], [], "analysis_root is not set in the config.", [], [], [], [], []
+        return banner, "analysis_root not set", "0", [], {}, "", "analysis_root not configured."
 
     triggered = dash.ctx.triggered_id
-    scan_msg = ""
     if isinstance(triggered, str) and triggered == "recordings-scan":
-        scan_msg = _do_scan() + "; "
+        mgr = load_dataset_mgr()
+        if mgr:
+            before = len(mgr.recordings)
+            mgr.refresh()
+            after = len(mgr.recordings)
+            status_msg = f"Scanned disk: {after} recording(s) ({after - before:+d})"
 
-    full = load_recordings_df(Path(analysis_root))
-    full_count = len(full)
+    recordings, well_pipeline_status = load_recordings_detail(Path(analysis_root))
 
-    def _opts(col: str):
-        if full.empty:
-            return []
-        return [{"label": str(v), "value": str(v)} for v in sorted(full[col].dropna().unique())]
-    options = [_opts(col) for col in _FILTER_COLUMNS]
+    subtitle = f"{len(recordings)} recordings · root {analysis_root}"
 
-    df = full
-    for col, selected in zip(_FILTER_COLUMNS, [f_sample, f_date, f_plate, f_scan, f_run]):
-        if selected:
-            df = df[df[col].isin(selected)]
+    # Preserve selection if still valid, else pick first
+    valid_keys = {r["cache_key"] for r in recordings}
+    selected = current_key if current_key in valid_keys else (recordings[0]["cache_key"] if recordings else "")
 
-    columns = [{"name": c, "id": c} for c in df.columns]
-    status = f"{scan_msg}{len(df)} of {full_count} recording(s) after filters"
+    # Group by sample_id
+    groups: dict[str, list[dict]] = {}
+    for rec in recordings:
+        groups.setdefault(rec["sample_id"], []).append(rec)
 
-    return (banner, df.to_dict("records"), columns, status, *options)
+    list_children: list = []
+    for sample_id, recs in groups.items():
+        list_children.append(
+            html.Div(
+                f"{sample_id} · {len(recs)} run(s)",
+                className="rec-group-header",
+            )
+        )
+        for rec in recs:
+            list_children.append(_build_rec_card(rec, well_pipeline_status, selected))
+
+    # Serialise for the detail callback (store recordings + statuses)
+    store_data = {
+        "recordings": recordings,
+        "well_pipeline_status": well_pipeline_status,
+    }
+
+    if not recordings:
+        list_children = [
+            html.Div(
+                "No recordings found in experiment_cache.json.",
+                style={
+                    "padding": "32px 16px",
+                    "fontFamily": "var(--font-mono)",
+                    "fontSize": "12px",
+                    "color": "var(--ink-3)",
+                    "textAlign": "center",
+                },
+            )
+        ]
+
+    return (
+        banner,
+        subtitle,
+        str(len(recordings)),
+        list_children,
+        store_data,
+        selected,
+        status_msg,
+    )
 
 
-def _do_scan() -> str:
-    """Run DatasetManager.refresh() and return a one-line summary."""
-    dataset_mgr = load_dataset_mgr()
-    if dataset_mgr is None:
-        return "Scan skipped: data_root or analysis_root not configured"
-    before = len(dataset_mgr.recordings)
-    dataset_mgr.refresh()
-    after = len(dataset_mgr.recordings)
-    delta = after - before
-    return f"Scanned disk: {after} recording(s) ({delta:+d})"
+@callback(
+    Output("recordings-selected-key", "data", allow_duplicate=True),
+    Output("recordings-list", "children", allow_duplicate=True),
+    Input({"rec-card": ALL}, "n_clicks"),
+    State("recordings-data-store", "data"),
+    State("recordings-selected-key", "data"),
+    prevent_initial_call=True,
+)
+def _select_recording(n_clicks_list, store_data, current_key):
+    triggered = dash.ctx.triggered_id
+    if not triggered or not isinstance(triggered, dict):
+        return dash.no_update, dash.no_update
+
+    new_key = triggered.get("rec-card", current_key)
+    recordings = store_data.get("recordings", [])
+    well_pipeline_status = store_data.get("well_pipeline_status", {})
+
+    groups: dict[str, list[dict]] = {}
+    for rec in recordings:
+        groups.setdefault(rec["sample_id"], []).append(rec)
+
+    list_children: list = []
+    for sample_id, recs in groups.items():
+        list_children.append(
+            html.Div(f"{sample_id} · {len(recs)} run(s)", className="rec-group-header")
+        )
+        for rec in recs:
+            list_children.append(_build_rec_card(rec, well_pipeline_status, new_key))
+
+    return new_key, list_children
 
 
-# ---------------------------------------------------------------------------
-# Queue selected wells onto the pipeline.
-# ---------------------------------------------------------------------------
+@callback(
+    Output("recordings-detail-meta", "children"),
+    Output("recordings-detail-wells", "children"),
+    Input("recordings-selected-key", "data"),
+    State("recordings-data-store", "data"),
+)
+def _update_detail(selected_key: str, store_data: dict):
+    if not selected_key or not store_data:
+        placeholder = html.Div(
+            "Select a recording from the list.",
+            style={
+                "padding": "60px",
+                "textAlign": "center",
+                "color": "var(--ink-3)",
+                "fontFamily": "var(--font-mono)",
+                "fontSize": "12px",
+            },
+        )
+        return placeholder, None
+
+    recordings = store_data.get("recordings", [])
+    well_pipeline_status = store_data.get("well_pipeline_status", {})
+    rec = next((r for r in recordings if r["cache_key"] == selected_key), None)
+    if rec is None:
+        return html.Div("Recording not found."), None
+
+    return _build_meta_card(rec), _build_wells_table(rec, well_pipeline_status)
 
 
 @callback(
     Output("recordings-status", "children", allow_duplicate=True),
-    Input("recordings-queue", "n_clicks"),
-    State("recordings-table", "data"),
-    State("recordings-table", "selected_rows"),
+    Input("recordings-queue-btn", "n_clicks"),
+    State("recordings-selected-key", "data"),
+    State("recordings-data-store", "data"),
     prevent_initial_call=True,
 )
-def _queue_selected(_n_clicks: int, table_data, selected_rows):
-    if not selected_rows:
-        return "Queue: select at least one row first."
-    if not table_data:
-        return "Queue: table is empty."
+def _queue_recording(_n: int, selected_key: str, store_data: dict):
+    if not selected_key:
+        return "Queue: select a recording first."
 
     pm = load_pipeline_mgr()
     dataset_mgr = load_dataset_mgr()
     if pm is None or dataset_mgr is None:
         return "Queue: analysis_root or data_root not configured."
 
-    selected_keys = [
-        table_data[i]["cache_key"]
-        for i in selected_rows
-        if i < len(table_data)
-    ]
-    n_wells = 0
-    n_recs = 0
-    n_skipped = 0
-    for cache_key in selected_keys:
-        matches = dataset_mgr.get_recording_by([("cache_key", "==", cache_key)])
-        if not matches:
-            n_skipped += 1
-            continue
-        recording = matches[0]
-        if not recording.h5_recordings:
-            n_skipped += 1
-            continue
-        n_recs += 1
-        for rec_name, well_ids in recording.h5_recordings.items():
-            for well_id in well_ids:
-                pm.add_well(cache_key, f"{rec_name}/{well_id}")
-                n_wells += 1
+    recordings = store_data.get("recordings", [])
+    rec = next((r for r in recordings if r["cache_key"] == selected_key), None)
+    if rec is None:
+        return "Queue: recording not found."
 
-    return (
-        f"Queued {n_wells} well(s) across {n_recs} recording(s) "
-        f"({n_skipped} skipped)."
-    )
+    n_wells = 0
+    for compound_well in rec["wells"]:
+        pm.add_well(selected_key, compound_well)
+        n_wells += 1
+
+    return f"Queued {n_wells} well(s) for {selected_key}."
