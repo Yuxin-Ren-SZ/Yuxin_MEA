@@ -302,6 +302,7 @@ class IterativeBurstTrace:
     t_centers: np.ndarray | None = None
     bin_size: float | None = None
     feature_names: list[str] | None = None
+    unit_ids: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1932,6 +1933,7 @@ def compute_iterative_bursts(
         trace.t_centers = t_centers.copy()
         trace.bin_size = float(bin_size)
         trace.feature_names = list(feature_names)
+        trace.unit_ids = [str(u) for u in units]
 
     return BurstResults(
         burstlets=_to_df(burstlets_raw),
