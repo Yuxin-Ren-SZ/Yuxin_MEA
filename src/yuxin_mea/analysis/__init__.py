@@ -15,6 +15,12 @@ from .iterative_burst_detector import (
     IterativeBurstTrace,
     compute_iterative_bursts,
 )
+from .ml_burst_detector import (
+    MLBurstConfig,
+    MLBurstError,
+    MLBurstTrace,
+    compute_ml_bursts,
+)
 
 __all__ = [
     "BurstDetectorConfig",
@@ -28,6 +34,10 @@ __all__ = [
     "IterativeBurstError",
     "IterativeBurstTrace",
     "compute_iterative_bursts",
+    "MLBurstConfig",
+    "MLBurstError",
+    "MLBurstTrace",
+    "compute_ml_bursts",
     "PlateViewerConfig",
     "WellRecord",
     "build_plate_figure",
