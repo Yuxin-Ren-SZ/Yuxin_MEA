@@ -90,12 +90,6 @@ layout = html.Div(
                             n_clicks=0,
                             className="btn",
                         ),
-                        html.Button(
-                            [html.Span("⤓", className="glyph"), "save()"],
-                            id="settings-global-save-trigger",
-                            n_clicks=0,
-                            className="btn primary",
-                        ),
                     ],
                     className="view-actions",
                 ),
@@ -411,12 +405,15 @@ def _toggle_save_buttons(dirty_flags):
     prevent_initial_call=True,
 )
 def _save_any_form(_save_clicks, field_values, field_ids, active_section):
+    field_error_specs = ctx.outputs_list[2]
+    n_field_errors = len(field_error_specs)
+
     triggered = ctx.triggered_id
     if not triggered or triggered.get("key") != "save":
         return (
             [dash.no_update] * len(_save_clicks),
             [dash.no_update] * len(_save_clicks),
-            [dash.no_update] * len(field_ids),
+            [dash.no_update] * n_field_errors,
             dash.no_update,
             dash.no_update,
         )
@@ -438,10 +435,11 @@ def _save_any_form(_save_clicks, field_values, field_ids, active_section):
     parsed, errors = collect_values(schema, raw)
 
     errors_out = []
-    for id_ in field_ids:
-        if id_["form"] == target_form_id and id_["field"] in errors:
-            errors_out.append(errors[id_["field"]])
-        elif id_["form"] == target_form_id:
+    for spec in field_error_specs:
+        eid = spec["id"]
+        if eid["form"] == target_form_id and eid["field-error"] in errors:
+            errors_out.append(errors[eid["field-error"]])
+        elif eid["form"] == target_form_id:
             errors_out.append("")
         else:
             errors_out.append(dash.no_update)

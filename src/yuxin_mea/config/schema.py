@@ -15,6 +15,7 @@ render forms and validate edits.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -165,6 +166,15 @@ def _coerce_list_str(value: Any, spec: ParamSpec) -> list[str]:
 def _coerce_dict(value: Any, spec: ParamSpec) -> dict:
     if value is None:
         value = {}
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            value = {}
+        else:
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValidationError(f"Invalid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise ValidationError(f"Expected dict, got {type(value).__name__}.")
     if spec.nested_schema is None:
