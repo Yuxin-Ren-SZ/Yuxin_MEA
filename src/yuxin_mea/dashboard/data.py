@@ -113,6 +113,31 @@ def load_recordings_detail(
     return recordings, well_pipeline_status
 
 
+def filter_recordings(
+    recordings: list[dict],
+    well_pipeline_status: dict[str, dict],
+    *,
+    scan_types: list[str] | None = None,
+    dates: list[str] | None = None,
+    queue_status: str = "all",
+) -> list[dict]:
+    """Filter recordings for the Datasets page.  Pure function, no Dash deps."""
+    out = recordings
+    if scan_types:
+        out = [r for r in out if r["scan_type"] in scan_types]
+    if dates:
+        out = [r for r in out if r["date"] in dates]
+    if queue_status == "queued":
+        out = [r for r in out if any(
+            k.startswith(r["cache_key"] + "/") for k in well_pipeline_status
+        )]
+    elif queue_status == "not_queued":
+        out = [r for r in out if not any(
+            k.startswith(r["cache_key"] + "/") for k in well_pipeline_status
+        )]
+    return out
+
+
 def load_pipeline_df(analysis_root: Path) -> tuple[pd.DataFrame, list[str]]:
     """Read `pipeline_cache.json` and pivot to a (recording, well) × task matrix.
 

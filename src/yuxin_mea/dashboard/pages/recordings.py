@@ -1,25 +1,25 @@
 """Recordings page — master/detail browser matching the mea-chip design.
 
 Left rail: recording cards grouped by sample_id, each with a pipeline
-progress bar.  Right pane: metadata KV grid + wells table with per-task
-cell-btn status dots.
+progress bar and a checkbox for bulk-queue.  Right pane: metadata KV grid +
+wells table with per-task cell-btn status dots.
 
 Selection state lives in a dcc.Store; a pattern-matched callback on the
 card buttons writes to it; a second callback renders the detail pane.
+Checked-keys (for bulk queue) live in a separate store.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import dash
-from dash import ALL, Input, Output, State, callback, clientside_callback, dcc, html
+from dash import ALL, Input, Output, State, callback, dcc, html
 from flask import current_app
 
 from yuxin_mea.dashboard.components import no_config_banner
 from yuxin_mea.dashboard.context import load_dataset_mgr, load_pipeline_mgr
-from yuxin_mea.dashboard.data import load_recordings_detail
+from yuxin_mea.dashboard.data import filter_recordings, load_recordings_detail
 from yuxin_mea.tasks import TASK_CLASSES
 
 
@@ -38,6 +38,7 @@ _STATUS_FAIL = "failed"
 layout = html.Div(
     [
         dcc.Store(id="recordings-selected-key", data=""),
+        dcc.Store(id="recordings-checked-keys", data=[]),
         dcc.Store(id="recordings-data-store", data={}),
 
         # ── view-head ────────────────────────────────────────────────────
@@ -71,7 +72,7 @@ layout = html.Div(
                             id="recordings-queue-btn",
                             n_clicks=0,
                             className="btn primary",
-                            title="Register all wells under the selected recording",
+                            title="Queue all checked recordings (or the active recording if none checked)",
                         ),
                         html.Button(
                             [html.Span("↻", className="glyph"), "refresh()"],
@@ -87,6 +88,87 @@ layout = html.Div(
         ),
 
         html.Div(id="recordings-banner-slot"),
+
+        # ── filter bar ──────────────────────────────────────────────────
+        html.Div(
+            [
+                html.Div(
+                    [html.Span("filters", className="h-title")],
+                    className="card-head",
+                ),
+                html.Div(
+                    html.Div(
+                        [
+                            html.Div(
+                                [
+                                    html.Label("Scan type", style={
+                                        "fontFamily": "var(--font-mono)",
+                                        "fontSize": "10px",
+                                        "color": "var(--ink-3)",
+                                        "marginBottom": "4px",
+                                    }),
+                                    dcc.Dropdown(
+                                        id="recordings-filter-scan-type",
+                                        options=[],
+                                        value=[],
+                                        multi=True,
+                                        placeholder="any",
+                                    ),
+                                ],
+                                style={"flex": "1 1 160px"},
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("Date", style={
+                                        "fontFamily": "var(--font-mono)",
+                                        "fontSize": "10px",
+                                        "color": "var(--ink-3)",
+                                        "marginBottom": "4px",
+                                    }),
+                                    dcc.Dropdown(
+                                        id="recordings-filter-date",
+                                        options=[],
+                                        value=[],
+                                        multi=True,
+                                        placeholder="any",
+                                    ),
+                                ],
+                                style={"flex": "1 1 160px"},
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("Queue status", style={
+                                        "fontFamily": "var(--font-mono)",
+                                        "fontSize": "10px",
+                                        "color": "var(--ink-3)",
+                                        "marginBottom": "4px",
+                                    }),
+                                    dcc.Dropdown(
+                                        id="recordings-filter-queue-status",
+                                        options=[
+                                            {"label": "all", "value": "all"},
+                                            {"label": "queued", "value": "queued"},
+                                            {"label": "not queued", "value": "not_queued"},
+                                        ],
+                                        value="all",
+                                        clearable=False,
+                                    ),
+                                ],
+                                style={"flex": "1 1 130px"},
+                            ),
+                        ],
+                        style={
+                            "display": "flex",
+                            "gap": "16px",
+                            "alignItems": "flex-start",
+                            "flexWrap": "wrap",
+                        },
+                    ),
+                    className="card-body",
+                ),
+            ],
+            className="card",
+        ),
 
         # ── status strip ─────────────────────────────────────────────────
         html.Div(
@@ -122,7 +204,7 @@ layout = html.Div(
                         ),
                     ],
                     className="card",
-                    style={"width": "300px", "flexShrink": "0"},
+                    style={"width": "340px", "flexShrink": "0"},
                 ),
 
                 # Right: metadata + wells
@@ -232,7 +314,91 @@ def _build_rec_card(rec: dict, well_pipeline_status: dict, selected_key: str) ->
         id={"rec-card": cache_key},
         n_clicks=0,
         className=f"rec-card {'active' if is_active else ''}",
+        style={"flex": "1", "minWidth": "0"},
     )
+
+
+def _build_rec_row(
+    rec: dict,
+    well_pipeline_status: dict,
+    selected_key: str,
+    checked_keys: list[str],
+) -> html.Div:
+    cache_key = rec["cache_key"]
+    is_checked = cache_key in checked_keys
+    return html.Div(
+        [
+            dcc.Checklist(
+                id={"rec-check": cache_key},
+                options=[{"label": "", "value": cache_key}],
+                value=[cache_key] if is_checked else [],
+                style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "paddingLeft": "8px",
+                    "flexShrink": "0",
+                },
+            ),
+            _build_rec_card(rec, well_pipeline_status, selected_key),
+        ],
+        style={"display": "flex", "alignItems": "stretch"},
+    )
+
+
+def _build_group_header(
+    sample_id: str,
+    n_recs: int,
+    checked_keys: list[str],
+    group_keys: set[str],
+) -> html.Div:
+    all_checked = group_keys.issubset(set(checked_keys)) if group_keys else False
+    return html.Div(
+        [
+            html.Span(f"{sample_id} · {n_recs} run(s)"),
+            html.Button(
+                "deselect all" if all_checked else "select all",
+                id={"rec-group-select": sample_id},
+                n_clicks=0,
+                className="btn ghost",
+                style={"height": "18px", "padding": "0 6px", "fontSize": "10px"},
+            ),
+        ],
+        className="rec-group-header",
+        style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"},
+    )
+
+
+def _build_rec_list(
+    recordings: list[dict],
+    well_pipeline_status: dict,
+    selected_key: str,
+    checked_keys: list[str],
+) -> list:
+    groups: dict[str, list[dict]] = {}
+    for rec in recordings:
+        groups.setdefault(rec["sample_id"], []).append(rec)
+
+    children: list = []
+    for sample_id, recs in groups.items():
+        group_keys = {r["cache_key"] for r in recs}
+        children.append(_build_group_header(sample_id, len(recs), checked_keys, group_keys))
+        for rec in recs:
+            children.append(_build_rec_row(rec, well_pipeline_status, selected_key, checked_keys))
+
+    if not recordings:
+        children = [
+            html.Div(
+                "No recordings found in experiment_cache.json.",
+                style={
+                    "padding": "32px 16px",
+                    "fontFamily": "var(--font-mono)",
+                    "fontSize": "12px",
+                    "color": "var(--ink-3)",
+                    "textAlign": "center",
+                },
+            )
+        ]
+    return children
 
 
 def _build_meta_card(rec: dict) -> html.Div:
@@ -304,7 +470,6 @@ def _build_wells_table(rec: dict, well_pipeline_status: dict) -> html.Div:
     for compound_well in rec["wells"]:
         pk = f"{cache_key}/{compound_well}"
         task_map = well_pipeline_status.get(pk, {})
-        # One <td> per task so each dot aligns with its column header
         task_cells = [
             html.Td(
                 _cell_btn(task_map.get(tn)),
@@ -335,7 +500,6 @@ def _build_wells_table(rec: dict, well_pipeline_status: dict) -> html.Div:
         )
     ] if not rows else []
 
-    # One <th> per task — matches the one <td> per task in each row
     task_headers = [
         html.Th(
             tn.replace("_", " "),
@@ -394,18 +558,36 @@ def _build_wells_table(rec: dict, well_pipeline_status: dict) -> html.Div:
     Output("recordings-data-store", "data"),
     Output("recordings-selected-key", "data"),
     Output("recordings-status", "children"),
+    Output("recordings-filter-scan-type", "options"),
+    Output("recordings-filter-date", "options"),
     Input("recordings-refresh", "n_clicks"),
     Input("recordings-scan", "n_clicks"),
+    Input("recordings-filter-scan-type", "value"),
+    Input("recordings-filter-date", "value"),
+    Input("recordings-filter-queue-status", "value"),
     State("recordings-selected-key", "data"),
+    State("recordings-checked-keys", "data"),
 )
-def _populate(_r: int, _s: int, current_key: str):
+def _populate(
+    _r: int,
+    _s: int,
+    filter_scan_type: list[str],
+    filter_date: list[str],
+    filter_queue_status: str,
+    current_key: str,
+    checked_keys: list[str],
+):
     ctx_app = current_app.config["YUXIN_MEA"]
     banner = None if ctx_app.get("config_exists") else no_config_banner()
     analysis_root = ctx_app.get("analysis_root")
     status_msg = ""
+    empty_opts: list[dict] = []
 
     if analysis_root is None:
-        return banner, "analysis_root not set", "0", [], {}, "", "analysis_root not configured."
+        return (
+            banner, "analysis_root not set", "0", [], {}, "",
+            "analysis_root not configured.", empty_opts, empty_opts,
+        )
 
     triggered = dash.ctx.triggered_id
     if isinstance(triggered, str) and triggered == "recordings-scan":
@@ -418,56 +600,42 @@ def _populate(_r: int, _s: int, current_key: str):
 
     recordings, well_pipeline_status = load_recordings_detail(Path(analysis_root))
 
-    subtitle = f"{len(recordings)} recordings · root {analysis_root}"
+    scan_type_options = sorted({r["scan_type"] for r in recordings})
+    date_options = sorted({r["date"] for r in recordings})
 
-    # Preserve selection if still valid, else pick first
-    valid_keys = {r["cache_key"] for r in recordings}
-    selected = current_key if current_key in valid_keys else (recordings[0]["cache_key"] if recordings else "")
+    filtered = filter_recordings(
+        recordings, well_pipeline_status,
+        scan_types=filter_scan_type or None,
+        dates=filter_date or None,
+        queue_status=filter_queue_status or "all",
+    )
 
-    # Group by sample_id
-    groups: dict[str, list[dict]] = {}
-    for rec in recordings:
-        groups.setdefault(rec["sample_id"], []).append(rec)
+    subtitle = f"{len(filtered)} of {len(recordings)} recordings · root {analysis_root}"
 
-    list_children: list = []
-    for sample_id, recs in groups.items():
-        list_children.append(
-            html.Div(
-                f"{sample_id} · {len(recs)} run(s)",
-                className="rec-group-header",
-            )
-        )
-        for rec in recs:
-            list_children.append(_build_rec_card(rec, well_pipeline_status, selected))
+    valid_keys = {r["cache_key"] for r in filtered}
+    selected = current_key if current_key in valid_keys else (
+        filtered[0]["cache_key"] if filtered else ""
+    )
 
-    # Serialise for the detail callback (store recordings + statuses)
     store_data = {
         "recordings": recordings,
         "well_pipeline_status": well_pipeline_status,
     }
 
-    if not recordings:
-        list_children = [
-            html.Div(
-                "No recordings found in experiment_cache.json.",
-                style={
-                    "padding": "32px 16px",
-                    "fontFamily": "var(--font-mono)",
-                    "fontSize": "12px",
-                    "color": "var(--ink-3)",
-                    "textAlign": "center",
-                },
-            )
-        ]
+    list_children = _build_rec_list(
+        filtered, well_pipeline_status, selected, checked_keys or [],
+    )
 
     return (
         banner,
         subtitle,
-        str(len(recordings)),
+        str(len(filtered)),
         list_children,
         store_data,
         selected,
         status_msg,
+        [{"label": s, "value": s} for s in scan_type_options],
+        [{"label": d, "value": d} for d in date_options],
     )
 
 
@@ -477,9 +645,21 @@ def _populate(_r: int, _s: int, current_key: str):
     Input({"rec-card": ALL}, "n_clicks"),
     State("recordings-data-store", "data"),
     State("recordings-selected-key", "data"),
+    State("recordings-checked-keys", "data"),
+    State("recordings-filter-scan-type", "value"),
+    State("recordings-filter-date", "value"),
+    State("recordings-filter-queue-status", "value"),
     prevent_initial_call=True,
 )
-def _select_recording(n_clicks_list, store_data, current_key):
+def _select_recording(
+    n_clicks_list,
+    store_data,
+    current_key,
+    checked_keys,
+    filter_scan_type,
+    filter_date,
+    filter_queue_status,
+):
     triggered = dash.ctx.triggered_id
     if not triggered or not isinstance(triggered, dict):
         return dash.no_update, dash.no_update
@@ -488,19 +668,84 @@ def _select_recording(n_clicks_list, store_data, current_key):
     recordings = store_data.get("recordings", [])
     well_pipeline_status = store_data.get("well_pipeline_status", {})
 
-    groups: dict[str, list[dict]] = {}
-    for rec in recordings:
-        groups.setdefault(rec["sample_id"], []).append(rec)
+    filtered = filter_recordings(
+        recordings, well_pipeline_status,
+        scan_types=filter_scan_type or None,
+        dates=filter_date or None,
+        queue_status=filter_queue_status or "all",
+    )
 
-    list_children: list = []
-    for sample_id, recs in groups.items():
-        list_children.append(
-            html.Div(f"{sample_id} · {len(recs)} run(s)", className="rec-group-header")
-        )
-        for rec in recs:
-            list_children.append(_build_rec_card(rec, well_pipeline_status, new_key))
-
+    list_children = _build_rec_list(
+        filtered, well_pipeline_status, new_key, checked_keys or [],
+    )
     return new_key, list_children
+
+
+@callback(
+    Output("recordings-checked-keys", "data"),
+    Input({"rec-check": ALL}, "value"),
+    prevent_initial_call=True,
+)
+def _update_checked(all_values):
+    checked: set[str] = set()
+    for vals in all_values:
+        if vals:
+            checked.update(vals)
+    return sorted(checked)
+
+
+@callback(
+    Output("recordings-checked-keys", "data", allow_duplicate=True),
+    Output("recordings-list", "children", allow_duplicate=True),
+    Input({"rec-group-select": ALL}, "n_clicks"),
+    State("recordings-data-store", "data"),
+    State("recordings-checked-keys", "data"),
+    State("recordings-selected-key", "data"),
+    State("recordings-filter-scan-type", "value"),
+    State("recordings-filter-date", "value"),
+    State("recordings-filter-queue-status", "value"),
+    prevent_initial_call=True,
+)
+def _select_all_in_group(
+    n_clicks_list,
+    store_data,
+    checked_keys,
+    selected_key,
+    filter_scan_type,
+    filter_date,
+    filter_queue_status,
+):
+    triggered = dash.ctx.triggered_id
+    if not triggered or not isinstance(triggered, dict):
+        return dash.no_update, dash.no_update
+
+    sample_id = triggered.get("rec-group-select")
+    if not sample_id:
+        return dash.no_update, dash.no_update
+
+    recordings = store_data.get("recordings", [])
+    well_pipeline_status = store_data.get("well_pipeline_status", {})
+
+    filtered = filter_recordings(
+        recordings, well_pipeline_status,
+        scan_types=filter_scan_type or None,
+        dates=filter_date or None,
+        queue_status=filter_queue_status or "all",
+    )
+
+    group_keys = {r["cache_key"] for r in filtered if r["sample_id"] == sample_id}
+    checked = set(checked_keys or [])
+
+    if group_keys.issubset(checked):
+        checked -= group_keys
+    else:
+        checked |= group_keys
+
+    new_checked = sorted(checked)
+    list_children = _build_rec_list(
+        filtered, well_pipeline_status, selected_key or "", new_checked,
+    )
+    return new_checked, list_children
 
 
 @callback(
@@ -535,12 +780,21 @@ def _update_detail(selected_key: str, store_data: dict):
 @callback(
     Output("recordings-status", "children", allow_duplicate=True),
     Input("recordings-queue-btn", "n_clicks"),
+    State("recordings-checked-keys", "data"),
     State("recordings-selected-key", "data"),
     State("recordings-data-store", "data"),
     prevent_initial_call=True,
 )
-def _queue_recording(_n: int, selected_key: str, store_data: dict):
-    if not selected_key:
+def _queue_recordings(
+    _n: int,
+    checked_keys: list[str],
+    selected_key: str,
+    store_data: dict,
+):
+    keys_to_queue = checked_keys if checked_keys else (
+        [selected_key] if selected_key else []
+    )
+    if not keys_to_queue:
         return "Queue: select a recording first."
 
     pm = load_pipeline_mgr()
@@ -549,13 +803,20 @@ def _queue_recording(_n: int, selected_key: str, store_data: dict):
         return "Queue: analysis_root or data_root not configured."
 
     recordings = store_data.get("recordings", [])
-    rec = next((r for r in recordings if r["cache_key"] == selected_key), None)
-    if rec is None:
-        return "Queue: recording not found."
+    rec_lookup = {r["cache_key"]: r for r in recordings}
 
-    n_wells = 0
-    for compound_well in rec["wells"]:
-        pm.add_well(selected_key, compound_well)
-        n_wells += 1
+    total_wells = 0
+    total_recs = 0
+    for key in keys_to_queue:
+        rec = rec_lookup.get(key)
+        if rec is None:
+            continue
+        n_wells = 0
+        for compound_well in rec["wells"]:
+            pm.add_well(key, compound_well)
+            n_wells += 1
+        if n_wells:
+            total_recs += 1
+            total_wells += n_wells
 
-    return f"Queued {n_wells} well(s) for {selected_key}."
+    return f"Queued {total_wells} well(s) across {total_recs} recording(s)."

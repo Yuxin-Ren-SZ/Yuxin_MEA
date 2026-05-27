@@ -1,0 +1,130 @@
+{
+  "global": {
+    "data_root": "/mnt/benshalom-nas/raw_data/rbs_maxtwo_desktop/harddisk20tbV2/Sadegh_Lab/CX138/",
+    "analysis_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138",
+    "figure_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138"
+  },
+  "tasks": {
+    "preprocessing": {
+      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/preprocessed_data",
+      "bandpass_freq_min": 300,
+      "bandpass_freq_max": 3000,
+      "reference": "local",
+      "operator": "median",
+      "local_radius": [
+        0,
+        250
+      ],
+      "dtype": "float32",
+      "n_jobs": 30,
+      "chunk_duration": "1s",
+      "progress_bar": true,
+      "overwrite": true
+    },
+    "sorting": {
+      "preprocessing_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/preprocessed_data",
+      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/spikesorted_data",
+      "sorter": "kilosort4"
+    },
+    "auto_merge": {
+      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/auto_merge_data",
+      "sorting_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/spikesorted_data",
+      "preprocessing_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/preprocessed_data",
+      "enabled": false,
+      "presets": [
+        "firing_rate_similarity",
+        "template_similarity"
+      ],
+      "radius_um": 50.0,
+      "n_jobs": 1
+    },
+    "analyzer": {
+      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/analyzer_data",
+      "preprocessing_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/preprocessed_data",
+      "auto_merge_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/auto_merge_data",
+      "radius_um": 50.0,
+      "ms_before": 1.0,
+      "ms_after": 2.0,
+      "unit_locations_method": "monopolar_triangulation",
+      "n_jobs": 1
+    },
+    "auto_curation": {
+      "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
+      "analyzer_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/analyzer_data",
+      "enabled": true,
+      "presence_ratio_min": 0.75,
+      "rp_contamination_max": 0.15,
+      "firing_rate_min": 0.05,
+      "amplitude_median_max": -20.0
+    },
+    "burst_detection": {
+      "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
+      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/burst_detection_data",
+      "gamma": 1.0,
+      "min_burstlet_participation": 0.2,
+      "min_absolute_rate_hz": 0.5,
+      "min_burst_density_hz": 1.0,
+      "min_relative_height": 0.1,
+      "extent_frac": 0.3,
+      "network_merge_gap_min_s": 0.75
+    },
+    "iterative_burst_detection": {
+      "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
+      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/iterative_burst_data",
+      "permissive_mad_scale": 0.3,
+      "permissive_percentile": 70.0,
+      "mad_fallback_threshold": 0.01,
+      "composite_mad_scale": 0.75,
+      "extent_frac": 0.3,
+      "merge_floor_frac": 0.7,
+      "merge_gap_tolerance_bins": 3,
+      "strict_merge_gap_tolerance_bins": 2,
+      "merge_strict_floor_frac": 1.0,
+      "network_merge_gap_min_s": 0.75,
+      "max_iterations": 30,
+      "convergence_eps": 0.005,
+      "fisher_alpha_frac": 0.001,
+      "ff_scale_multipliers": [
+        0.5,
+        1.0,
+        2.0,
+        5.0
+      ],
+      "min_burst_modulation": 0.1,
+      "peak_synchrony_floor_frac": 0.0,
+      "participation_gate_mode": "and",
+      "cluster_events": true,
+      "cluster_initial_components": 6,
+      "cluster_min_events": 5,
+      "cluster_min_separation": 1.5,
+      "debug": true,
+      "inner_partitioner": "gmm_em",
+      "lda_exclude_silence": true,
+      "lda_sign_pinned_feature_names": [
+        "PFR",
+        "P",
+        "LLR"
+      ],
+      "gmm_k_range": [
+        2,
+        3
+      ],
+      "gmm_bic_margin": 5.0,
+      "gmm_em_n_init": 5,
+      "gmm_em_reg_covar": 0.0001,
+      "gmm_burst_score_weights": [
+        0.2,
+        0.25,
+        0.05,
+        0.1,
+        0.1,
+        0.05,
+        0.2,
+        0.05
+      ],
+      "gmm_posterior_threshold": 0.5,
+      "gmm_component_merge_distance": 0.5,
+      "gmm_burst_top_fraction": 1.0
+    }
+  }
+}

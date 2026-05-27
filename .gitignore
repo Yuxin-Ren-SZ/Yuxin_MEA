@@ -93,5 +93,11 @@ temp/
 *.webp
 *.html
 
+# Runtime pipeline caches / stale copies
+pipeline_config.json.bak
+src/yuxin_mea/pipeline_config.json
+src/yuxin_mea/preprocessed_data/
+notebooks/pipline_config.json
+
 # macOS
 .DS_Store

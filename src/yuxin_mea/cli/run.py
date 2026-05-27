@@ -138,6 +138,45 @@ def _resolve_recording_path(dataset_mgr: DatasetManager, recording_key: str) -> 
     return dataset_mgr.get_path(matches[0])
 
 
+def _auto_queue_wells(
+    dataset_mgr: DatasetManager,
+    pipeline_mgr: PipelineManager,
+    recording_keys: list[str],
+) -> int:
+    """Auto-queue wells for recordings present in the dataset but not the pipeline.
+
+    Queuing is idempotent (add_well skips existing entries) and always writes
+    to the cache so that a subsequent dry-run can preview eligible tasks.
+    """
+    n_queued = 0
+    for rec_key in recording_keys:
+        if pipeline_mgr.get_entries_for_recording(rec_key):
+            continue
+
+        matches = dataset_mgr.get_recording_by([("cache_key", "==", rec_key)])
+        if not matches:
+            logger.warning(
+                "Recording %r not found in dataset cache — cannot auto-queue. "
+                "Has it been scanned (Recordings page → Scan disk)?",
+                rec_key,
+            )
+            continue
+
+        entry = matches[0]
+        if not entry.h5_recordings:
+            logger.warning("Recording %r has no h5_recordings — nothing to queue.", rec_key)
+            continue
+
+        wells = 0
+        for rec_name, well_ids in entry.h5_recordings.items():
+            for well_id in well_ids:
+                pipeline_mgr.add_well(rec_key, f"{rec_name}/{well_id}")
+                wells += 1
+        n_queued += wells
+        logger.info("Auto-queued %d well(s) for recording %s.", wells, rec_key)
+    return n_queued
+
+
 def _run_one(
     work_item: WorkItem,
     cm: ConfigManager,
@@ -279,6 +318,11 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+
+    if rec_allow:
+        n_auto = _auto_queue_wells(dataset_mgr, pipeline_mgr, rec_allow)
+        if n_auto:
+            logger.info("Auto-queued %d well(s) for unqueued recordings.", n_auto)
 
     if args.dry_run:
         # Dry-run is best-effort only — it can't simulate dependency unlocking

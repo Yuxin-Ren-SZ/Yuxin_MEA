@@ -18,7 +18,7 @@ import pytest
 
 from yuxin_mea.dashboard import build_app
 from yuxin_mea.dashboard.cli import main
-from yuxin_mea.dashboard.data import load_pipeline_df, load_recordings_df
+from yuxin_mea.dashboard.data import filter_recordings, load_pipeline_df, load_recordings_df
 from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
 from yuxin_mea.pipeline.pipeline_entry import PipelineEntry
 from yuxin_mea.pipeline.task_record import TaskRecord, TaskStatus
@@ -203,3 +203,51 @@ def test_burst_diagnostic_page_registered():
 
         paths = {p["path"] for p in dash.page_registry.values()}
         assert "/burst-diagnostic" in paths
+
+
+# ---------------------------------------------------------------------------
+# filter_recordings tests
+# ---------------------------------------------------------------------------
+
+_SAMPLE_RECS = [
+    {"cache_key": "S1/260101/P1/Network/001", "sample_id": "S1",
+     "date": "260101", "scan_type": "Network", "wells": []},
+    {"cache_key": "S1/260101/P1/ActivityScan/002", "sample_id": "S1",
+     "date": "260101", "scan_type": "ActivityScan", "wells": []},
+    {"cache_key": "S1/260102/P1/Network/003", "sample_id": "S1",
+     "date": "260102", "scan_type": "Network", "wells": []},
+]
+
+_SAMPLE_PIPE_STATUS = {
+    "S1/260101/P1/Network/001/rec0/well000": {"preprocessing": "complete"},
+}
+
+
+def test_filter_by_scan_type():
+    out = filter_recordings(_SAMPLE_RECS, _SAMPLE_PIPE_STATUS, scan_types=["Network"])
+    assert len(out) == 2
+    assert all(r["scan_type"] == "Network" for r in out)
+
+
+def test_filter_by_date():
+    out = filter_recordings(_SAMPLE_RECS, _SAMPLE_PIPE_STATUS, dates=["260102"])
+    assert len(out) == 1
+    assert out[0]["cache_key"].endswith("003")
+
+
+def test_filter_queued():
+    out = filter_recordings(_SAMPLE_RECS, _SAMPLE_PIPE_STATUS, queue_status="queued")
+    assert len(out) == 1
+    assert out[0]["cache_key"].endswith("001")
+
+
+def test_filter_not_queued():
+    out = filter_recordings(_SAMPLE_RECS, _SAMPLE_PIPE_STATUS, queue_status="not_queued")
+    assert len(out) == 2
+    keys = {r["cache_key"] for r in out}
+    assert "S1/260101/P1/Network/001" not in keys
+
+
+def test_filter_all_returns_everything():
+    out = filter_recordings(_SAMPLE_RECS, _SAMPLE_PIPE_STATUS, queue_status="all")
+    assert len(out) == 3
