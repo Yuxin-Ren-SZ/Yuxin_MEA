@@ -29,7 +29,7 @@ _OPS: dict[str, Any] = {
     "not contain": lambda a, b: b not in a,
 }
 
-_VALID_KEYS = {f.name for f in dataclasses.fields(RecordingEntry)}
+_VALID_KEYS = {f.name for f in dataclasses.fields(RecordingEntry)} | {"cache_key"}
 
 
 class DatasetManager:

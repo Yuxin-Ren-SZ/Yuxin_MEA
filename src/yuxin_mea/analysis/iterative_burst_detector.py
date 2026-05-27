@@ -140,10 +140,53 @@ class IterativeBurstConfig:
     # Phase 3 — iteration
     composite_mad_scale: float = 0.75
     extent_frac: float = 0.30
-    merge_floor_frac: float = 0.70
+    merge_floor_frac: float = 0.50
     network_merge_gap_min_s: float = 0.75
     max_iterations: int = 20
     convergence_eps: float = 0.005
+
+    # Participation gate (per-burstlet drop test, post-iteration)
+    peak_synchrony_floor_frac: float = 0.5
+    """Per-bin peak-synchrony gate floor, expressed as a fraction of the
+    window-wide ``participation_floor``.  Only consulted when
+    ``participation_gate_mode == "and"``.  Default ``0.5`` keeps a tight
+    per-bin secondary floor while the primary admission criterion becomes
+    window-wide participation.  Set lower (toward 0) to admit even more
+    asynchronous events."""
+
+    participation_gate_mode: str = "and"
+    """How the two halves of the participation gate combine.
+
+    ``"and"`` (default): a burstlet is dropped only when BOTH its
+    window-wide ``participation`` is below ``participation_floor`` AND its
+    single-bin ``peak_synchrony`` is below
+    ``peak_synchrony_floor_frac × participation_floor``.  This admits
+    asynchronous bursts where many units fire across the window but never
+    co-fire in a single bin (the Well 0 / CX138 failure mode).
+
+    ``"peak_synchrony"``: legacy single-axis rule — drop whenever
+    ``peak_synchrony < participation_floor``.  Stricter on noise data but
+    misses asynchronous bursts.  Use to reproduce pre-2026-05 behavior."""
+
+    # Merge gap-tolerance overrides (composite-dip handling)
+    merge_gap_tolerance_bins: int = 3
+    """In the iteration-time merge (``_iter_merge``), two adjacent
+    candidates separated by ≤ this many composite bins are merged
+    regardless of valley depth.  Handles 1–3-bin composite dips inside a
+    single true network burst that would otherwise fragment it."""
+
+    strict_merge_gap_tolerance_bins: int = 2
+    """Same idea as ``merge_gap_tolerance_bins`` but applied to the
+    post-iteration strict hierarchy merge (``_merge_strict_hier``).  One
+    bin tighter by default since this merge is intentionally more
+    conservative."""
+
+    merge_strict_floor_frac: float = 1.0
+    """Strict-merge valley floor as a fraction of the detection threshold.
+    Default ``1.0`` reproduces the original rule "valley must stay above
+    the full detection threshold".  Lower (e.g. 0.7) when the gap-tolerance
+    override is still not enough to reunite fragments of one true network
+    burst."""
 
     # Fisher regularization
     fisher_alpha_frac: float = 1e-3
@@ -160,10 +203,16 @@ class IterativeBurstConfig:
     gate and keeps the pre-filtered burstlets."""
 
     # Post-convergence event clustering
-    cluster_events: bool = True
-    """After convergence, fit a multi-component GMM on per-event quality
-    features and merge similar components before discarding the noise-like
-    clusters. Automatically skipped when fewer than cluster_min_events are
+    cluster_events: bool = False
+    """Optional post-iteration filter: fit a multi-component GMM on per-event
+    quality features and discard noise-like clusters.  Disabled by default
+    because the scoring weights inside ``_cluster_events`` are hardcoded
+    (``[0.35, 0.15, 0.20, 0.10, 0.15, 0.05]`` over ``[composite_peak,
+    composite_mean, llr_aggregate, ff_peak, participation, burst_peak]``)
+    and the keep-threshold is 0.0; these were tuned for a specific
+    recording family and can discard real events on multi-regime data.
+    Re-enable only after confirming detection counts are correct without
+    it.  Automatically skipped when fewer than ``cluster_min_events`` are
     detected."""
 
     cluster_initial_components: int = 6
@@ -179,11 +228,19 @@ class IterativeBurstConfig:
     to be merged in standardized feature space."""
 
     # Inner partitioner — bin-level burst/background separation each iteration
-    inner_partitioner: str = "fisher_lda"
+    inner_partitioner: str = "gmm_em"
     """Which method discriminates burst vs background bins each iteration.
 
-    ``"fisher_lda"`` (default) fits Fisher's linear discriminant on the
-    z-normed feature matrix.  Augmented with two safeguards added after the
+    ``"gmm_em"`` (default) fits a BIC-adaptive Gaussian Mixture Model on the
+    z-normed feature matrix and uses the burst-component posterior as the
+    per-bin score.  Best suited to multi-regime recordings (silence + tonic
+    + burst, or recordings with several burst types) where a single linear
+    discriminant collapses real structure.  Stability across iterations is
+    handled by burst-centroid identity anchoring in ``_fit_gmm_em`` and the
+    BIC hysteresis margin (``gmm_bic_margin``).
+
+    ``"fisher_lda"`` fits Fisher's linear discriminant on the z-normed
+    feature matrix.  Augmented with two safeguards added after the
     diagnostic on ``cx138_44_02`` revealed that the LDA could flip sign on
     heterogeneous (silence + tonic + burst) recordings:
 
@@ -198,21 +255,19 @@ class IterativeBurstConfig:
         wrong contrast and would otherwise drag the next iteration in the
         wrong direction.
 
-    ``"gmm_em"`` fits a BIC-adaptive Gaussian Mixture Model on the same
-    feature matrix and uses the burst-component posterior as the per-bin
-    score.  Best suited to recordings where the latent regime structure is
-    not well captured by a single discriminant direction.  Currently less
-    stable across iterations than the LDA path on simple 2-regime data
-    because GMM relabels its components each fit.
+    Use ``"fisher_lda"`` for clean 2-regime data with a single dominant
+    burst direction in feature space.
     """
 
-    gmm_k_range: tuple[int, int] = (2, 3)
+    gmm_k_range: tuple[int, int] = (2, 5)
     """Inclusive ``(k_min, k_max)`` component count range swept by the
-    BIC-based GMM-EM partitioner each iteration.  Capped at 3 by default
-    because the natural latent structure of MEA recordings is
-    silence / tonic firing / true burst — allowing more components causes
-    the burst regime itself to split into ramp/peak/tail subclusters and
-    destabilises the burst-component selection across iterations."""
+    BIC-based GMM-EM partitioner each iteration.  Default ``(2, 5)`` lets
+    BIC capture multi-regime structure (silence, tonic, burst sub-phases
+    like ramp / peak / plateau).  Component-identity drift across
+    iterations is bounded by ``gmm_bic_margin`` (k-flap hysteresis) and
+    by anchoring the burst component to the previous iteration's burst
+    centroid inside ``_fit_gmm_em``.  Multi-component burst regimes are
+    unioned at the posterior stage via ``gmm_burst_top_fraction``."""
 
     gmm_bic_margin: float = 5.0
     """A new ``k*`` must beat the previous iteration's ``k*`` BIC by this
@@ -231,7 +286,7 @@ class IterativeBurstConfig:
         0.20, 0.25, 0.05, 0.10, 0.10, 0.05, 0.20, 0.05,
     )
     """Burst-component scoring prior aligned to the bin feature order
-    ``[PFR, P, FF0, FF1, FF2, FF3, LLR, burst]``.  After the GMM is fit and
+    ``[PFR, P, FF0, FF1, FF2, FF3, LLR, burstiness]``.  After the GMM is fit and
     near-duplicate components are merged, each merged group's centroid is
     scored by ``weights @ centroid`` (centroid is in standardized space).
     The highest-scoring group is designated as the burst cluster, so the
@@ -269,18 +324,18 @@ class IterativeBurstConfig:
     degenerate EM solutions (two near-identical components for the same
     regime) from splitting the burst posterior across two columns."""
 
-    gmm_burst_top_fraction: float = 1.0
+    gmm_burst_top_fraction: float = 0.7
     """Selects which merged groups contribute to the burst posterior.  Keeps
     every group whose centroid score is at least
     ``gmm_burst_top_fraction × top_score``.
 
-    ``1.0`` (default) → top group only.  Use a smaller value (e.g. ``0.5``)
-    when you want a multi-component burst regime (ramp + peak + plateau) to
-    be unioned together rather than collapsing onto a single component.  In
-    practice the default of 1.0 combined with ``gmm_k_range = (2, 3)`` is
-    the most stable across iterations — the GMM's three clusters already
-    correspond to silence / tonic / burst, and the top group is
-    unambiguously the burst one."""
+    Default ``0.7`` pairs with ``gmm_k_range = (2, 5)``: when BIC chooses a
+    higher k and the burst regime splits into ramp / peak / plateau
+    components whose centroid scores are within 30 % of the top, the
+    posterior unions them so they survive downstream merging as one event
+    rather than fragmenting.  Set to ``1.0`` to keep only the single
+    top-scoring component (stricter, more selective) or lower (e.g. 0.5)
+    to union an even wider multi-component burst regime."""
 
 
 @dataclass
@@ -520,6 +575,17 @@ def _compute_burstiness(
 
     Light Gaussian smoothing (sigma=2 bins) fills gaps where a unit had no ISI
     midpoint in a given bin despite active firing in adjacent bins.
+
+    Note on the feature label:
+        The 8th column of the iteration feature matrix is this signal and is
+        named ``"burstiness"`` in ``feature_names`` (and in dashboard PCA
+        loading plots).  It is **computed once before the iteration loop**
+        (in ``compute_iterative_bursts``) and **never re-estimated during
+        iteration** — only the LLR column is updated each iteration with the
+        refined background rate.  So although ``burstiness`` typically loads
+        strongly on the burst direction of feature space, it is NOT a
+        circular dependency on the current burst labels; it is a fixed
+        within-unit temporal-tightness signal derived purely from raw ISIs.
     """
     raw = np.zeros(n_bins)
     cnt = np.zeros(n_bins)
@@ -771,6 +837,7 @@ def _fit_gmm_em(
 
     resp = gm.predict_proba(X_norm)          # (n_bins, k)
     burst_posterior = resp[:, burst_group_members].sum(axis=1)
+    bin_component_id = resp.argmax(axis=1).astype(np.int16)  # (n_bins,)
 
     return {
         "burst_posterior": burst_posterior,
@@ -782,6 +849,7 @@ def _fit_gmm_em(
         "merged_groups": merged_groups,
         "group_scores": group_scores,
         "burst_group_members": burst_group_members,
+        "bin_component_id": bin_component_id,
     }
 
 
@@ -906,30 +974,43 @@ def _iter_merge(
     gap_s: float,
     threshold: float,
     floor_frac: float,
+    gap_tolerance_bins: int = 0,
 ) -> list[dict]:
     """Merge adjacent candidates during iteration using a relaxed valley condition.
 
-    Two candidates are merged when both conditions hold:
-      1. Their temporal gap is ≤ gap_s  (burstlet_merge_gap_s = 3 × ISI)
-      2. The valley between them stays above floor_frac × threshold
-         (default 0.70 × threshold = "still 70 % as intense as burst regime")
+    Two candidates are merged when their temporal gap is ≤ ``gap_s`` AND
+    one of three valley conditions holds:
 
-    The relaxed floor (70 % rather than 100 %) allows the algorithm to merge
-    candidates that are clearly part of the same burst even if the composite
-    signal dips briefly in the valley, which is common for fast oscillations
-    within a burst. The final hierarchy merge (Phase 4) applies a stricter
-    criterion on the converged candidates.
+      1. No bins lie in the valley (truly adjacent) — gap-width acts as a
+         proxy and the merge fires if gap ≤ bin_size.
+      2. The gap spans ≤ ``gap_tolerance_bins`` × bin_size — the merge fires
+         regardless of valley depth.  This handles brief composite dips
+         (1–3 bins) inside one true network burst.
+      3. The valley minimum is ≥ ``floor_frac × threshold`` — the
+         classical relaxed-floor criterion ("still ``floor_frac`` of burst
+         regime").
+
+    The relaxed valley criteria allow the algorithm to merge candidates that
+    are clearly part of the same burst even if the composite signal dips
+    briefly in the valley, which is common for fast oscillations within a
+    burst.  The final hierarchy merge (Phase 4) applies a stricter criterion
+    on the converged candidates.
     """
     if not candidates:
         return []
     candidates = sorted(candidates, key=lambda x: x["start"])
     merged = []
     cur = candidates[0].copy()
+    tol_s = float(gap_tolerance_bins) * bin_size
     for nxt in candidates[1:]:
         gap = nxt["start"] - cur["end"]
         vm = _valley_min(cur, nxt, composite, t_centers)
-        # If no bins exist in the valley, use gap width as a proxy
-        valley_ok = (gap <= bin_size) if vm is None else (vm >= floor_frac * threshold)
+        if vm is None:
+            valley_ok = (gap <= bin_size)
+        elif gap_tolerance_bins > 0 and gap <= tol_s:
+            valley_ok = True
+        else:
+            valley_ok = (vm >= floor_frac * threshold)
         if gap <= gap_s and valley_ok:
             # Extend current candidate to absorb nxt
             cur = {"start": cur["start"], "end": nxt["end"],
@@ -1007,15 +1088,26 @@ def _merge_strict_hier(
     events: list[dict],
     gap: float,
     threshold: float,
+    floor_frac: float = 1.0,
+    gap_tolerance_bins: int = 0,
     **ctx,
 ) -> list[dict]:
     """Merge burstlets → network bursts using the strict valley condition.
 
-    Two burstlets are merged into one network burst only if the composite
-    signal in the valley between them stays at or above the detection threshold
-    (i.e. the valley itself is still "in burst regime"). This is the most
-    conservative merge criterion and is appropriate for the first hierarchy
-    level where we want to join only tightly coupled burstlets.
+    Two burstlets are merged into one network burst when their gap is ≤
+    ``gap`` AND one of three valley conditions holds:
+
+      1. No bins lie in the valley (truly adjacent) — merged if gap ≤ bin_size.
+      2. The gap spans ≤ ``gap_tolerance_bins`` × bin_size — merged regardless
+         of valley depth.  Handles brief composite dips inside one true
+         network burst.
+      3. The valley minimum is ≥ ``floor_frac × threshold``.  Default
+         ``floor_frac=1.0`` reproduces the original strict rule "valley must
+         stay above the full detection threshold".
+
+    This is the more conservative tier of the merge hierarchy compared to
+    ``_iter_merge``; the gap-tolerance override is intentionally tighter
+    here (default 2 bins vs 3 bins for the iteration-time merge).
     """
     if not events:
         return []
@@ -1023,11 +1115,17 @@ def _merge_strict_hier(
     events = sorted(events, key=lambda x: x["start"])
     merged, curr_evs = [], [events[0]]
     s, e = events[0]["start"], events[0]["end"]
+    tol_s = float(gap_tolerance_bins) * bin_size
     for nxt in events[1:]:
         vm = _valley_min(curr_evs[-1], nxt, composite, t_centers)
-        # Strict: valley must stay above the full detection threshold
-        valley_ok = (nxt["start"] - e <= bin_size) if vm is None else (vm >= threshold)
-        if (nxt["start"] - e) <= gap and valley_ok:
+        gap_now = nxt["start"] - e
+        if vm is None:
+            valley_ok = (gap_now <= bin_size)
+        elif gap_tolerance_bins > 0 and gap_now <= tol_s:
+            valley_ok = True
+        else:
+            valley_ok = (vm >= floor_frac * threshold)
+        if gap_now <= gap and valley_ok:
             curr_evs.append(nxt)
             e = max(e, nxt["end"])
         else:
@@ -1412,6 +1510,7 @@ def compute_iterative_bursts(
         max(5, 0.15 * n_units) if n_units < 50 else max(10, 0.05 * n_units)
     )
     participation_floor = participation_floor_count / max(1, n_units)
+    peak_synchrony_floor = float(config.peak_synchrony_floor_frac) * participation_floor
 
     baseline_init = float(np.median(ws_sharp))
     spread_mad_init = float(np.median(np.abs(ws_sharp - baseline_init)))
@@ -1514,7 +1613,7 @@ def compute_iterative_bursts(
     #
     #   Convergence: < convergence_eps fraction of bins changed label → stop.
     # -----------------------------------------------------------------------
-    feature_names = ["PFR", "P", *[f"FF{k}" for k in range(n_ff)], "LLR", "burst"]
+    feature_names = ["PFR", "P", *[f"FF{k}" for k in range(n_ff)], "LLR", "burstiness"]
 
     prev_mask = _candidates_to_mask(candidates, t_centers)
     composite = np.zeros(n_bins)
@@ -1653,6 +1752,7 @@ def compute_iterative_bursts(
         candidates = _iter_merge(
             trimmed, composite, t_centers, bin_size,
             burstlet_merge_gap_s, composite_threshold, config.merge_floor_frac,
+            gap_tolerance_bins=int(config.merge_gap_tolerance_bins),
         )
 
         # Convergence: measure fraction of bins that changed burst/background label
@@ -1687,6 +1787,7 @@ def compute_iterative_bursts(
                 entry["gmm_group_scores"] = list(gmm_info["group_scores"])
                 entry["burst_group_members"] = list(gmm_info["burst_group_members"])
                 entry["burst_centroid"] = gmm_info["burst_centroid"].copy()
+                entry["bin_component_id"] = gmm_info["bin_component_id"].copy()
             trace.iterations.append(entry)
 
         if debug and (iteration == 0 or iteration % 5 == 0 or converged):
@@ -1772,7 +1873,21 @@ def compute_iterative_bursts(
         if trace is not None:
             pre_floor_events.append(dict(event))
 
-        if peak_synchrony < participation_floor:
+        # Participation gate.  Two modes:
+        #   "and"           — drop only when BOTH window-wide participation
+        #                     AND single-bin peak_synchrony fall below their
+        #                     respective floors.  Admits asynchronous bursts
+        #                     (high window participation, low single-bin
+        #                     synchrony) which the legacy rule killed.
+        #   "peak_synchrony"— legacy single-axis rule on peak_synchrony only.
+        if config.participation_gate_mode == "peak_synchrony":
+            drop = peak_synchrony < participation_floor
+        else:
+            drop = (
+                event["participation"] < participation_floor
+                and peak_synchrony < peak_synchrony_floor
+            )
+        if drop:
             if trace is not None:
                 dropped_by_floor.append(dict(event))
             continue
@@ -1784,6 +1899,8 @@ def compute_iterative_bursts(
         trace.participation_gate = {
             "floor": float(participation_floor),
             "floor_count": float(participation_floor_count),
+            "peak_synchrony_floor": float(peak_synchrony_floor),
+            "peak_synchrony_floor_frac": float(config.peak_synchrony_floor_frac),
             "n_pre": len(pre_floor_events),
             "n_post": len(burstlets_raw),
             "n_dropped": len(dropped_by_floor),
@@ -1831,9 +1948,18 @@ def compute_iterative_bursts(
     # over-segmentation seen in CX138_27_10 and CX138_31_5 where the iterative
     # detector finds many small inter-burst events.
     # -----------------------------------------------------------------------
+    # The post-iteration event-level GMM (_cluster_events) was found to kill
+    # real bursts on CX138 wells 007/015/019/021 — the merge-group score cut
+    # discards real bursts that share features with marginal events. Per-bin
+    # clustering already happens inside the iteration loop via _fit_gmm_em,
+    # which is the correct level for the "is this a burst?" decision. The
+    # function and config field are preserved for back-compat but the call
+    # site is force-disabled.
     cluster_sep: float | None = None
-    if config.cluster_events:
-        burstlets_raw, cluster_sep = _cluster_events(burstlets_raw, config, debug, trace=trace)
+    if trace is not None:
+        trace.gmm = {
+            "skipped": "event-level GMM disabled (see _fit_gmm_em for per-bin GMM)",
+        }
 
     # -----------------------------------------------------------------------
     # Phase 4b: Two-tier hierarchy merge
@@ -1856,7 +1982,10 @@ def compute_iterative_bursts(
     )
 
     network_bursts = _merge_strict_hier(
-        burstlets_raw, gap=burstlet_merge_gap_s, threshold=composite_threshold, **hier_ctx
+        burstlets_raw, gap=burstlet_merge_gap_s, threshold=composite_threshold,
+        floor_frac=float(config.merge_strict_floor_frac),
+        gap_tolerance_bins=int(config.strict_merge_gap_tolerance_bins),
+        **hier_ctx,
     )
     superbursts = _merge_clustered_hier(
         network_bursts, gap=network_merge_gap_s,

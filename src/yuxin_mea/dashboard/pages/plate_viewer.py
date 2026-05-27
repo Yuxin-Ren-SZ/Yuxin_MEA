@@ -67,8 +67,15 @@ _DEFAULTS = {
 # Where the per-well outputs live, relative to `analysis_root`. Matches the
 # default `output_root` values in the relevant task schemas; if a lab has
 # customized them, the user can override via the UI inputs.
-_DEFAULT_BURST_SUBDIR = "burst_detection_data"
 _DEFAULT_CURATION_SUBDIR = "curation_data"
+
+# Mapping: data-source key -> (analysis_root subdir, per-well terminal dir).
+# "traditional" reads the original burst detector's output (default, back-compat).
+# "iterative" reads the iterative burst detector's output.
+_SOURCE_OPTIONS: dict[str, tuple[str, str]] = {
+    "traditional": ("burst_detection_data", "burst_detection"),
+    "iterative": ("iterative_burst_data", "iterative_burst_detection"),
+}
 
 
 def _display_settings_panel() -> html.Details:
@@ -162,6 +169,19 @@ layout = html.Div([
                 ),
                 style={"flex": "1 1 420px"},
             ),
+            html.Label("Source:", className="section-label",
+                       style={"marginBottom": "0", "marginLeft": "8px"}),
+            dcc.RadioItems(
+                id="plate-viewer-source",
+                options=[
+                    {"label": "traditional", "value": "traditional"},
+                    {"label": "iterative", "value": "iterative"},
+                ],
+                value="traditional",
+                inline=True,
+                labelStyle={"marginRight": "10px"},
+                inputStyle={"marginRight": "4px"},
+            ),
             html.Button([html.Span("↻", className="glyph"), "Load"],
                         id="plate-viewer-load-btn", n_clicks=0,
                         className="btn primary"),
@@ -209,8 +229,14 @@ def _populate_recordings(_id: str):
 # ---------------------------------------------------------------------------
 
 
-def _resolve_burst_root(analysis_root: Path) -> Path:
-    return Path(analysis_root) / _DEFAULT_BURST_SUBDIR
+def _resolve_source(source: str | None) -> tuple[str, str]:
+    """Map a UI source key to (burst_subdir, burst_terminal). Unknown → traditional."""
+    return _SOURCE_OPTIONS.get(str(source or "traditional"), _SOURCE_OPTIONS["traditional"])
+
+
+def _resolve_burst_root(analysis_root: Path, source: str | None) -> Path:
+    burst_subdir, _ = _resolve_source(source)
+    return Path(analysis_root) / burst_subdir
 
 
 def _resolve_curation_root(analysis_root: Path) -> Path:
@@ -235,9 +261,11 @@ def _render_figure(
     analysis_root: Path,
     recording_key: str,
     settings: dict[str, Any],
+    source: str | None,
 ) -> go.Figure:
-    burst_root = _resolve_burst_root(analysis_root)
+    burst_root = _resolve_burst_root(analysis_root, source)
     curation_root = _resolve_curation_root(analysis_root)
+    _, burst_terminal = _resolve_source(source)
     cache_path = Path(analysis_root) / "experiment_cache.json"
 
     well_records = load_plate_data(
@@ -246,6 +274,7 @@ def _render_figure(
         recording_key=recording_key,
         rec_name="auto",
         experiment_cache_path=cache_path if cache_path.exists() else None,
+        burst_terminal=burst_terminal,
     )
     return build_plate_figure(well_records, _build_config(**settings))
 
@@ -255,6 +284,7 @@ def _render_figure(
     Output("plate-viewer-status", "children", allow_duplicate=True),
     Input("plate-viewer-load-btn", "n_clicks"),
     State("plate-viewer-recording-dropdown", "value"),
+    State("plate-viewer-source", "value"),
     State("plate-viewer-display-mode", "value"),
     State("plate-viewer-marker-size", "value"),
     State("plate-viewer-line-width", "value"),
@@ -263,7 +293,7 @@ def _render_figure(
     State("plate-viewer-max-sync", "value"),
     prevent_initial_call=True,
 )
-def _on_load(_n_clicks, recording_key, display_mode, marker_size, line_width,
+def _on_load(_n_clicks, recording_key, source, display_mode, marker_size, line_width,
              width_px, max_raster, max_sync):
     if not recording_key:
         return dash.no_update, "Pick a recording first."
@@ -276,10 +306,10 @@ def _on_load(_n_clicks, recording_key, display_mode, marker_size, line_width,
         "max_raster": max_raster, "max_sync": max_sync,
     }
     try:
-        fig = _render_figure(analysis_root, recording_key, settings)
+        fig = _render_figure(analysis_root, recording_key, settings, source)
     except Exception as exc:  # noqa: BLE001 — surface user-facing
         return dash.no_update, f"❌ {exc}"
-    return fig, f"✓ Rendered {recording_key}"
+    return fig, f"✓ Rendered {recording_key} ({source})"
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +321,7 @@ def _on_load(_n_clicks, recording_key, display_mode, marker_size, line_width,
     Output("plate-viewer-status", "children", allow_duplicate=True),
     Input("plate-viewer-export-btn", "n_clicks"),
     State("plate-viewer-recording-dropdown", "value"),
+    State("plate-viewer-source", "value"),
     State("plate-viewer-display-mode", "value"),
     State("plate-viewer-marker-size", "value"),
     State("plate-viewer-line-width", "value"),
@@ -299,7 +330,7 @@ def _on_load(_n_clicks, recording_key, display_mode, marker_size, line_width,
     State("plate-viewer-max-sync", "value"),
     prevent_initial_call=True,
 )
-def _on_export(_n_clicks, recording_key, display_mode, marker_size, line_width,
+def _on_export(_n_clicks, recording_key, source, display_mode, marker_size, line_width,
                width_px, max_raster, max_sync):
     if not recording_key:
         return "Pick a recording first."
@@ -315,9 +346,10 @@ def _on_export(_n_clicks, recording_key, display_mode, marker_size, line_width,
         "line_width": line_width, "width_px": width_px,
         "max_raster": max_raster, "max_sync": max_sync,
     }
+    source_key = str(source or "traditional")
     try:
-        fig = _render_figure(analysis_root, recording_key, settings)
-        output_path = Path(figure_root) / recording_key / "plate_viewer.html"
+        fig = _render_figure(analysis_root, recording_key, settings, source_key)
+        output_path = Path(figure_root) / recording_key / f"plate_viewer_{source_key}.html"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         write_plate_viewer_html(fig, output_path)
     except Exception as exc:  # noqa: BLE001

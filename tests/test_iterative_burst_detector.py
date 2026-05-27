@@ -11,6 +11,31 @@ from yuxin_mea.analysis.iterative_burst_detector import (
 )
 
 
+def _legacy_config(**overrides) -> IterativeBurstConfig:
+    """Config matching the pre-2026-05 defaults the synthetic tests were tuned
+    against: Fisher LDA partitioner, 2-component GMM range, strict 70 %
+    iteration-merge floor, and the post-iteration cluster_events filter on.
+
+    The package-wide defaults have since shifted toward GMM-EM with a wider
+    BIC k-range for real multi-regime MEA recordings (CX138).  The synthetic
+    tests still validate algorithmic correctness against the original
+    contract; passing this config keeps them focused on that contract rather
+    than on the moving defaults.
+    """
+    base = dict(
+        inner_partitioner="fisher_lda",
+        gmm_k_range=(2, 3),
+        gmm_burst_top_fraction=1.0,
+        cluster_events=True,
+        merge_floor_frac=0.70,
+        merge_gap_tolerance_bins=0,
+        strict_merge_gap_tolerance_bins=0,
+        participation_gate_mode="peak_synchrony",
+    )
+    base.update(overrides)
+    return IterativeBurstConfig(**base)
+
+
 def _poisson_spike_trains(
     rates_hz: np.ndarray,
     duration_s: float = 150.0,
@@ -112,7 +137,9 @@ class IterativeBurstDetectorSyntheticControlsTests(unittest.TestCase):
         }
         for label, rates in cases.items():
             with self.subTest(label=label):
-                result = compute_iterative_bursts(_poisson_spike_trains(rates))
+                result = compute_iterative_bursts(
+                    _poisson_spike_trains(rates), _legacy_config()
+                )
                 self.assertTrue(
                     result.network_bursts.empty,
                     f"{label} independent Poisson control produced network bursts",
@@ -120,7 +147,7 @@ class IterativeBurstDetectorSyntheticControlsTests(unittest.TestCase):
 
     def test_cascade_bursts_are_detected_without_long_interburst_events(self):
         spike_times = _cascade_spike_trains()
-        result = compute_iterative_bursts(spike_times, IterativeBurstConfig())
+        result = compute_iterative_bursts(spike_times, _legacy_config())
 
         n_network_bursts = len(result.network_bursts)
         self.assertGreaterEqual(n_network_bursts, 4)
@@ -132,7 +159,7 @@ class IterativeBurstDetectorSyntheticControlsTests(unittest.TestCase):
 
     def test_heterogeneous_recording_keeps_bursty_section(self):
         spike_times = _heterogeneous_spike_trains()
-        result = compute_iterative_bursts(spike_times, IterativeBurstConfig())
+        result = compute_iterative_bursts(spike_times, _legacy_config())
 
         self.assertTrue(result.burstlets.shape[0] > 0)
         self.assertTrue(result.network_bursts.shape[0] > 0)
@@ -195,7 +222,9 @@ class IterativeBurstDetectorSyntheticControlsTests(unittest.TestCase):
             for u, spikes in spike_times.items()
         }
 
-        result = compute_iterative_bursts(spike_times, IterativeBurstConfig())
+        # This test is specifically about Fisher LDA sign-pinning behavior;
+        # use the legacy config to exercise that code path.
+        result = compute_iterative_bursts(spike_times, _legacy_config())
         diagnostics = result.diagnostics
 
         # Detector must find bursts (the original bug returned 0)
@@ -212,7 +241,7 @@ class IterativeBurstDetectorSyntheticControlsTests(unittest.TestCase):
         self.assertGreaterEqual(in_burst_regime, len(result.burstlets) - 1)
 
         # Sign pinning: PFR / P / LLR Fisher weights must end non-negative
-        feature_names = ["PFR", "P", "FF0", "FF1", "FF2", "FF3", "LLR", "burst"]
+        feature_names = ["PFR", "P", "FF0", "FF1", "FF2", "FF3", "LLR", "burstiness"]
         weights = diagnostics["feature_weights_final"]
         for name in ("PFR", "P", "LLR"):
             idx = feature_names.index(name)
@@ -244,7 +273,7 @@ class IterativeBurstDetectorSyntheticControlsTests(unittest.TestCase):
 class IterativeBurstDetectorTraceTests(unittest.TestCase):
     def test_trace_populates_and_preserves_behavior(self):
         spike_times = _cascade_spike_trains()
-        config = IterativeBurstConfig()
+        config = _legacy_config()
 
         trace = IterativeBurstTrace()
         with_trace = compute_iterative_bursts(spike_times, config, trace=trace)

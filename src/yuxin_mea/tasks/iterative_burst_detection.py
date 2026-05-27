@@ -35,32 +35,37 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
             "mad_fallback_threshold": 0.01,
             "composite_mad_scale": 0.75,
             "extent_frac": 0.30,
-            "merge_floor_frac": 0.70,
+            "merge_floor_frac": 0.50,
+            "merge_gap_tolerance_bins": 3,
+            "strict_merge_gap_tolerance_bins": 2,
+            "merge_strict_floor_frac": 1.0,
             "network_merge_gap_min_s": 0.75,
             "max_iterations": 20,
             "convergence_eps": 0.005,
             "fisher_alpha_frac": 1e-3,
             "ff_scale_multipliers": [0.5, 1.0, 2.0, 5.0],
             "min_burst_modulation": 0.1,
-            "cluster_events": True,
+            "peak_synchrony_floor_frac": 0.5,
+            "participation_gate_mode": "and",
+            "cluster_events": False,
             "cluster_initial_components": 6,
             "cluster_min_events": 5,
             "cluster_min_separation": 1.5,
             "debug": False,
             # Inner partitioner choice
-            "inner_partitioner": "fisher_lda",
+            "inner_partitioner": "gmm_em",
             # Fisher LDA safeguards
             "lda_exclude_silence": True,
             "lda_sign_pinned_feature_names": ["PFR", "P", "LLR"],
             # GMM-EM partitioner (only used when inner_partitioner == "gmm_em")
-            "gmm_k_range": [2, 3],
+            "gmm_k_range": [2, 5],
             "gmm_bic_margin": 5.0,
             "gmm_em_n_init": 5,
             "gmm_em_reg_covar": 1e-4,
             "gmm_burst_score_weights": [0.20, 0.25, 0.05, 0.10, 0.10, 0.05, 0.20, 0.05],
             "gmm_posterior_threshold": 0.5,
             "gmm_component_merge_distance": 0.5,
-            "gmm_burst_top_fraction": 1.0,
+            "gmm_burst_top_fraction": 0.7,
         }
 
     @classmethod
@@ -110,8 +115,36 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
             ),
             "merge_floor_frac": ParamSpec(
                 "float", defaults["merge_floor_frac"],
-                "Adjacent candidates are merged if their separating valley "
-                "is above merge_floor_frac * threshold.",
+                "Iteration-time merge: adjacent candidates are merged if "
+                "their separating valley stays above merge_floor_frac × "
+                "threshold. Default 0.50 (lowered from 0.70) admits real "
+                "network bursts whose composite signal briefly dips between "
+                "sub-events without admitting genuine inter-burst silence.",
+                min=0,
+            ),
+            "merge_gap_tolerance_bins": ParamSpec(
+                "int", defaults["merge_gap_tolerance_bins"],
+                "Iteration-time merge: two candidates separated by ≤ this "
+                "many composite bins are merged regardless of valley depth. "
+                "Handles 1–3-bin composite dips inside one true network "
+                "burst that would otherwise fragment it.",
+                min=0,
+            ),
+            "strict_merge_gap_tolerance_bins": ParamSpec(
+                "int", defaults["strict_merge_gap_tolerance_bins"],
+                "Post-iteration strict merge: same idea as "
+                "merge_gap_tolerance_bins but for the burstlets → network "
+                "bursts hierarchy step. Defaults one bin tighter (2) "
+                "because this merge is intentionally more conservative.",
+                min=0,
+            ),
+            "merge_strict_floor_frac": ParamSpec(
+                "float", defaults["merge_strict_floor_frac"],
+                "Post-iteration strict merge: valley floor as a fraction "
+                "of the detection threshold. Default 1.0 reproduces the "
+                "original rule 'valley must stay above the full detection "
+                "threshold'. Lower (e.g. 0.7) when the gap-tolerance "
+                "override is still not enough to reunite fragments.",
                 min=0,
             ),
             "network_merge_gap_min_s": ParamSpec(
@@ -150,10 +183,33 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
                 "to survive. <= 0 disables the gate.",
                 min=0,
             ),
+            "peak_synchrony_floor_frac": ParamSpec(
+                "float", defaults["peak_synchrony_floor_frac"],
+                "Per-bin peak-synchrony floor as a fraction of the "
+                "window-wide participation_floor. Only consulted when "
+                "participation_gate_mode is 'and'. Default 0.5 keeps a "
+                "tight per-bin secondary floor; lower toward 0 to admit "
+                "even more asynchronous events.",
+                min=0, max=1,
+            ),
+            "participation_gate_mode": ParamSpec(
+                "str", defaults["participation_gate_mode"],
+                "Combines the two halves of the participation gate. 'and' "
+                "(default) drops a burstlet only when BOTH window-wide "
+                "participation AND single-bin peak_synchrony fall below "
+                "their floors — admits asynchronous bursts. "
+                "'peak_synchrony' uses the legacy single-axis rule on "
+                "peak_synchrony only; stricter on noise but misses "
+                "asynchronous bursts.",
+                choices=["and", "peak_synchrony"],
+            ),
             "cluster_events": ParamSpec(
                 "bool", defaults["cluster_events"],
-                "After convergence, fit a GMM on per-event quality features "
-                "and discard noise-like clusters.",
+                "Optional post-iteration GMM filter on per-event quality "
+                "features that discards noise-like clusters. Disabled by "
+                "default because its scoring weights are hardcoded and "
+                "may discard real events on multi-regime recordings; "
+                "enable only with care.",
             ),
             "cluster_initial_components": ParamSpec(
                 "int", defaults["cluster_initial_components"],
@@ -183,13 +239,13 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
             "inner_partitioner": ParamSpec(
                 "str", defaults["inner_partitioner"],
                 "Which method discriminates burst vs background bins each "
-                "iteration. 'fisher_lda' (default) fits a Fisher linear "
-                "discriminant on the z-normed feature matrix — best for "
-                "recordings with one dominant burst direction in feature "
-                "space. 'gmm_em' fits a BIC-adaptive Gaussian Mixture and "
-                "uses the burst-component posterior; better for recordings "
-                "with >2 latent regimes (silence + tonic + burst) where "
-                "LDA collapses onto a silence-vs-everything contrast.",
+                "iteration. 'gmm_em' (default) fits a BIC-adaptive Gaussian "
+                "Mixture and uses the burst-component posterior — best for "
+                "multi-regime recordings (silence + tonic + burst, or "
+                "multiple burst types) where a single linear discriminant "
+                "collapses real structure. 'fisher_lda' fits a Fisher linear "
+                "discriminant on the z-normed feature matrix — use for clean "
+                "2-regime data with one dominant burst direction.",
                 choices=["fisher_lda", "gmm_em"],
             ),
             "lda_exclude_silence": ParamSpec(
@@ -208,17 +264,19 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
                 "during bursts; a negative weight signals the LDA found "
                 "the wrong contrast and would otherwise destabilise the "
                 "next iteration. Unknown names are silently ignored.",
-                choices=["PFR", "P", "FF0", "FF1", "FF2", "FF3", "LLR", "burst"],
+                choices=["PFR", "P", "FF0", "FF1", "FF2", "FF3", "LLR", "burstiness"],
                 multiselect=True,
             ),
             "gmm_k_range": ParamSpec(
                 "list_int", defaults["gmm_k_range"],
                 "GMM-EM only. Two integers [k_min, k_max] (inclusive) for "
                 "the BIC sweep over component counts each iteration. "
-                "Default (2, 3) matches the natural latent structure "
-                "silence / tonic / burst; allowing more components causes "
-                "the burst regime itself to split and destabilises burst "
-                "identity across iterations.",
+                "Default (2, 5) lets BIC capture multi-regime structure "
+                "(silence, tonic, burst sub-phases). Burst-component "
+                "identity drift across iterations is bounded by "
+                "gmm_bic_margin (k-flap hysteresis) and by burst-centroid "
+                "anchoring. Multi-component burst regimes are unioned at "
+                "the posterior stage via gmm_burst_top_fraction.",
                 min=2, max=2,
             ),
             "gmm_bic_margin": ParamSpec(
@@ -247,9 +305,13 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
                 "list_float", defaults["gmm_burst_score_weights"],
                 "GMM-EM only. Burst-component scoring prior, aligned to "
                 "bin feature order [PFR, P, FF0, FF1, FF2, FF3, LLR, "
-                "burst]. After merging near-duplicate components, each "
-                "merged group's centroid is scored by weights @ centroid; "
-                "the highest-scoring group is the burst cluster.",
+                "burstiness]. After merging near-duplicate components, "
+                "each merged group's centroid is scored by weights @ "
+                "centroid; the highest-scoring group is the burst cluster. "
+                "Note: 'burstiness' is the mean instantaneous ISI "
+                "reciprocal (within-unit temporal tightness), computed "
+                "once before iteration and never updated — not the burst "
+                "label.",
             ),
             "gmm_posterior_threshold": ParamSpec(
                 "float", defaults["gmm_posterior_threshold"],
@@ -272,8 +334,13 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
                 "float", defaults["gmm_burst_top_fraction"],
                 "GMM-EM only. Keep every merged group whose centroid "
                 "score is at least gmm_burst_top_fraction × top_score. "
-                "1.0 = top group only (most stable). Lower values union "
-                "a multi-component burst regime (ramp + peak + plateau).",
+                "Default 0.7 pairs with the wider gmm_k_range default: "
+                "when BIC picks a higher k and the burst regime splits "
+                "into ramp / peak / plateau components, the posterior "
+                "unions them so they survive downstream merging as one "
+                "event. Set to 1.0 to keep only the single top-scoring "
+                "component (stricter); lower values union an even wider "
+                "multi-component burst regime.",
                 min=0, max=1,
             ),
         }
@@ -359,12 +426,17 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
             composite_mad_scale=float(p["composite_mad_scale"]),
             extent_frac=float(p["extent_frac"]),
             merge_floor_frac=float(p["merge_floor_frac"]),
+            merge_gap_tolerance_bins=int(p["merge_gap_tolerance_bins"]),
+            strict_merge_gap_tolerance_bins=int(p["strict_merge_gap_tolerance_bins"]),
+            merge_strict_floor_frac=float(p["merge_strict_floor_frac"]),
             network_merge_gap_min_s=float(p["network_merge_gap_min_s"]),
             max_iterations=int(p["max_iterations"]),
             convergence_eps=float(p["convergence_eps"]),
             fisher_alpha_frac=float(p["fisher_alpha_frac"]),
             ff_scale_multipliers=tuple(float(x) for x in p["ff_scale_multipliers"]),
             min_burst_modulation=float(p["min_burst_modulation"]),
+            peak_synchrony_floor_frac=float(p["peak_synchrony_floor_frac"]),
+            participation_gate_mode=str(p["participation_gate_mode"]),
             cluster_events=bool(p["cluster_events"]),
             cluster_initial_components=int(p["cluster_initial_components"]),
             cluster_min_events=int(p["cluster_min_events"]),

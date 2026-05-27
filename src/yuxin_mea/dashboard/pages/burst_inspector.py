@@ -27,6 +27,7 @@ from yuxin_mea.analysis.burst_inspector import (
     fig_iteration_trajectory,
     fig_label_comparison_table,
     fig_pca_feature_space,
+    fig_per_bin_gmm_strip,
     fig_raster,
     load_inspector_bundle,
     summary_card,
@@ -151,6 +152,7 @@ layout = html.Div([
                 children=[
             dcc.Graph(id="burst-insp-fig-composite", figure=_EMPTY_FIGURE),
             dcc.Graph(id="burst-insp-fig-raster", figure=_EMPTY_FIGURE),
+            dcc.Graph(id="burst-insp-fig-bin-gmm", figure=_EMPTY_FIGURE),
         ]),
         dcc.Tab(label="Iteration & PCA", value="iter",
                 className="tab--regular", selected_className="tab--selected",
@@ -158,9 +160,20 @@ layout = html.Div([
             dcc.Graph(id="burst-insp-fig-trajectory", figure=_EMPTY_FIGURE),
             dcc.Graph(id="burst-insp-fig-pca", figure=_EMPTY_FIGURE),
         ]),
-        dcc.Tab(label="Clusters & labels", value="clusters",
+        dcc.Tab(label="Clusters (legacy, per-event)", value="clusters",
                 className="tab--regular", selected_className="tab--selected",
                 children=[
+            html.Div(
+                "Per-event GMM disabled in detection; this tab is preserved "
+                "for historical traces only. New runs will show 'GMM clustering "
+                "not run for this well' or an empty PCA. See the per-bin GMM "
+                "strip on the Raster + composite tab for the current detector's "
+                "clustering.",
+                style={"marginTop": "8px", "padding": "8px 12px",
+                       "background": "#fff8e1", "color": "#7c5e10",
+                       "border": "1px solid #f0e3a0", "borderRadius": "4px",
+                       "fontFamily": "var(--font-mono)", "fontSize": "11px"},
+            ),
             dcc.Graph(id="burst-insp-fig-gmm", figure=_EMPTY_FIGURE),
             dcc.Graph(id="burst-insp-fig-table", figure=_EMPTY_FIGURE),
         ]),
@@ -471,6 +484,7 @@ def _render_summary(bundle: InspectorBundle) -> Any:
     Output("burst-insp-summary-card", "children"),
     Output("burst-insp-fig-composite", "figure"),
     Output("burst-insp-fig-raster", "figure"),
+    Output("burst-insp-fig-bin-gmm", "figure"),
     Output("burst-insp-fig-trajectory", "figure"),
     Output("burst-insp-fig-pca", "figure"),
     Output("burst-insp-fig-gmm", "figure"),
@@ -481,7 +495,7 @@ def _render_summary(bundle: InspectorBundle) -> Any:
 def _render_tabs(bundle_key: str | None, iteration: int | None):
     if not bundle_key or bundle_key not in _BUNDLE_CACHE:
         empty = _EMPTY_FIGURE
-        return ("(no well selected)", empty, empty, empty, empty, empty, empty)
+        return ("(no well selected)", empty, empty, empty, empty, empty, empty, empty)
 
     bundle = _BUNDLE_CACHE[bundle_key]
     it: int | str = "final"
@@ -494,6 +508,7 @@ def _render_tabs(bundle_key: str | None, iteration: int | None):
         _render_summary(bundle),
         fig_composite_with_threshold(bundle, iteration=it),
         fig_raster(bundle, iteration=it),
+        fig_per_bin_gmm_strip(bundle, iteration=it),
         fig_iteration_trajectory(bundle),
         fig_pca_feature_space(bundle, iteration=it),
         fig_event_gmm_clusters(bundle),

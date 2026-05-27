@@ -703,6 +703,7 @@ def load_plate_data(
     recording_key: str,
     rec_name: str = "auto",
     experiment_cache_path: Path | None = None,
+    burst_terminal: str = "burst_detection",
 ) -> list[WellRecord]:
     """Assemble plate-level data for one recording from per-well outputs.
 
@@ -719,6 +720,10 @@ def load_plate_data(
         experiment_cache_path: optional path to ``experiment_cache.json``;
             when present, used to look up well names / groupname. Missing or
             unreadable cache → wells default to ``well_name="?", groupname="?"``.
+        burst_terminal: per-well terminal directory inside ``burst_detection_root``
+            holding ``plot_signals.npy`` and the event tables. ``"burst_detection"``
+            (default) reads the traditional detector; pass ``"iterative_burst_detection"``
+            to read the iterative detector's outputs.
 
     Returns:
         list[WellRecord]: 24 entries, one per well slot.
@@ -733,7 +738,9 @@ def load_plate_data(
             Path(experiment_cache_path), recording_key
         )
 
-    discovered = _discover_well_rec_names(recording_key, burst_root, curation_root)
+    discovered = _discover_well_rec_names(
+        recording_key, burst_root, curation_root, burst_terminal=burst_terminal,
+    )
     for well_id_str, discovered_rec_name in discovered.items():
         well_rec_names.setdefault(well_id_str, discovered_rec_name)
 
@@ -746,6 +753,7 @@ def load_plate_data(
             curation_root=curation_root,
             well_metadata=well_metadata,
             well_rec_names=well_rec_names,
+            burst_terminal=burst_terminal,
         )
         for well_num in range(_PLATE_WELL_COUNT)
     ]
@@ -785,11 +793,12 @@ def _discover_well_rec_names(
     recording_key: str,
     burst_root: Path,
     curation_root: Path,
+    burst_terminal: str = "burst_detection",
 ) -> dict[str, str]:
     """Walk task output directories to infer per-well rec name."""
     discovered: dict[str, str] = {}
     for root, terminal_dir in (
-        (burst_root, "burst_detection"),
+        (burst_root, burst_terminal),
         (curation_root, "auto_curation"),
     ):
         recording_dir = root / recording_key
@@ -811,6 +820,7 @@ def _rec_name_candidates(
     burst_root: Path,
     curation_root: Path,
     recording_key: str,
+    burst_terminal: str = "burst_detection",
 ) -> list[str]:
     """Order rec-name candidates; only include the user hint when its files exist."""
     candidates: list[str] = []
@@ -819,7 +829,7 @@ def _rec_name_candidates(
 
     if rec_hint:
         hinted_burst = (
-            burst_root / recording_key / rec_hint / well_id_str / "burst_detection"
+            burst_root / recording_key / rec_hint / well_id_str / burst_terminal
         )
         hinted_curation = (
             curation_root / recording_key / rec_hint / well_id_str / "auto_curation"
@@ -840,6 +850,7 @@ def _load_well_record(
     curation_root: Path,
     well_metadata: dict[str, dict[str, Any]],
     well_rec_names: dict[str, str] | None = None,
+    burst_terminal: str = "burst_detection",
 ) -> WellRecord:
     """Load spike times + plot signals for one well; return a `WellRecord`."""
     meta = well_metadata.get(well_id_str, {})
@@ -847,14 +858,16 @@ def _load_well_record(
     groupname = meta.get("groupname", "?")
     rec_names = _rec_name_candidates(
         well_id_str, rec_name, well_rec_names, burst_root, curation_root, recording_key,
+        burst_terminal=burst_terminal,
     )
     event_intervals = _load_event_intervals(
         well_id_str, recording_key, rec_names, burst_root,
+        burst_terminal=burst_terminal,
     )
 
     plot_signals = None
     for candidate in rec_names:
-        path = burst_root / recording_key / candidate / well_id_str / "burst_detection" / "plot_signals.npy"
+        path = burst_root / recording_key / candidate / well_id_str / burst_terminal / "plot_signals.npy"
         if path.exists():
             try:
                 plot_signals = np.load(path, allow_pickle=True).item()
@@ -906,13 +919,14 @@ def _load_event_intervals(
     recording_key: str,
     rec_names: list[str],
     burst_root: Path,
+    burst_terminal: str = "burst_detection",
 ) -> dict[str, list[dict[str, Any]]]:
     """Load per-event interval tables for one well from disk."""
     event_intervals: dict[str, list[dict[str, Any]]] = {
         key: [] for key in BURST_EVENT_TYPES
     }
     for candidate in rec_names:
-        burst_dir = burst_root / recording_key / candidate / well_id_str / "burst_detection"
+        burst_dir = burst_root / recording_key / candidate / well_id_str / burst_terminal
         if not burst_dir.exists():
             continue
         for event_key in event_intervals:

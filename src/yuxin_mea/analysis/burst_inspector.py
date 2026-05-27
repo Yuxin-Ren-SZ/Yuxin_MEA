@@ -208,6 +208,20 @@ def _empty_figure(message: str) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 
+def _spike_times_by_str_uid(
+    spike_times: dict[Any, np.ndarray] | None,
+) -> dict[str, np.ndarray]:
+    """Re-key spike_times so lookup tolerates int↔str mismatch with trace.unit_ids.
+
+    The detector stores ``unit_ids`` as ``list[str]`` on the trace but
+    ``debug_spike_times.npy`` keeps them as the original ints. Always
+    return a ``{str: array}`` view so callers can ``get(str(uid))``.
+    """
+    if not spike_times:
+        return {}
+    return {str(k): v for k, v in spike_times.items()}
+
+
 def fig_raster(
     bundle: InspectorBundle,
     *,
@@ -224,14 +238,15 @@ def fig_raster(
     if not spike_times:
         return _empty_figure("No spike times available.")
 
-    unit_ids = trace.unit_ids or sorted(spike_times.keys())
+    sp_by_uid = _spike_times_by_str_uid(spike_times)
+    unit_ids = [str(u) for u in (trace.unit_ids or sorted(spike_times.keys()))]
     if len(unit_ids) > max_units:
         step = len(unit_ids) // max_units
         unit_ids = unit_ids[::step][:max_units]
 
     fig = go.Figure()
     for row, uid in enumerate(unit_ids):
-        spikes = np.asarray(spike_times.get(uid, []), dtype=float)
+        spikes = np.asarray(sp_by_uid.get(uid, []), dtype=float)
         if spikes.size == 0:
             continue
         fig.add_trace(
@@ -270,6 +285,116 @@ def fig_raster(
         tickvals=list(range(len(unit_ids))),
         ticktext=unit_ids,
         autorange="reversed",
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# fig_per_bin_gmm_strip
+# ---------------------------------------------------------------------------
+
+
+# Qualitative palette for inner-GMM components. Cycles if k > 8.
+_GMM_CLUSTER_COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+    "#9467bd", "#8c564b", "#17becf", "#bcbd22",
+]
+
+
+def fig_per_bin_gmm_strip(
+    bundle: InspectorBundle, iteration: int | str = _FINAL
+) -> go.Figure:
+    """Horizontal heatmap of the inner GMM's per-bin component ids vs time.
+
+    Shows what ``_fit_gmm_em`` decided each bin's burst-vs-background-vs-
+    intermediate identity was, alongside which component(s) were called
+    burst. Two rows, x-axis shared with the raster above:
+      • top    — single-row band marking burst-group bins (red on white).
+      • bottom — per-bin GMM component id, qualitative colormap, k_chosen
+                 distinct colours.
+
+    Falls back to the binary burst/background band alone when
+    ``bin_component_id`` isn't on the trace (debug artifact written before
+    that key was persisted).
+    """
+    trace = bundle.trace
+    if not trace.iterations or trace.t_centers is None:
+        return _empty_figure("No iterations recorded.")
+
+    idx = _resolve_iter_index(trace, iteration)
+    entry = trace.iterations[idx]
+    t = np.asarray(trace.t_centers, dtype=float)
+    mask = np.asarray(entry["candidate_mask"], dtype=bool)
+    k_chosen = int(entry.get("k_chosen", 2))
+
+    bin_cid = entry.get("bin_component_id")
+    if bin_cid is None:
+        bin_cid = mask.astype(np.int16)
+        k_chosen = 2
+        legacy = True
+    else:
+        bin_cid = np.asarray(bin_cid, dtype=int)
+        legacy = False
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.35, 0.65],
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        subplot_titles=(
+            "burst-group bins (mask)",
+            "per-bin GMM cluster"
+            + (
+                f" (k={k_chosen}, burst components = "
+                f"{entry.get('burst_group_members', [])})"
+                if not legacy
+                else " (legacy trace — burst/background only)"
+            ),
+        ),
+    )
+
+    fig.add_trace(
+        go.Heatmap(
+            x=t,
+            z=mask.astype(int).reshape(1, -1),
+            colorscale=[[0, "#f6f6f6"], [1, "#c62828"]],
+            showscale=False,
+            hovertemplate="t=%{x:.2f}s<br>burst=%{z}<extra></extra>",
+        ),
+        row=1, col=1,
+    )
+
+    # Qualitative colorscale: split [0,1] into k_chosen equal bands.
+    if k_chosen <= 1:
+        cscale = [[0.0, _GMM_CLUSTER_COLORS[0]], [1.0, _GMM_CLUSTER_COLORS[0]]]
+    else:
+        cscale = []
+        for i in range(k_chosen):
+            color = _GMM_CLUSTER_COLORS[i % len(_GMM_CLUSTER_COLORS)]
+            cscale.append([i / k_chosen, color])
+            cscale.append([(i + 1) / k_chosen, color])
+
+    fig.add_trace(
+        go.Heatmap(
+            x=t,
+            z=bin_cid.reshape(1, -1),
+            zmin=0,
+            zmax=max(1, k_chosen - 1),
+            colorscale=cscale,
+            showscale=False,
+            hovertemplate="t=%{x:.2f}s<br>component=%{z}<extra></extra>",
+        ),
+        row=2, col=1,
+    )
+
+    fig.update_yaxes(showticklabels=False, zeroline=False, showgrid=False, row=1, col=1)
+    fig.update_yaxes(showticklabels=False, zeroline=False, showgrid=False, row=2, col=1)
+    fig.update_xaxes(title_text="time (s)", row=2, col=1)
+    fig.update_layout(
+        height=160,
+        margin=dict(l=40, r=20, t=40, b=40),
+        plot_bgcolor="white",
+        showlegend=False,
     )
     return fig
 

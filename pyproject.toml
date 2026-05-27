@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "yuxin_mea"
 version = "0.1.0"
 description = "MEA recording, pipeline, and analysis library for SadeghLab"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 # Scientific deps are provided by the conda environment (`environment.yml`).
 # Keep `dependencies` empty so `pip install -e .` does not try to re-resolve
 # conda-managed packages like torch / spikeinterface from PyPI.
