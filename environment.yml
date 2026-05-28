@@ -29,4 +29,5 @@ dependencies:
     - "torchvision==0.25.0+cu128"
     - "torchaudio==2.10.0+cu128"
     - kilosort
+    - phate
 

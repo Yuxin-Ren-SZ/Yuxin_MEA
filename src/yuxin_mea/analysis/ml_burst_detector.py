@@ -81,14 +81,26 @@ class MLBurstConfig:
     # ---- Dim reduction ----------------------------------------------------
     pca_n_components: int = 0  # 0 = disabled
 
-    # ---- HDBSCAN ----------------------------------------------------------
+    # ---- Clustering -------------------------------------------------------
+    cluster_algorithm: str = "diffmap_gmm"  # "diffmap_gmm" | "hdbscan"
+    cluster_ranking_feature: str = "post_frac_gt_0_5"
+    fallback_posterior_threshold: float = 0.3
+    burst_posterior_threshold: float = 0.3  # diffmap_gmm: burst-bin cutoff on the rank-weighted posterior
+
+    # ---- HDBSCAN (used when cluster_algorithm == "hdbscan") --------------
     hdbscan_min_cluster_size: int = 30
     hdbscan_min_samples: int = 5
     hdbscan_cluster_selection_epsilon: float = 0.0
     hdbscan_cluster_selection_method: str = "eom"
     hdbscan_metric: str = "euclidean"
-    cluster_ranking_feature: str = "post_frac_gt_0_5"
-    fallback_posterior_threshold: float = 0.3
+
+    # ---- Diffusion-map + GMM (used when cluster_algorithm == "diffmap_gmm") -
+    diffmap_n_components: int = 5
+    diffmap_k_neighbors: int = 30
+    diffmap_alpha: float = 1.0
+    gmm_k_range: tuple = (2, 3, 4)
+    gmm_em_n_init: int = 5
+    gmm_em_reg_covar: float = 1e-4
 
     # ---- Temporal merge / hierarchy --------------------------------------
     closing_bins: int = 3
@@ -116,6 +128,14 @@ class MLBurstTrace:
     feature_matrix: Optional[np.ndarray] = None
     scaler_mean: Optional[np.ndarray] = None
     scaler_std: Optional[np.ndarray] = None
+    # Cluster outputs — names are algorithm-neutral. For HDBSCAN runs,
+    # cluster_labels is HDBSCAN's labels (with -1 for noise) and
+    # cluster_probabilities is its membership probability. For diffmap_gmm,
+    # cluster_labels is the GMM argmax and cluster_probabilities is the GMM
+    # max posterior. Legacy aliases hdbscan_labels / hdbscan_probabilities
+    # mirror the same arrays so older inspector code keeps working.
+    cluster_labels: Optional[np.ndarray] = None
+    cluster_probabilities: Optional[np.ndarray] = None
     hdbscan_labels: Optional[np.ndarray] = None
     hdbscan_probabilities: Optional[np.ndarray] = None
     cluster_ranking: Optional[dict] = None
@@ -127,7 +147,14 @@ class MLBurstTrace:
     burstlets_pre_gate: Optional[list] = None
     gate_decision: Optional[dict] = None
     cluster_decision: Optional[str] = None
+    cluster_algorithm: Optional[str] = None
     fallback_threshold: Optional[float] = None
+    # Diffusion-map + GMM extras
+    embedding: Optional[np.ndarray] = None
+    burst_posterior: Optional[np.ndarray] = None
+    gmm_k_selected: Optional[int] = None
+    gmm_bic: Optional[float] = None
+    gmm_bic_table: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -320,17 +347,29 @@ def compute_ml_bursts(
     assignment: ClusterAssignment = cluster_bins(
         X,
         feature_names,
+        algorithm=str(config.cluster_algorithm),
         ranking_feature=str(config.cluster_ranking_feature),
         background_quantile=float(config.background_quantile),
+        fallback_posterior_threshold=float(config.fallback_posterior_threshold),
+        # HDBSCAN knobs (consumed only when algorithm == "hdbscan")
         min_cluster_size=int(config.hdbscan_min_cluster_size),
         min_samples=int(config.hdbscan_min_samples),
         cluster_selection_epsilon=float(config.hdbscan_cluster_selection_epsilon),
         cluster_selection_method=str(config.hdbscan_cluster_selection_method),
         metric=str(config.hdbscan_metric),
-        fallback_posterior_threshold=float(config.fallback_posterior_threshold),
         pca_n_components=int(config.pca_n_components),
+        # Diffusion-map + GMM knobs (consumed only when algorithm == "diffmap_gmm")
+        diffmap_n_components=int(config.diffmap_n_components),
+        diffmap_k_neighbors=int(config.diffmap_k_neighbors),
+        diffmap_alpha=float(config.diffmap_alpha),
+        gmm_k_range=tuple(int(k) for k in config.gmm_k_range),
+        gmm_em_n_init=int(config.gmm_em_n_init),
+        gmm_em_reg_covar=float(config.gmm_em_reg_covar),
     )
-    mask_pre_merge = burst_bin_mask(assignment)
+    mask_pre_merge = burst_bin_mask(
+        assignment,
+        posterior_threshold=float(config.burst_posterior_threshold),
+    )
 
     # Composite/ranking signal used by valley logic and per-event quality cols
     rank_idx = feature_names.index(str(config.cluster_ranking_feature))
@@ -477,10 +516,24 @@ def compute_ml_bursts(
         "lambda_burst_per_unit": {
             f.unit_id: float(f.lambda_burst) for f in fits if f.skipped_reason is None
         },
+        "cluster_algorithm": str(config.cluster_algorithm),
         "cluster_decision": assignment.decision,
         "cluster_n_clusters": int(assignment.n_clusters),
         "cluster_burst_label": int(assignment.burst_label),
         "cluster_ranking": {int(k): float(v) for k, v in assignment.cluster_rank.items()},
+        "burst_posterior_threshold": float(config.burst_posterior_threshold),
+        "gmm_k_selected": (
+            int(assignment.gmm_k_selected) if assignment.gmm_k_selected is not None else None
+        ),
+        "gmm_bic": (
+            float(assignment.gmm_bic) if assignment.gmm_bic is not None else None
+        ),
+        "gmm_bic_table": (
+            {int(k): float(v) for k, v in assignment.gmm_bic_table.items()}
+            if assignment.gmm_bic_table is not None else None
+        ),
+        "diffmap_n_components": int(config.diffmap_n_components),
+        "diffmap_k_neighbors": int(config.diffmap_k_neighbors),
         "merge_threshold": float(merge_threshold),
         "burst_modulation_index": float(burst_modulation_index),
         "burst_activity_detected": bool(burstlets_raw),
@@ -497,6 +550,11 @@ def compute_ml_bursts(
     if gate_state is not None:
         diagnostics["bmi_gate"] = gate_state
 
+    burst_posterior_signal = (
+        assignment.burst_posterior.copy()
+        if assignment.burst_posterior is not None
+        else np.zeros(n_bins, dtype=float)
+    )
     plot_data = {
         "t": t_centers,
         "participation_signal": ws_sharp,
@@ -505,9 +563,11 @@ def compute_ml_bursts(
         "ff_signal": ff1,
         "llr_signal": llr_signal,
         "posterior_matrix_mean": np.nan_to_num(np.nanmean(posteriors, axis=0), nan=0.0),
+        "burst_posterior_signal": burst_posterior_signal,
         "burst_peak_times": np.array([b["peak_time"] for b in network_bursts]),
         "burst_peak_values": np.array([b["peak_synchrony"] for b in network_bursts]),
         "merge_threshold": float(merge_threshold),
+        "burst_posterior_threshold": float(config.burst_posterior_threshold),
     }
 
     if trace is not None:
@@ -521,6 +581,9 @@ def compute_ml_bursts(
         trace.feature_matrix = X.copy()
         trace.scaler_mean = assignment.scaler_mean.copy()
         trace.scaler_std = assignment.scaler_std.copy()
+        # Algorithm-neutral fields, plus legacy hdbscan_* aliases for old viewers.
+        trace.cluster_labels = assignment.labels.copy()
+        trace.cluster_probabilities = assignment.probabilities.copy()
         trace.hdbscan_labels = assignment.labels.copy()
         trace.hdbscan_probabilities = assignment.probabilities.copy()
         trace.cluster_ranking = {int(k): float(v) for k, v in assignment.cluster_rank.items()}
@@ -532,7 +595,20 @@ def compute_ml_bursts(
         trace.burstlets_pre_gate = [dict(ev) for ev in pre_gate_events]
         trace.gate_decision = gate_state
         trace.cluster_decision = assignment.decision
+        trace.cluster_algorithm = str(config.cluster_algorithm)
         trace.fallback_threshold = assignment.fallback_threshold
+        trace.embedding = (
+            assignment.embedding.copy() if assignment.embedding is not None else None
+        )
+        trace.burst_posterior = (
+            assignment.burst_posterior.copy() if assignment.burst_posterior is not None else None
+        )
+        trace.gmm_k_selected = assignment.gmm_k_selected
+        trace.gmm_bic = assignment.gmm_bic
+        trace.gmm_bic_table = (
+            {int(k): float(v) for k, v in assignment.gmm_bic_table.items()}
+            if assignment.gmm_bic_table is not None else None
+        )
 
     return BurstResults(
         burstlets=_to_df(burstlets_raw),

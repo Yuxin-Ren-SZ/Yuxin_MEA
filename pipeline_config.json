@@ -24,7 +24,35 @@
     "sorting": {
       "preprocessing_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/preprocessed_data",
       "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/spikesorted_data",
-      "sorter": "kilosort4"
+      "sorter": "kilosort4",
+      "docker_image": "",
+      "verbose": false,
+      "remove_existing_folder": true,
+      "delete_output_folder": false,
+      "overwrite": true,
+      "clean_excess_spikes": true,
+      "remove_empty_units": true,
+      "min_high_vram_gb": 14.0,
+      "high_vram_sorter_kwargs": {
+        "batch_size_seconds": 2.0,
+        "clear_cache": true,
+        "invert_sign": true,
+        "cluster_downsampling": 20,
+        "max_cluster_subset": null,
+        "nblocks": 0,
+        "dmin": 17,
+        "do_correction": false
+      },
+      "low_vram_sorter_kwargs": {
+        "batch_size_seconds": 0.5,
+        "clear_cache": true,
+        "invert_sign": true,
+        "cluster_downsampling": 30,
+        "max_cluster_subset": 50000,
+        "nblocks": 0,
+        "do_correction": false
+      },
+      "sorter_kwargs": {}
     },
     "auto_merge": {
       "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/auto_merge_data",
@@ -59,6 +87,7 @@
     },
     "burst_detection": {
       "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
+      "analyzer_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/analyzer_data",
       "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/burst_detection_data",
       "gamma": 1.0,
       "min_burstlet_participation": 0.2,
@@ -70,6 +99,7 @@
     },
     "iterative_burst_detection": {
       "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
+      "analyzer_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/analyzer_data",
       "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/iterative_burst_data",
       "permissive_mad_scale": 0.3,
       "permissive_percentile": 70.0,
@@ -125,6 +155,49 @@
       "gmm_posterior_threshold": 0.5,
       "gmm_component_merge_distance": 0.5,
       "gmm_burst_top_fraction": 1.0
+    },
+    "ml_burst_detection": {
+      "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
+      "analyzer_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/analyzer_data",
+      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/ml_burst_data",
+      "bin_size_mode": "adaptive",
+      "fixed_bin_size_s": 0.02,
+      "hmm_max_iter": 100,
+      "hmm_tol": 0.001,
+      "hmm_min_spikes": 50,
+      "hmm_init_strategy": "quantile",
+      "hmm_min_rate_ratio": 1.5,
+      "hmm_random_state": 42,
+      "hmm_n_jobs": 1,
+      "ff_scale_multipliers": [0.5, 1.0, 2.0, 5.0],
+      "posterior_quantile": 0.9,
+      "isi_window_bins": 25,
+      "deriv_sigma_short_bins": 1.5,
+      "deriv_sigma_long_bins": 8.0,
+      "background_quantile": 0.5,
+      "unit_agg_quantile": 0.9,
+      "pca_n_components": 0,
+      "cluster_algorithm": "diffmap_gmm",
+      "cluster_ranking_feature": "post_frac_gt_0_5",
+      "fallback_posterior_threshold": 0.3,
+      "burst_posterior_threshold": 0.3,
+      "hdbscan_min_cluster_size": 30,
+      "hdbscan_min_samples": 5,
+      "hdbscan_cluster_selection_epsilon": 0.0,
+      "hdbscan_cluster_selection_method": "eom",
+      "hdbscan_metric": "euclidean",
+      "diffmap_n_components": 5,
+      "diffmap_k_neighbors": 30,
+      "diffmap_alpha": 1.0,
+      "gmm_k_range": [2, 3, 4],
+      "gmm_em_n_init": 5,
+      "gmm_em_reg_covar": 1e-4,
+      "closing_bins": 3,
+      "merge_mad_scale": 0.75,
+      "merge_floor_frac": 0.70,
+      "network_merge_gap_min_s": 0.75,
+      "min_burst_modulation": 0.1,
+      "debug": true
     }
   }
 }

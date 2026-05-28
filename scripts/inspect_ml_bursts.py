@@ -240,6 +240,45 @@ def _fallback_well_name(well_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Trace-field accessors (back-compat: cluster_labels/cluster_probabilities
+# replaces hdbscan_labels/hdbscan_probabilities, but old pickles use the old
+# names. Read both.)
+# ---------------------------------------------------------------------------
+
+
+def _get_cluster_labels(trace) -> np.ndarray | None:
+    if trace is None:
+        return None
+    v = getattr(trace, "cluster_labels", None)
+    if v is None:
+        v = getattr(trace, "hdbscan_labels", None)
+    return None if v is None else np.asarray(v)
+
+
+def _get_cluster_probabilities(trace) -> np.ndarray | None:
+    if trace is None:
+        return None
+    v = getattr(trace, "cluster_probabilities", None)
+    if v is None:
+        v = getattr(trace, "hdbscan_probabilities", None)
+    return None if v is None else np.asarray(v)
+
+
+def _get_embedding(trace) -> np.ndarray | None:
+    if trace is None:
+        return None
+    v = getattr(trace, "embedding", None)
+    return None if v is None else np.asarray(v)
+
+
+def _get_burst_posterior(trace) -> np.ndarray | None:
+    if trace is None:
+        return None
+    v = getattr(trace, "burst_posterior", None)
+    return None if v is None else np.asarray(v)
+
+
+# ---------------------------------------------------------------------------
 # Figure builders
 # ---------------------------------------------------------------------------
 
@@ -358,8 +397,9 @@ def _signal_traces(
         return []
     out: list[go.Scatter] = []
     series = [
-        ("ranking_signal", "ranking_signal", "#d62728", True),
-        ("posterior_matrix_mean", "post_mean (units)", "#1f77b4", True),
+        ("burst_posterior_signal", "burst_posterior", "#d62728", True),
+        ("ranking_signal", "ranking_signal", "#7f7f7f", True),
+        ("posterior_matrix_mean", "post_mean (units)", "#1f77b4", "legendonly"),
         ("participation_signal", "participation", "#2ca02c", "legendonly"),
         ("ff_signal", "FF1", "#ff7f0e", "legendonly"),
         ("llr_signal", "LLR_mean", "#9467bd", "legendonly"),
@@ -383,8 +423,23 @@ def _signal_traces(
             x=[float(t.min()), float(t.max())],
             y=[merge_threshold, merge_threshold],
             mode="lines",
-            line=dict(color="#d62728", width=1.0, dash="dash"),
+            line=dict(color="#7f7f7f", width=1.0, dash="dash"),
             name=f"merge_threshold ({merge_threshold:.3f})",
+            legendgroup="signals",
+            hoverinfo="skip",
+        ))
+    bpt = plot_signals.get("burst_posterior_threshold")
+    try:
+        bpt_val = float(bpt) if bpt is not None else None
+    except (TypeError, ValueError):
+        bpt_val = None
+    if bpt_val is not None and np.isfinite(bpt_val):
+        out.append(go.Scatter(
+            x=[float(t.min()), float(t.max())],
+            y=[bpt_val, bpt_val],
+            mode="lines",
+            line=dict(color="#d62728", width=1.0, dash="dot"),
+            name=f"burst_posterior_threshold ({bpt_val:.3f})",
             legendgroup="signals",
             hoverinfo="skip",
         ))
@@ -392,9 +447,9 @@ def _signal_traces(
 
 
 def _hdbscan_strip(trace, diagnostics: dict[str, Any] | None) -> go.Heatmap | None:
-    if trace is None or getattr(trace, "hdbscan_labels", None) is None:
+    labels = _get_cluster_labels(trace)
+    if trace is None or labels is None:
         return None
-    labels = np.asarray(trace.hdbscan_labels)
     t = np.asarray(trace.t_centers, dtype=float)
     if labels.size == 0 or t.size != labels.size:
         return None
@@ -522,6 +577,52 @@ def _compute_pca_axes(trace) -> tuple[np.ndarray, str, str] | None:
     return coords, _label(0), _label(1)
 
 
+def _compute_diffmap_axes(trace) -> tuple[np.ndarray, str, str] | None:
+    """Return (coords_n×2, x_label, y_label) for diffusion-map(2), or None.
+
+    Uses the embedding the detector already saved (no recomputation). Picks
+    the first two diffusion coordinates; their eigenvalues are encoded in
+    the embedding magnitudes so this is the natural 2-D projection.
+    """
+    emb = _get_embedding(trace)
+    if emb is None or emb.ndim != 2 or emb.shape[1] < 2 or emb.shape[0] < 3:
+        return None
+    return emb[:, :2], "DM1", "DM2"
+
+
+def _compute_phate_axes(
+    trace,
+    max_bins: int = 5000,
+) -> tuple[np.ndarray, str, str, np.ndarray] | None:
+    """Return (coords_n×2, x_label, y_label, kept_indices) for PHATE(2), or None.
+
+    PHATE is purpose-built for trajectory-shaped data; gives a more honest
+    2-D visualisation than UMAP when the geometry really is a manifold.
+    Gated import: returns None if ``phate`` isn't installed.
+    """
+    Z = _znorm_from_trace(trace)
+    if Z is None or Z.shape[0] < 10:
+        return None
+    try:
+        import phate  # type: ignore
+    except ImportError:
+        return None
+    n = Z.shape[0]
+    if n > max_bins:
+        stride = int(np.ceil(n / max_bins))
+        kept = np.arange(0, n, stride)[:max_bins]
+    else:
+        kept = np.arange(n)
+    Zsub = Z[kept]
+    try:
+        op = phate.PHATE(n_components=2, knn=15, decay=40, t="auto", verbose=0, n_jobs=1)
+        coords = op.fit_transform(Zsub)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("PHATE failed (%s); skipping PHATE panel", exc)
+        return None
+    return coords, "PHATE-1", "PHATE-2", kept
+
+
 def _compute_umap_axes(
     trace,
     max_bins: int = 5000,
@@ -606,7 +707,8 @@ def _ranking_hist_traces(
     "which cluster has the highest mean ranking score" decision is visible
     independent of any 2-D projection.
     """
-    if trace is None or trace.feature_matrix is None or trace.hdbscan_labels is None:
+    labels = _get_cluster_labels(trace)
+    if trace is None or trace.feature_matrix is None or labels is None:
         return [], "", None
     X = np.asarray(trace.feature_matrix, float)
     fnames = list(trace.feature_names or [])
@@ -616,7 +718,6 @@ def _ranking_hist_traces(
     if rank_name not in fnames:
         rank_name = fnames[0]
     col = X[:, fnames.index(rank_name)]
-    labels = np.asarray(trace.hdbscan_labels)
     burst_label = None
     if diagnostics is not None:
         bl = diagnostics.get("cluster_burst_label")
@@ -656,6 +757,57 @@ def _ranking_hist_traces(
     return traces, rank_name, threshold
 
 
+def _burst_posterior_hist_traces(
+    trace, diagnostics: dict[str, Any] | None,
+) -> tuple[list[go.Histogram], str, float | None]:
+    """Per-cluster overlay of the rank-weighted GMM posterior.
+
+    This is the headline plot for diffmap_gmm runs: a bimodal-with-tail
+    distribution means the embedding cleanly separated burst from background
+    with intermediate trajectory bins. Threshold vline at
+    diagnostics["burst_posterior_threshold"].
+    """
+    bp = _get_burst_posterior(trace)
+    labels = _get_cluster_labels(trace)
+    if bp is None or labels is None or bp.size != labels.size:
+        return [], "burst_posterior", None
+    burst_label = None
+    if diagnostics is not None:
+        bl = diagnostics.get("cluster_burst_label")
+        if bl is not None and bl != -1:
+            burst_label = int(bl)
+    color_by, name_by = _cluster_color_map(labels, burst_label)
+    finite = bp[np.isfinite(bp)]
+    if not finite.size:
+        return [], "burst_posterior", None
+    edges_lo, edges_hi = 0.0, 1.0
+    nbins = 40
+    bin_size = (edges_hi - edges_lo) / nbins
+    traces: list[go.Histogram] = []
+    for lbl in sorted(color_by.keys()):
+        mask = labels == lbl
+        if not mask.any():
+            continue
+        traces.append(go.Histogram(
+            x=bp[mask],
+            xbins=dict(start=edges_lo, end=edges_hi, size=bin_size),
+            opacity=0.55,
+            marker=dict(color=color_by[lbl]),
+            name=f"{name_by[lbl]} (n={int(mask.sum())})",
+            legendgroup="bphist",
+            showlegend=True,
+        ))
+    threshold = None
+    if diagnostics is not None:
+        v = diagnostics.get("burst_posterior_threshold")
+        try:
+            if v is not None:
+                threshold = float(v)
+        except (TypeError, ValueError):
+            pass
+    return traces, "burst_posterior (rank-weighted GMM)", threshold
+
+
 def _cluster_table(diagnostics: dict[str, Any] | None, trace) -> go.Table | None:
     if diagnostics is None:
         return None
@@ -666,8 +818,9 @@ def _cluster_table(diagnostics: dict[str, Any] | None, trace) -> go.Table | None
     burst_label_int = None if burst_label in (None, -1) else int(burst_label)
 
     n_bins_by_label: dict[int, int] = {}
-    if trace is not None and getattr(trace, "hdbscan_labels", None) is not None:
-        arr = np.asarray(trace.hdbscan_labels).astype(int)
+    cluster_labels = _get_cluster_labels(trace)
+    if cluster_labels is not None:
+        arr = cluster_labels.astype(int)
         for lbl in np.unique(arr):
             n_bins_by_label[int(lbl)] = int((arr == lbl).sum())
 
@@ -747,18 +900,23 @@ def _metrics_table(metrics: dict[str, Any] | None) -> go.Table | None:
 def build_well_figure(well: WellBundle) -> go.Figure:
     has_trace = well.trace is not None
     has_signals = bool(well.plot_signals)
-    has_strip = has_trace and getattr(well.trace, "hdbscan_labels", None) is not None
+    has_strip = has_trace and _get_cluster_labels(well.trace) is not None
     has_hist = (
         has_trace
         and getattr(well.trace, "feature_matrix", None) is not None
-        and getattr(well.trace, "hdbscan_labels", None) is not None
+        and _get_cluster_labels(well.trace) is not None
     )
 
     # Compute projections up front so layout knows which panels to allocate.
+    diffmap_result = _compute_diffmap_axes(well.trace) if has_trace else None
     pca_result = _compute_pca_axes(well.trace) if has_trace else None
-    umap_result = _compute_umap_axes(well.trace) if has_trace else None
+    phate_result = _compute_phate_axes(well.trace) if has_trace else None
+    umap_result = _compute_umap_axes(well.trace) if (has_trace and phate_result is None) else None
+    has_diffmap = diffmap_result is not None
     has_pca = pca_result is not None
+    has_phate = phate_result is not None
     has_umap = umap_result is not None
+    has_burst_posterior = has_trace and _get_burst_posterior(well.trace) is not None
 
     # Row layout. Time-domain rows (raster/events/signals/strip) share an x-axis;
     # the projections rows are independent xy; the hist row is independent xy;
@@ -781,17 +939,33 @@ def build_well_figure(well: WellBundle) -> go.Figure:
         rows_spec.append([{"colspan": 2, "type": "heatmap"}, None])
         row_heights.append(0.05); row_meanings.append("strip")
 
-    if has_pca and has_umap:
+    # First projection row: diffmap (DM1 vs DM2) + PCA(2) side-by-side when both
+    # exist. Falls back to PCA-only (HDBSCAN runs) or diffmap-only.
+    if has_diffmap and has_pca:
         rows_spec.append([{"type": "xy"}, {"type": "xy"}])
-        row_heights.append(0.22); row_meanings.append("pca_umap")
+        row_heights.append(0.22); row_meanings.append("diffmap_pca")
+    elif has_diffmap:
+        rows_spec.append([{"colspan": 2, "type": "xy"}, None])
+        row_heights.append(0.20); row_meanings.append("diffmap_only")
     elif has_pca:
         rows_spec.append([{"colspan": 2, "type": "xy"}, None])
         row_heights.append(0.20); row_meanings.append("pca_only")
+
+    # Second projection row: PHATE alone if available (purpose-built for
+    # trajectory data); else UMAP as a fallback. Both visualisations are
+    # cluster-manufacturing prone, so they are decorative — diffmap is the
+    # honest one.
+    if has_phate:
+        rows_spec.append([{"colspan": 2, "type": "xy"}, None])
+        row_heights.append(0.20); row_meanings.append("phate_only")
     elif has_umap:
         rows_spec.append([{"colspan": 2, "type": "xy"}, None])
         row_heights.append(0.20); row_meanings.append("umap_only")
 
-    if has_hist:
+    if has_burst_posterior:
+        rows_spec.append([{"colspan": 2, "type": "xy"}, None])
+        row_heights.append(0.14); row_meanings.append("bp_hist")
+    elif has_hist:
         rows_spec.append([{"colspan": 2, "type": "xy"}, None])
         row_heights.append(0.14); row_meanings.append("hist")
 
@@ -806,22 +980,25 @@ def build_well_figure(well: WellBundle) -> go.Figure:
     # None positions in `specs` are skipped, so colspan=2 rows contribute one
     # title each and 2-cell rows (pca_umap, tables) contribute two.
     SINGLE_TITLES = {
-        "raster":    "Spike raster (units ranked by firing rate)",
-        "events":    "Burst events (lanes: burstlets / network_bursts / superbursts)",
-        "signals":   "Driving signals (ranking_signal drives HDBSCAN ranking)",
-        "strip":     "HDBSCAN cluster label per bin",
-        "pca_only":  "PCA(2) of z-normed features — what HDBSCAN saw",
-        "umap_only": "UMAP(2) of z-normed features",
-        "hist":      "Ranking-feature distribution per HDBSCAN cluster",
+        "raster":       "Spike raster (units ranked by firing rate)",
+        "events":       "Burst events (lanes: burstlets / network_bursts / superbursts)",
+        "signals":      "Driving signals (burst_posterior + ranking_signal)",
+        "strip":        "Per-bin cluster label",
+        "diffmap_only": "Diffusion-map (DM1 vs DM2) — trajectory-respecting embedding",
+        "pca_only":     "PCA(2) of z-normed features",
+        "phate_only":   "PHATE(2) of z-normed features — trajectory visualisation",
+        "umap_only":    "UMAP(2) of z-normed features",
+        "bp_hist":      "Burst-posterior distribution per cluster (rank-weighted GMM)",
+        "hist":         "Ranking-feature distribution per cluster",
     }
     flat_titles: list[str] = []
     for name in row_meanings:
         if name == "tables":
-            flat_titles.append("HDBSCAN cluster ranking")
+            flat_titles.append("Cluster ranking")
             flat_titles.append("Per-level metrics")
-        elif name == "pca_umap":
-            flat_titles.append("PCA(2) of z-normed features — what HDBSCAN saw")
-            flat_titles.append("UMAP(2) of z-normed features")
+        elif name == "diffmap_pca":
+            flat_titles.append("Diffusion-map (DM1 vs DM2) — what GMM clusters on")
+            flat_titles.append("PCA(2) of z-normed features")
         else:
             flat_titles.append(SINGLE_TITLES.get(name, ""))
 
@@ -889,11 +1066,7 @@ def build_well_figure(well: WellBundle) -> go.Figure:
         bl = well.diagnostics.get("cluster_burst_label")
         if bl is not None and bl != -1:
             burst_label_int = int(bl)
-    labels_full = (
-        np.asarray(well.trace.hdbscan_labels)
-        if has_trace and getattr(well.trace, "hdbscan_labels", None) is not None
-        else None
-    )
+    labels_full = _get_cluster_labels(well.trace) if has_trace else None
     t_full = (
         np.asarray(well.trace.t_centers, dtype=float)
         if has_trace and getattr(well.trace, "t_centers", None) is not None
@@ -918,17 +1091,38 @@ def build_well_figure(well: WellBundle) -> go.Figure:
         fig.update_xaxes(title_text=xl, row=row_idx[row_name], col=col_int)
         fig.update_yaxes(title_text=yl, row=row_idx[row_name], col=col_int)
 
-    if "pca_umap" in row_idx:
-        _add_projection("pca_umap", 1, pca_result)
-        _add_projection("pca_umap", 2, umap_result, kept_indices=umap_result[3] if umap_result else None)
+    if "diffmap_pca" in row_idx:
+        _add_projection("diffmap_pca", 1, diffmap_result)
+        _add_projection("diffmap_pca", 2, pca_result)
+    if "diffmap_only" in row_idx:
+        _add_projection("diffmap_only", 1, diffmap_result)
     if "pca_only" in row_idx:
         _add_projection("pca_only", 1, pca_result)
+    if "phate_only" in row_idx:
+        _add_projection("phate_only", 1, phate_result,
+                        kept_indices=phate_result[3] if phate_result else None)
     if "umap_only" in row_idx:
         _add_projection("umap_only", 1, umap_result,
                         kept_indices=umap_result[3] if umap_result else None)
 
-    # ----- Ranking-feature histogram per cluster -----
-    if "hist" in row_idx:
+    # ----- Cluster-decision histogram -----
+    if "bp_hist" in row_idx:
+        bp_traces, bp_xlabel, bp_thr = _burst_posterior_hist_traces(well.trace, well.diagnostics)
+        for tr in bp_traces:
+            fig.add_trace(tr, row=row_idx["bp_hist"], col=1)
+        if bp_thr is not None and np.isfinite(bp_thr):
+            fig.add_vline(
+                x=bp_thr,
+                line=dict(color="#d62728", width=1.0, dash="dash"),
+                annotation_text=f"thr={bp_thr:.3f}",
+                annotation_position="top right",
+                annotation_font_size=10,
+                row=row_idx["bp_hist"], col=1,
+            )
+        if bp_traces:
+            fig.update_xaxes(title_text=bp_xlabel, row=row_idx["bp_hist"], col=1)
+            fig.update_yaxes(title_text="bin count", row=row_idx["bp_hist"], col=1)
+    elif "hist" in row_idx:
         hist_traces, rank_name, thr = _ranking_hist_traces(well.trace, well.diagnostics)
         for tr in hist_traces:
             fig.add_trace(tr, row=row_idx["hist"], col=1)
@@ -997,8 +1191,14 @@ def build_well_figure(well: WellBundle) -> go.Figure:
         title += "  <i>[no debug_trace.pkl: cluster panels omitted]</i>"
 
     # Extra vertical space per optional panel so panels don't crowd each other.
-    proj_h = 320 if "pca_umap" in row_idx else (260 if ("pca_only" in row_idx or "umap_only" in row_idx) else 0)
-    hist_h = 200 if "hist" in row_idx else 0
+    proj_h = 0
+    if "diffmap_pca" in row_idx:
+        proj_h += 320
+    if "diffmap_only" in row_idx or "pca_only" in row_idx:
+        proj_h += 260
+    if "phate_only" in row_idx or "umap_only" in row_idx:
+        proj_h += 260
+    hist_h = 200 if ("hist" in row_idx or "bp_hist" in row_idx) else 0
     strip_h = 60 if has_strip else 0
     fig.update_layout(
         title=dict(text=title, x=0.005, xanchor="left", y=0.995, yanchor="top",

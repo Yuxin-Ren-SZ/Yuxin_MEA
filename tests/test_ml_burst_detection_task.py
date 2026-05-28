@@ -55,6 +55,7 @@ def _stage_curation_dir(tmp_path: Path) -> dict:
 def _params(tmp_path: Path, *, debug: bool, override: dict | None = None) -> dict:
     base = {
         "curation_output_root": str(tmp_path / "curation"),
+        "analyzer_output_root": str(tmp_path / "analyzer"),
         "output_root": str(tmp_path / "ml_burst"),
         # Lower HMM cost on tiny synthetic data
         "hmm_max_iter": 50,
@@ -125,6 +126,7 @@ class MLBurstDetectionTaskOutputTests(unittest.TestCase):
             with open(cfg_path) as fh:
                 raw = json.load(fh)
             raw["ff_scale_multipliers"] = tuple(raw["ff_scale_multipliers"])
+            raw["gmm_k_range"] = tuple(raw["gmm_k_range"])
             cfg = MLBurstConfig(**raw)
             self.assertEqual(cfg.hmm_max_iter, 50)
 
@@ -165,6 +167,125 @@ class MLBurstDetectionTaskOutputTests(unittest.TestCase):
         self.assertIn("debug", schema)
         self.assertEqual(defaults["debug"], False)
         self.assertEqual(schema["debug"].type, "bool")
+
+    def test_diffmap_gmm_is_the_default_algorithm(self):
+        defaults = MLBurstDetectionTask.default_params()
+        self.assertEqual(defaults["cluster_algorithm"], "diffmap_gmm")
+
+    def test_hdbscan_algorithm_still_reachable_via_param(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            _stage_curation_dir(tmp_path)
+            output_path = MLBurstDetectionTask().run(
+                _RECORDING_KEY,
+                _WELL_ID,
+                tmp_path / "data.h5",
+                _params(tmp_path, debug=False,
+                        override={"cluster_algorithm": "hdbscan"}),
+            )
+            with open(output_path / "diagnostics.json") as fh:
+                diag = json.load(fh)
+            self.assertEqual(diag["cluster_algorithm"], "hdbscan")
+            # Decision tag should reflect the HDBSCAN code path, not diffmap_gmm
+            self.assertIn(
+                diag["cluster_decision"],
+                {"hdbscan", "hdbscan_single", "hdbscan_all_noise", "fallback_threshold"},
+            )
+
+    def test_diffmap_gmm_diagnostics_carry_new_fields(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            _stage_curation_dir(tmp_path)
+            output_path = MLBurstDetectionTask().run(
+                _RECORDING_KEY,
+                _WELL_ID,
+                tmp_path / "data.h5",
+                _params(tmp_path, debug=True),
+            )
+            with open(output_path / "diagnostics.json") as fh:
+                diag = json.load(fh)
+            self.assertEqual(diag["cluster_algorithm"], "diffmap_gmm")
+            self.assertIn(diag["cluster_decision"],
+                          {"diffmap_gmm", "diffmap_singleton", "fallback_threshold"})
+            # Always present (may be None on fallback paths)
+            self.assertIn("burst_posterior_threshold", diag)
+            self.assertIn("diffmap_n_components", diag)
+            self.assertIn("diffmap_k_neighbors", diag)
+            # New trace fields
+            with open(output_path / "debug_trace.pkl", "rb") as fh:
+                trace = pickle.load(fh)
+            self.assertIsNotNone(trace.cluster_labels)
+            # Legacy alias still populated for back-compat viewers
+            self.assertIsNotNone(trace.hdbscan_labels)
+            if diag["cluster_decision"] == "diffmap_gmm":
+                self.assertIsNotNone(trace.embedding)
+                self.assertIsNotNone(trace.burst_posterior)
+                # Burst-posterior signal also persisted in plot_signals
+                plot_signals = np.load(
+                    output_path / "plot_signals.npy", allow_pickle=True,
+                ).item()
+                self.assertIn("burst_posterior_signal", plot_signals)
+                self.assertEqual(
+                    plot_signals["burst_posterior_signal"].shape,
+                    plot_signals["t"].shape,
+                )
+
+
+class DiffmapGmmTrajectoryRecoveryTests(unittest.TestCase):
+    """Focused unit test: with two attractors connected by a sparse trajectory
+    in feature space, diffmap_gmm should put trajectory bins on the manifold
+    (intermediate burst_posterior, not noise) — HDBSCAN labels them -1."""
+
+    def _make_two_attractor_data(self, rng):
+        d = 8
+        bg = rng.normal(0, 1, size=(2000, d))
+        burst = rng.normal(5, 1, size=(600, d))
+        t = rng.uniform(0.2, 0.8, size=200)[:, None]
+        traj = (np.zeros(d) + t * 5) + rng.normal(0, 0.5, size=(200, d))
+        X = np.vstack([bg, burst, traj]).astype(float)
+        truth = np.concatenate([
+            np.zeros(2000), np.ones(600), np.full(200, 0.5),
+        ])
+        # Synthesize a "ranking feature" column so the clusterer's burst-label
+        # selection logic has something to rank on. Use the mean along the
+        # data axes — monotonic in distance from the bg attractor.
+        ranking = X.mean(axis=1, keepdims=True)
+        X_aug = np.hstack([ranking, X])
+        feature_names = ["post_frac_gt_0_5"] + [f"f{i}" for i in range(d)]
+        perm = rng.permutation(X_aug.shape[0])
+        return X_aug[perm], feature_names, truth[perm]
+
+    def test_diffmap_gmm_trajectory_bins_are_not_noise(self):
+        from yuxin_mea.analysis.ml_burst_cluster import cluster_bins
+
+        rng = np.random.default_rng(0)
+        X, fnames, truth = self._make_two_attractor_data(rng)
+        res = cluster_bins(X, fnames, algorithm="diffmap_gmm")
+
+        self.assertEqual(res.decision, "diffmap_gmm")
+        # GMM is exhaustive — no -1 labels under diffmap_gmm.
+        self.assertFalse((res.labels == -1).any())
+        # Burst attractor → high burst_posterior; bg → low; trajectory → intermediate.
+        bp = res.burst_posterior
+        self.assertIsNotNone(bp)
+        self.assertGreater(float(bp[truth == 1].mean()), 0.9)
+        self.assertLess(float(bp[truth == 0].mean()), 0.1)
+        self.assertGreater(float(bp[truth == 0.5].mean()), 0.2)
+        self.assertLess(float(bp[truth == 0.5].mean()), 0.9)
+
+    @unittest.skipUnless(HDBSCAN_AVAILABLE, "hdbscan not installed")
+    def test_hdbscan_labels_trajectory_as_noise_on_same_data(self):
+        from yuxin_mea.analysis.ml_burst_cluster import cluster_bins
+
+        rng = np.random.default_rng(0)
+        X, fnames, truth = self._make_two_attractor_data(rng)
+        res = cluster_bins(X, fnames, algorithm="hdbscan",
+                           min_cluster_size=30, min_samples=5)
+        # Sanity check the regression the new algo is meant to fix:
+        # a meaningful fraction of trajectory bins falls into HDBSCAN noise.
+        noise_frac = float((res.labels[truth == 0.5] == -1).mean())
+        burst_noise_frac = float((res.labels[truth == 1] == -1).mean())
+        self.assertGreater(noise_frac + burst_noise_frac, 0.05)
 
 
 if __name__ == "__main__":
