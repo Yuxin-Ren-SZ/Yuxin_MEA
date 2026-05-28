@@ -446,88 +446,214 @@ def _hdbscan_strip(trace, diagnostics: dict[str, Any] | None) -> go.Heatmap | No
     )
 
 
-def _feature_scatter(
-    trace,
-    diagnostics: dict[str, Any] | None,
-) -> tuple[list[go.Scattergl], str, str]:
-    """Return (traces, x_label, y_label) for the 2-D feature-space scatter.
+def _cluster_color_map(
+    labels: np.ndarray, burst_label: int | None
+) -> tuple[dict[int, str], dict[int, str]]:
+    """Return (color_by_label, display_name_by_label) for HDBSCAN labels.
 
-    One trace per HDBSCAN label so legend toggling is per-cluster.
+    Noise (-1) is gray; the cluster matching ``burst_label`` is the burst red;
+    other clusters draw sequentially from ``CLUSTER_PALETTE``.
     """
-    if trace is None or getattr(trace, "feature_matrix", None) is None:
-        return [], "", ""
-    X = np.asarray(trace.feature_matrix, dtype=float)
+    color_by: dict[int, str] = {}
+    name_by: dict[int, str] = {}
+    palette_iter = iter(CLUSTER_PALETTE)
+    for lbl in sorted({int(v) for v in labels.tolist()}):
+        if lbl == -1:
+            color_by[lbl] = NOISE_COLOR
+            name_by[lbl] = "noise (-1)"
+        elif burst_label is not None and lbl == burst_label:
+            color_by[lbl] = BURST_COLOR
+            name_by[lbl] = f"cluster {lbl} (burst)"
+        else:
+            try:
+                color_by[lbl] = next(palette_iter)
+            except StopIteration:
+                color_by[lbl] = "#666666"
+            name_by[lbl] = f"cluster {lbl}"
+    return color_by, name_by
+
+
+def _znorm_from_trace(trace) -> np.ndarray | None:
+    """Reconstruct the z-normed feature matrix HDBSCAN actually saw.
+
+    Uses ``trace.scaler_mean`` / ``trace.scaler_std`` saved by the detector.
+    Falls back to whole-matrix z-norm if those aren't present (only happens
+    when consuming traces from a very early debug build).
+    """
+    X = np.asarray(trace.feature_matrix, dtype=float) if trace.feature_matrix is not None else None
+    if X is None or X.ndim != 2 or X.shape[0] == 0:
+        return None
+    mu = getattr(trace, "scaler_mean", None)
+    sd = getattr(trace, "scaler_std", None)
+    if mu is None or sd is None:
+        mu = X.mean(axis=0)
+        sd = X.std(axis=0)
+    mu = np.asarray(mu, float)
+    sd = np.asarray(sd, float)
+    sd = np.where(sd < 1e-6, 1.0, sd)
+    return (X - mu) / sd
+
+
+def _compute_pca_axes(trace) -> tuple[np.ndarray, str, str] | None:
+    """Return (coords_n×2, x_label, y_label) for the PCA(2) view, or None."""
+    Z = _znorm_from_trace(trace)
+    if Z is None or Z.shape[0] < 3:
+        return None
+    try:
+        from sklearn.decomposition import PCA
+    except ImportError:
+        return None
+    n_comp = min(2, Z.shape[1])
+    if n_comp < 2:
+        return None
+    pca = PCA(n_components=2, random_state=0).fit(Z)
+    coords = pca.transform(Z)
     fnames = list(trace.feature_names or [])
-    labels = np.asarray(trace.hdbscan_labels) if trace.hdbscan_labels is not None else None
-    t = np.asarray(trace.t_centers, dtype=float) if trace.t_centers is not None else None
-    if X.ndim != 2 or X.shape[0] == 0 or not fnames:
-        return [], "", ""
 
-    ranking = (diagnostics or {}).get("ranking_feature", "post_frac_gt_0_5")
-    x_name = ranking if ranking in fnames else fnames[0]
-    y_candidates = ["llr_hmm_mean", "post_mean", "PFR", "participation"]
-    y_name = next((c for c in y_candidates if c in fnames and c != x_name), None)
-    if y_name is None:
-        y_name = fnames[1] if len(fnames) > 1 else fnames[0]
+    def _label(pc: int) -> str:
+        comp = pca.components_[pc]
+        ev = float(pca.explained_variance_ratio_[pc]) * 100
+        order = np.argsort(np.abs(comp))[::-1][:3]
+        if fnames and all(0 <= int(i) < len(fnames) for i in order):
+            tops = ", ".join(f"{fnames[int(i)]}{comp[int(i)]:+.2f}" for i in order)
+            return f"PC{pc+1} ({ev:.1f}%): {tops}"
+        return f"PC{pc+1} ({ev:.1f}%)"
 
-    xi = fnames.index(x_name)
-    yi = fnames.index(y_name)
-    xs = X[:, xi]
-    ys = X[:, yi]
-    if labels is None or labels.size != xs.size:
-        labels = np.zeros(xs.size, dtype=int)
+    return coords, _label(0), _label(1)
 
+
+def _compute_umap_axes(
+    trace,
+    max_bins: int = 5000,
+    n_neighbors: int = 30,
+    min_dist: float = 0.05,
+) -> tuple[np.ndarray, str, str, np.ndarray] | None:
+    """Return (coords_n×2, x_label, y_label, kept_indices) for UMAP(2), or None.
+
+    Subsamples to ``max_bins`` rows when the input is larger so per-well UMAP
+    stays under a few seconds. Returns None when ``umap-learn`` is not
+    importable, so callers can degrade gracefully.
+    """
+    Z = _znorm_from_trace(trace)
+    if Z is None or Z.shape[0] < 10:
+        return None
+    try:
+        import umap  # type: ignore
+    except ImportError:
+        return None
+    n = Z.shape[0]
+    if n > max_bins:
+        stride = int(np.ceil(n / max_bins))
+        kept = np.arange(0, n, stride)[:max_bins]
+    else:
+        kept = np.arange(n)
+    Zsub = Z[kept]
+    nn = max(2, min(int(n_neighbors), Zsub.shape[0] - 1))
+    reducer = umap.UMAP(
+        n_components=2, n_neighbors=nn, min_dist=float(min_dist),
+        metric="euclidean", random_state=42,
+    )
+    coords = reducer.fit_transform(Zsub)
+    return coords, "UMAP-1", "UMAP-2", kept
+
+
+def _projection_scatter_traces(
+    coords: np.ndarray,        # (n, 2)
+    labels: np.ndarray,        # (n,)
+    t_centers: np.ndarray,     # (n,)
+    burst_label: int | None,
+    x_axis_label: str,
+    y_axis_label: str,
+    legend_group: str,         # "pca" or "umap" — separate so per-panel legends don't fight
+) -> list[go.Scattergl]:
+    color_by, name_by = _cluster_color_map(labels, burst_label)
+    traces: list[go.Scattergl] = []
+    for lbl in sorted(color_by.keys()):
+        mask = labels == lbl
+        if not mask.any():
+            continue
+        cd = (t_centers[mask]
+              if t_centers is not None and t_centers.size == coords.shape[0]
+              else np.zeros(int(mask.sum())))
+        traces.append(go.Scattergl(
+            x=coords[mask, 0], y=coords[mask, 1],
+            mode="markers",
+            marker=dict(
+                size=5 if lbl != -1 else 3,
+                color=color_by[lbl],
+                opacity=0.85 if lbl != -1 else 0.35,
+                line=dict(width=0),
+            ),
+            customdata=cd,
+            hovertemplate=(
+                f"{name_by[lbl]}<br>{x_axis_label}=%{{x:.3f}}<br>{y_axis_label}=%{{y:.3f}}"
+                "<br>t=%{customdata:.3f}s<extra></extra>"
+            ),
+            name=f"{name_by[lbl]} (n={int(mask.sum())})",
+            legendgroup=legend_group,
+            showlegend=True,
+        ))
+    return traces
+
+
+def _ranking_hist_traces(
+    trace, diagnostics: dict[str, Any] | None,
+) -> tuple[list[go.Histogram], str, float | None]:
+    """Return (per-cluster histograms over the ranking feature, x_label,
+    threshold-for-vline).
+
+    Shows the 1-D distribution the detector actually ranks clusters on, so the
+    "which cluster has the highest mean ranking score" decision is visible
+    independent of any 2-D projection.
+    """
+    if trace is None or trace.feature_matrix is None or trace.hdbscan_labels is None:
+        return [], "", None
+    X = np.asarray(trace.feature_matrix, float)
+    fnames = list(trace.feature_names or [])
+    if not fnames:
+        return [], "", None
+    rank_name = (diagnostics or {}).get("ranking_feature", "post_frac_gt_0_5")
+    if rank_name not in fnames:
+        rank_name = fnames[0]
+    col = X[:, fnames.index(rank_name)]
+    labels = np.asarray(trace.hdbscan_labels)
     burst_label = None
     if diagnostics is not None:
         bl = diagnostics.get("cluster_burst_label")
         if bl is not None and bl != -1:
             burst_label = int(bl)
-
-    unique = sorted(set(int(v) for v in labels.tolist()))
-    palette_iter = iter(CLUSTER_PALETTE)
-    cluster_color: dict[int, str] = {}
-    for lbl in unique:
-        if lbl == -1:
-            cluster_color[lbl] = NOISE_COLOR
-        elif burst_label is not None and lbl == burst_label:
-            cluster_color[lbl] = BURST_COLOR
-        else:
-            try:
-                cluster_color[lbl] = next(palette_iter)
-            except StopIteration:
-                cluster_color[lbl] = "#666666"
-
-    traces: list[go.Scattergl] = []
-    for lbl in unique:
+    color_by, name_by = _cluster_color_map(labels, burst_label)
+    finite = col[np.isfinite(col)]
+    if not finite.size:
+        return [], rank_name, None
+    nbins = 40
+    edges_lo, edges_hi = float(finite.min()), float(finite.max())
+    bin_size = (edges_hi - edges_lo) / nbins if edges_hi > edges_lo else 1.0
+    traces: list[go.Histogram] = []
+    for lbl in sorted(color_by.keys()):
         mask = labels == lbl
         if not mask.any():
             continue
-        if lbl == -1:
-            display = "noise (-1)"
-        elif burst_label is not None and lbl == burst_label:
-            display = f"cluster {lbl} (burst)"
-        else:
-            display = f"cluster {lbl}"
-        cd_t = t[mask] if t is not None and t.size == xs.size else np.zeros(int(mask.sum()))
-        traces.append(go.Scattergl(
-            x=xs[mask], y=ys[mask],
-            mode="markers",
-            marker=dict(
-                size=5 if lbl != -1 else 3,
-                color=cluster_color[lbl],
-                opacity=0.85 if lbl != -1 else 0.35,
-                line=dict(width=0),
-            ),
-            customdata=cd_t,
-            hovertemplate=(
-                f"{display}<br>{x_name}=%{{x:.3f}}<br>{y_name}=%{{y:.3f}}"
-                "<br>t=%{customdata:.3f}s<extra></extra>"
-            ),
-            name=f"{display} (n={int(mask.sum())})",
-            legendgroup="cluster",
+        traces.append(go.Histogram(
+            x=col[mask],
+            xbins=dict(start=edges_lo, end=edges_hi, size=bin_size),
+            opacity=0.55,
+            marker=dict(color=color_by[lbl]),
+            name=f"{name_by[lbl]} (n={int(mask.sum())})",
+            legendgroup="hist",
             showlegend=True,
         ))
-    return traces, x_name, y_name
+    threshold: float | None = None
+    if diagnostics is not None:
+        for key in ("merge_threshold", "fallback_threshold"):
+            v = diagnostics.get(key)
+            try:
+                if v is not None:
+                    threshold = float(v)
+                    break
+            except (TypeError, ValueError):
+                pass
+    return traces, rank_name, threshold
 
 
 def _cluster_table(diagnostics: dict[str, Any] | None, trace) -> go.Table | None:
@@ -622,14 +748,24 @@ def build_well_figure(well: WellBundle) -> go.Figure:
     has_trace = well.trace is not None
     has_signals = bool(well.plot_signals)
     has_strip = has_trace and getattr(well.trace, "hdbscan_labels", None) is not None
-    has_scatter = has_trace and getattr(well.trace, "feature_matrix", None) is not None
+    has_hist = (
+        has_trace
+        and getattr(well.trace, "feature_matrix", None) is not None
+        and getattr(well.trace, "hdbscan_labels", None) is not None
+    )
 
-    # Row layout. Time-axis rows are linked via matches="x".
-    # Row 1: raster        | Row 2: events       | Row 3: signals    | Row 4: hdbscan strip
-    # Row 5: feature scatter (own axes)          | Row 6: two tables
+    # Compute projections up front so layout knows which panels to allocate.
+    pca_result = _compute_pca_axes(well.trace) if has_trace else None
+    umap_result = _compute_umap_axes(well.trace) if has_trace else None
+    has_pca = pca_result is not None
+    has_umap = umap_result is not None
+
+    # Row layout. Time-domain rows (raster/events/signals/strip) share an x-axis;
+    # the projections rows are independent xy; the hist row is independent xy;
+    # tables come last.
     rows_spec = []
     row_heights = []
-    row_meanings = []  # name per row for downstream wiring
+    row_meanings = []
 
     rows_spec.append([{"colspan": 2, "type": "xy"}, None])
     row_heights.append(0.26); row_meanings.append("raster")
@@ -645,9 +781,19 @@ def build_well_figure(well: WellBundle) -> go.Figure:
         rows_spec.append([{"colspan": 2, "type": "heatmap"}, None])
         row_heights.append(0.05); row_meanings.append("strip")
 
-    if has_scatter:
+    if has_pca and has_umap:
+        rows_spec.append([{"type": "xy"}, {"type": "xy"}])
+        row_heights.append(0.22); row_meanings.append("pca_umap")
+    elif has_pca:
         rows_spec.append([{"colspan": 2, "type": "xy"}, None])
-        row_heights.append(0.22); row_meanings.append("scatter")
+        row_heights.append(0.20); row_meanings.append("pca_only")
+    elif has_umap:
+        rows_spec.append([{"colspan": 2, "type": "xy"}, None])
+        row_heights.append(0.20); row_meanings.append("umap_only")
+
+    if has_hist:
+        rows_spec.append([{"colspan": 2, "type": "xy"}, None])
+        row_heights.append(0.14); row_meanings.append("hist")
 
     rows_spec.append([{"type": "table"}, {"type": "table"}])
     row_heights.append(0.18); row_meanings.append("tables")
@@ -656,33 +802,28 @@ def build_well_figure(well: WellBundle) -> go.Figure:
     # Normalise row_heights so plotly accepts.
     row_heights = [h / sum(row_heights) for h in row_heights]
 
-    # Subplot titles
-    subtitles = []
-    for name in row_meanings:
-        if name == "raster":
-            subtitles.append("Spike raster (units ranked by firing rate)")
-        elif name == "events":
-            subtitles.append("Burst events (lanes: burstlets / network_bursts / superbursts)")
-        elif name == "signals":
-            subtitles.append("Driving signals (ranking_signal drives HDBSCAN ranking)")
-        elif name == "strip":
-            subtitles.append("HDBSCAN cluster label per bin")
-        elif name == "scatter":
-            subtitles.append("Feature-space cluster view")
-        elif name == "tables":
-            subtitles.append("")
-        else:
-            subtitles.append("")
     # subplot_titles is one entry per *actual* subplot cell, in row-major order;
     # None positions in `specs` are skipped, so colspan=2 rows contribute one
-    # title each and the tables row contributes two.
-    flat_titles = []
-    for r, name in enumerate(row_meanings):
+    # title each and 2-cell rows (pca_umap, tables) contribute two.
+    SINGLE_TITLES = {
+        "raster":    "Spike raster (units ranked by firing rate)",
+        "events":    "Burst events (lanes: burstlets / network_bursts / superbursts)",
+        "signals":   "Driving signals (ranking_signal drives HDBSCAN ranking)",
+        "strip":     "HDBSCAN cluster label per bin",
+        "pca_only":  "PCA(2) of z-normed features — what HDBSCAN saw",
+        "umap_only": "UMAP(2) of z-normed features",
+        "hist":      "Ranking-feature distribution per HDBSCAN cluster",
+    }
+    flat_titles: list[str] = []
+    for name in row_meanings:
         if name == "tables":
             flat_titles.append("HDBSCAN cluster ranking")
             flat_titles.append("Per-level metrics")
+        elif name == "pca_umap":
+            flat_titles.append("PCA(2) of z-normed features — what HDBSCAN saw")
+            flat_titles.append("UMAP(2) of z-normed features")
         else:
-            flat_titles.append(subtitles[r])
+            flat_titles.append(SINGLE_TITLES.get(name, ""))
 
     fig = make_subplots(
         rows=n_rows, cols=2,
@@ -742,14 +883,67 @@ def build_well_figure(well: WellBundle) -> go.Figure:
         fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False,
                          row=row_idx["strip"], col=1)
 
-    # ----- Feature scatter -----
-    if "scatter" in row_idx:
-        scatter_traces, x_name, y_name = _feature_scatter(well.trace, well.diagnostics)
-        for tr in scatter_traces:
-            fig.add_trace(tr, row=row_idx["scatter"], col=1)
-        if scatter_traces:
-            fig.update_xaxes(title_text=x_name, row=row_idx["scatter"], col=1)
-            fig.update_yaxes(title_text=y_name, row=row_idx["scatter"], col=1)
+    # ----- PCA + UMAP projections -----
+    burst_label_int: int | None = None
+    if well.diagnostics is not None:
+        bl = well.diagnostics.get("cluster_burst_label")
+        if bl is not None and bl != -1:
+            burst_label_int = int(bl)
+    labels_full = (
+        np.asarray(well.trace.hdbscan_labels)
+        if has_trace and getattr(well.trace, "hdbscan_labels", None) is not None
+        else None
+    )
+    t_full = (
+        np.asarray(well.trace.t_centers, dtype=float)
+        if has_trace and getattr(well.trace, "t_centers", None) is not None
+        else None
+    )
+
+    def _add_projection(row_name: str, col_int: int, result, kept_indices=None):
+        if result is None or labels_full is None or t_full is None:
+            return
+        coords = result[0]
+        xl = result[1]
+        yl = result[2]
+        if kept_indices is None:
+            lbl_in = labels_full
+            t_in = t_full
+        else:
+            lbl_in = labels_full[kept_indices]
+            t_in = t_full[kept_indices]
+        for tr in _projection_scatter_traces(coords, lbl_in, t_in, burst_label_int,
+                                             xl, yl, row_name):
+            fig.add_trace(tr, row=row_idx[row_name], col=col_int)
+        fig.update_xaxes(title_text=xl, row=row_idx[row_name], col=col_int)
+        fig.update_yaxes(title_text=yl, row=row_idx[row_name], col=col_int)
+
+    if "pca_umap" in row_idx:
+        _add_projection("pca_umap", 1, pca_result)
+        _add_projection("pca_umap", 2, umap_result, kept_indices=umap_result[3] if umap_result else None)
+    if "pca_only" in row_idx:
+        _add_projection("pca_only", 1, pca_result)
+    if "umap_only" in row_idx:
+        _add_projection("umap_only", 1, umap_result,
+                        kept_indices=umap_result[3] if umap_result else None)
+
+    # ----- Ranking-feature histogram per cluster -----
+    if "hist" in row_idx:
+        hist_traces, rank_name, thr = _ranking_hist_traces(well.trace, well.diagnostics)
+        for tr in hist_traces:
+            fig.add_trace(tr, row=row_idx["hist"], col=1)
+        if thr is not None and np.isfinite(thr):
+            fig.add_vline(
+                x=thr,
+                line=dict(color="#d62728", width=1.0, dash="dash"),
+                annotation_text=f"thr={thr:.3f}",
+                annotation_position="top right",
+                annotation_font_size=10,
+                row=row_idx["hist"], col=1,
+            )
+        if hist_traces:
+            fig.update_xaxes(title_text=rank_name, row=row_idx["hist"], col=1)
+            fig.update_yaxes(title_text="bin count", row=row_idx["hist"], col=1)
 
     # ----- Tables -----
     ct = _cluster_table(well.diagnostics, well.trace)
@@ -802,14 +996,19 @@ def build_well_figure(well: WellBundle) -> go.Figure:
     if not has_trace:
         title += "  <i>[no debug_trace.pkl: cluster panels omitted]</i>"
 
+    # Extra vertical space per optional panel so panels don't crowd each other.
+    proj_h = 320 if "pca_umap" in row_idx else (260 if ("pca_only" in row_idx or "umap_only" in row_idx) else 0)
+    hist_h = 200 if "hist" in row_idx else 0
+    strip_h = 60 if has_strip else 0
     fig.update_layout(
         title=dict(text=title, x=0.005, xanchor="left", y=0.995, yanchor="top",
                    font=dict(size=13)),
-        height=1100 + (160 if has_scatter else 0) + (60 if has_strip else 0),
+        height=900 + proj_h + hist_h + strip_h,
         width=1500,
         margin=dict(l=60, r=20, t=60, b=60),
         plot_bgcolor="white",
         hoverlabel=dict(bgcolor="white", font_size=11),
+        barmode="overlay",
         showlegend=True,
         legend=dict(orientation="v", x=1.005, y=0.95, xanchor="left",
                     bgcolor="rgba(255,255,255,0.85)"),

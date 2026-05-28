@@ -21,6 +21,7 @@ dependencies:
   - matplotlib
   - dash>=2.14
   - hdbscan
+  - umap-learn
   - joblib
   - pip:
     - --extra-index-url https://download.pytorch.org/whl/cu128
