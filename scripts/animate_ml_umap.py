@@ -28,6 +28,7 @@ matplotlib.use("Agg")  # headless render
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
 from matplotlib.colors import to_rgba
+from matplotlib.patches import Rectangle
 
 # Reuse discovery / loading / UMAP helpers from the inspect script (same dir).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -58,6 +59,34 @@ def _cluster_rgba_map(labels: np.ndarray, burst_label: int | None) -> dict[int, 
             out[lbl] = to_rgba(iml.CLUSTER_PALETTE[palette_i % len(iml.CLUSTER_PALETTE)])
             palette_i += 1
     return out
+
+
+def _ranked_raster(
+    spike_times: dict[str, np.ndarray], cap: int = 12000
+) -> tuple[list[np.ndarray], float]:
+    """Return (per-unit spike-time arrays ranked by firing rate desc, t_end).
+
+    Mirrors inspect_ml_bursts' raster: highest-firing units at the top, with a
+    per-unit point cap so dense wells stay light to draw.
+    """
+    items: list[tuple[str, np.ndarray]] = []
+    for uid, st in spike_times.items():
+        a = np.asarray(st, dtype=float)
+        a = a[np.isfinite(a)]
+        items.append((str(uid), a))
+    t_end = max((float(a.max()) if a.size else 0.0 for _, a in items), default=0.0)
+    items.sort(
+        key=lambda kv: (kv[1].size / t_end if t_end > 0 and kv[1].size else 0.0),
+        reverse=True,
+    )
+    n_units = len(items) or 1
+    per_cap = max(40, cap // n_units)
+    positions: list[np.ndarray] = []
+    for _, sp in items:
+        if sp.size > per_cap:
+            sp = sp[:: int(np.ceil(sp.size / per_cap))]
+        positions.append(sp)
+    return positions, t_end
 
 
 def _animate_well(
@@ -95,8 +124,36 @@ def _animate_well(
     # a short --duration on a long recording just yields a slightly longer video.
     fps = fps_override or min(60, max(1, round(n / max(duration, 1e-6))))
 
-    fig, ax = plt.subplots(figsize=(8, 8))
-    fig.subplots_adjust(left=0.08, right=0.97, top=0.93, bottom=0.07)
+    # Raster (top) over UMAP (bottom). Skip the raster panel if no spikes.
+    raster = None
+    if bundle.spike_times:
+        raster, t_end_r = _ranked_raster(bundle.spike_times)
+    t_max = max(float(t.max()), t_end_r if raster else 0.0)
+
+    if raster:
+        fig = plt.figure(figsize=(8, 10))
+        gs = fig.add_gridspec(2, 1, height_ratios=[1, 3], hspace=0.22)
+        ax_r = fig.add_subplot(gs[0])
+        ax = fig.add_subplot(gs[1])
+    else:
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax_r = None
+    fig.subplots_adjust(left=0.1, right=0.97, top=0.93, bottom=0.06)
+
+    # Top panel: static spike raster + a moving shaded window for the trail span.
+    span = None
+    if ax_r is not None:
+        ax_r.eventplot(raster, colors="#282828", linelengths=0.85, linewidths=0.4)
+        ax_r.set_xlim(0, t_max)
+        ax_r.set_ylim(-0.5, len(raster) - 0.5)
+        ax_r.set_xlabel("time (s)")
+        ax_r.set_ylabel("unit (FR rank)")
+        ax_r.tick_params(labelsize=9)
+        # x in data coords, y spans the full axes height (xaxis_transform).
+        span = Rectangle((0, 0), history, 1, transform=ax_r.get_xaxis_transform(),
+                         facecolor="#ffb000", alpha=0.25, edgecolor="#ff8c00",
+                         lw=1.0, zorder=5)
+        ax_r.add_patch(span)
 
     # Static background cloud: cluster-colored, faint.
     bg_rgba = point_rgba.copy()
@@ -118,8 +175,8 @@ def _animate_well(
     trail_pts = ax.scatter([], [], s=22, linewidths=0, zorder=3)
     ball = ax.scatter([], [], s=BALL_SIZE, edgecolors="black", linewidths=1.2,
                       zorder=4)
-    title = ax.set_title(f"{bundle.well_name}  ·  {bundle.groupname}  ·  t = 0.0 s",
-                         loc="left", fontsize=12)
+    title = fig.suptitle(f"{bundle.well_name}  ·  {bundle.groupname}  ·  t = 0.0 s",
+                         x=0.1, ha="left", fontsize=12)
 
     def update(ci: int):
         t_now = t[ci]
@@ -137,6 +194,13 @@ def _animate_well(
 
         ball.set_offsets([[coords[ci, 0], coords[ci, 1]]])
         ball.set_facecolors([point_rgba[ci]])
+
+        # Move the raster window to the trail span (clamp left edge to 0).
+        if span is not None:
+            x0 = max(0.0, t_now - history)
+            span.set_x(x0)
+            span.set_width(t_now - x0)
+
         title.set_text(f"{bundle.well_name}  ·  {bundle.groupname}  ·  t = {t_now:.1f} s")
         return trail_line, trail_pts, ball, title
 
