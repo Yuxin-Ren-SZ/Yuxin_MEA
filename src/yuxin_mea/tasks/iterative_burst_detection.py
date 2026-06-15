@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -7,14 +8,18 @@ from yuxin_mea.config import ParamSpec
 from yuxin_mea.pipeline import BaseAnalysisTask
 from yuxin_mea.tasks.preprocessing import PreprocessingTask
 
+logger = logging.getLogger(__name__)
+
 
 class IterativeBurstDetectionTask(BaseAnalysisTask):
-    """Iterative contrast-maximizing network burst detection for one curated well.
+    """Iterative contrast-maximizing network burst detection for one well.
 
-    Reads the same curated_spike_times.npy produced by auto_curation as
-    BurstDetectionTask, but uses a Fisher LDA iterative refinement loop over
-    multi-feature signals (PFR, participation, multi-scale Fano Factor,
-    per-unit Poisson LLR, burstiness) instead of a fixed participation threshold.
+    Uses a Fisher LDA iterative refinement loop over multi-feature signals
+    (PFR, participation, multi-scale Fano Factor, per-unit Poisson LLR,
+    burstiness) instead of a fixed participation threshold.
+
+    Prefers curated spike times from ``auto_curation``; falls back to all
+    units from the ``SortingAnalyzer`` when auto_curation was skipped.
 
     Output schema is identical to BurstDetectionTask (BurstResults pickle layout)
     with four additional per-event quality columns:
@@ -22,12 +27,13 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
     """
 
     task_name = "iterative_burst_detection"
-    dependencies = ["auto_curation"]
+    dependencies = ["analyzer"]
 
     @classmethod
     def default_params(cls) -> dict[str, Any]:
         return {
             "curation_output_root": "./curation_data",
+            "analyzer_output_root": "./analyzer_data",
             "output_root": "./iterative_burst_data",
             # IterativeBurstConfig fields
             "permissive_mad_scale": 0.30,
@@ -76,6 +82,11 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
                 "path", defaults["curation_output_root"],
                 "Root directory containing auto_curation outputs "
                 "(curated_spike_times.npy per recording/well).",
+            ),
+            "analyzer_output_root": ParamSpec(
+                "path", defaults["analyzer_output_root"],
+                "Root directory of SortingAnalyzer outputs from AnalyzerTask. "
+                "Used as fallback when auto_curation has not run.",
             ),
             "output_root": ParamSpec(
                 "path", defaults["output_root"],
@@ -399,6 +410,9 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
         )
         from yuxin_mea.analysis.burst_output import PickleBurstOutputWriter
 
+        from yuxin_mea.tasks._spike_times import load_spike_times
+        from yuxin_mea.tasks.analyzer import AnalyzerTask
+
         p = self.resolve_params(params)
         rec_name, actual_well_id = self.split_compound_well_id(well_id)
 
@@ -408,16 +422,16 @@ class IterativeBurstDetectionTask(BaseAnalysisTask):
             rec_name,
             actual_well_id,
         )
-        spike_times_path = curation_dir / "curated_spike_times.npy"
-        if not spike_times_path.exists():
-            raise FileNotFoundError(
-                f"curated_spike_times.npy not found at {spike_times_path}. "
-                "Ensure auto_curation has completed successfully."
-            )
-
-        spike_times: dict = np.load(  # type: ignore[call-overload]
-            spike_times_path, allow_pickle=True
-        ).item()
+        analyzer_path = AnalyzerTask.build_output_path(
+            p["analyzer_output_root"],
+            recording_key,
+            rec_name,
+            actual_well_id,
+        )
+        spike_times = load_spike_times(
+            curation_dir, analyzer_path, logger,
+            well_label=f"{recording_key}/{rec_name}/{actual_well_id}",
+        )
 
         config = IterativeBurstConfig(
             permissive_mad_scale=float(p["permissive_mad_scale"]),

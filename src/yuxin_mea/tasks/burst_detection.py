@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -7,22 +8,24 @@ from yuxin_mea.config import ParamSpec
 from yuxin_mea.pipeline import BaseAnalysisTask
 from yuxin_mea.tasks.preprocessing import PreprocessingTask
 
+logger = logging.getLogger(__name__)
+
 
 class BurstDetectionTask(BaseAnalysisTask):
-    """Network burst detection for one curated well.
+    """Network burst detection for one well.
 
-    Depends on 'auto_curation', which is expected to write a
-    ``curated_spike_times.npy`` file containing a dict of
-    {unit_id: np.ndarray} of spike times in seconds.
+    Prefers curated spike times from ``auto_curation``; falls back to all
+    units from the ``SortingAnalyzer`` when auto_curation was skipped.
     """
 
     task_name = "burst_detection"
-    dependencies = ["auto_curation"]
+    dependencies = ["analyzer"]
 
     @classmethod
     def default_params(cls) -> dict[str, Any]:
         return {
             "curation_output_root": "./curation_data",
+            "analyzer_output_root": "./analyzer_data",
             "output_root": "./burst_detection_data",
             # BurstDetectorConfig defaults — mirrors BurstDetectorConfig fields
             "gamma": 1.0,
@@ -42,6 +45,11 @@ class BurstDetectionTask(BaseAnalysisTask):
                 "path", defaults["curation_output_root"],
                 "Root directory where AutoCurationTask writes "
                 "curated_spike_times.npy (per recording/well).",
+            ),
+            "analyzer_output_root": ParamSpec(
+                "path", defaults["analyzer_output_root"],
+                "Root directory of SortingAnalyzer outputs from AnalyzerTask. "
+                "Used as fallback when auto_curation has not run.",
             ),
             "output_root": ParamSpec(
                 "path", defaults["output_root"],
@@ -137,13 +145,13 @@ class BurstDetectionTask(BaseAnalysisTask):
         data_path: Path,
         params: dict[str, Any],
     ) -> Path:
-        import numpy as np
-
         from yuxin_mea.analysis.burst_detector import (
             BurstDetectorConfig,
             compute_network_bursts,
         )
         from yuxin_mea.analysis.burst_output import PickleBurstOutputWriter
+        from yuxin_mea.tasks._spike_times import load_spike_times
+        from yuxin_mea.tasks.analyzer import AnalyzerTask
 
         p = self.resolve_params(params)
         rec_name, actual_well_id = self.split_compound_well_id(well_id)
@@ -154,16 +162,16 @@ class BurstDetectionTask(BaseAnalysisTask):
             rec_name,
             actual_well_id,
         )
-        spike_times_path = curation_dir / "curated_spike_times.npy"
-        if not spike_times_path.exists():
-            raise FileNotFoundError(
-                f"curated_spike_times.npy not found at {spike_times_path}. "
-                "Ensure auto_curation has completed successfully."
-            )
-
-        spike_times: dict = np.load(  # type: ignore[call-overload]
-            spike_times_path, allow_pickle=True
-        ).item()
+        analyzer_path = AnalyzerTask.build_output_path(
+            p["analyzer_output_root"],
+            recording_key,
+            rec_name,
+            actual_well_id,
+        )
+        spike_times = load_spike_times(
+            curation_dir, analyzer_path, logger,
+            well_label=f"{recording_key}/{rec_name}/{actual_well_id}",
+        )
 
         config = BurstDetectorConfig(
             gamma=float(p["gamma"]),

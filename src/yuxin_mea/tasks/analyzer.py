@@ -172,6 +172,14 @@ class AnalyzerTask(BaseAnalysisTask):
                 "ms_after": float(p["ms_after"]),
             },
             "unit_locations": {"method": str(p["unit_locations_method"])},
+            "quality_metrics": {
+                "metric_names": [
+                    "presence_ratio",
+                    "rp_contamination",
+                    "firing_rate",
+                    "amplitude_median",
+                ],
+            },
         }
 
         analyzer.compute(ext_list, extension_params=ext_params, n_jobs=int(p["n_jobs"]))

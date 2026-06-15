@@ -138,6 +138,7 @@ class BurstDetectionTaskRunTests(unittest.TestCase):
 
         params = {
             "curation_output_root": str(tmp_path / "curation"),
+            "analyzer_output_root": str(tmp_path / "analyzer"),
             "output_root": str(tmp_path / "burst"),
         }
         if extra_params:
@@ -180,7 +181,7 @@ class BurstDetectionTaskRunTests(unittest.TestCase):
             cfg: BurstDetectorConfig = call_kwargs["config"]
         self.assertAlmostEqual(cfg.extent_frac, 0.55)
 
-    def test_run_raises_when_curation_output_missing(self):
+    def test_run_raises_when_both_curation_and_analyzer_missing(self):
         with TemporaryDirectory() as tmp:
             task = BurstDetectionTask()
             with self.assertRaises(FileNotFoundError):
@@ -190,6 +191,7 @@ class BurstDetectionTaskRunTests(unittest.TestCase):
                     Path(tmp) / "data.h5",
                     {
                         "curation_output_root": str(Path(tmp) / "does_not_exist"),
+                        "analyzer_output_root": str(Path(tmp) / "also_missing"),
                         "output_root": str(Path(tmp) / "burst"),
                     },
                 )
@@ -208,7 +210,7 @@ class BurstDetectionTaskMetadataTests(unittest.TestCase):
         self.assertEqual(BurstDetectionTask.task_name, "burst_detection")
 
     def test_dependencies(self):
-        self.assertEqual(BurstDetectionTask.dependencies, ["auto_curation"])
+        self.assertEqual(BurstDetectionTask.dependencies, ["analyzer"])
 
 
 if __name__ == "__main__":
