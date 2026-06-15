@@ -54,6 +54,10 @@ class BatchResults:
       before/after comparisons.
 
     ``recording_names`` returns a sorted list for stable iteration order.
+
+    ``method`` indicates which detector produced the results. Diagnostic
+    figures that require ``IterativeBurstTrace`` check this field and return
+    empty figures for non-iterative methods.
     """
 
     spike_times: dict[str, dict] = field(default_factory=dict)
@@ -61,10 +65,13 @@ class BatchResults:
     results: dict[str, Any] = field(default_factory=dict)
     traces_no_gate: dict[str, IterativeBurstTrace] = field(default_factory=dict)
     results_no_gate: dict[str, Any] = field(default_factory=dict)
+    method: str = "iterative"
 
     @property
     def recording_names(self) -> list[str]:
-        return sorted(self.traces.keys())
+        if self.traces:
+            return sorted(self.traces.keys())
+        return sorted(self.results.keys())
 
     def trace(self, name: str, kind: str = "default") -> IterativeBurstTrace:
         return self.traces[name] if kind == "default" else self.traces_no_gate[name]
@@ -1358,6 +1365,50 @@ def save_all_section_htmls(
     return saved
 
 
+def fig_generic_summary(batch: BatchResults) -> go.Figure:
+    """Bar chart of burstlet / network burst counts per recording."""
+    names = batch.recording_names
+    if not names:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="(no recordings)", xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False, font=dict(size=14, color="#888"),
+        )
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
+        fig.update_layout(height=300, margin=dict(l=20, r=20, t=40, b=20))
+        return fig
+
+    n_burstlets = []
+    n_network = []
+    for name in names:
+        res = batch.results.get(name)
+        if res is not None:
+            n_burstlets.append(len(res.burstlets))
+            n_network.append(len(res.network_bursts))
+        else:
+            n_burstlets.append(0)
+            n_network.append(0)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=names, y=n_burstlets, name="burstlets", marker_color="#1f77b4",
+    ))
+    fig.add_trace(go.Bar(
+        x=names, y=n_network, name="network bursts", marker_color="#ff7f0e",
+    ))
+    fig.update_layout(
+        title=f"{batch.method} burst detection — event counts per recording",
+        barmode="group",
+        height=400,
+        margin=dict(l=60, r=20, t=60, b=100),
+        xaxis_title="recording",
+        yaxis_title="count",
+        xaxis_tickangle=-45,
+    )
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Disk cache for BatchResults (so dashboard reloads don't recompute)
 # ---------------------------------------------------------------------------
@@ -1381,11 +1432,44 @@ def cache_path(analysis_root: Path, key: str) -> Path:
     return Path(analysis_root) / "burst_diagnostic_cache" / f"{key}.pkl"
 
 
+def run_batch_generic(
+    sources: list[Path],
+    method: str,
+    labels: set[str] | None = frozenset({"good"}),
+    verbose: bool = True,
+) -> BatchResults:
+    """Run a non-iterative burst detector on every source.
+
+    Supports ``"traditional"`` and ``"ml"`` methods. Returns a BatchResults
+    with ``results`` populated but empty ``traces`` (no iterative trace).
+    """
+    batch = BatchResults(method=method)
+    for source in sources:
+        name = source.name if source.is_dir() else source.parent.name
+        st = load_kilosort_spike_times(source, labels=labels)
+        batch.spike_times[name] = st
+
+        if method == "traditional":
+            from yuxin_mea.analysis.burst_detector import compute_network_bursts
+            res = compute_network_bursts(st)
+        elif method == "ml":
+            from yuxin_mea.analysis.ml_burst_detector import compute_ml_bursts
+            res = compute_ml_bursts(st)
+        else:
+            raise ValueError(f"Unknown method: {method!r}")
+
+        batch.results[name] = res
+        if verbose:
+            print(f"{name}  {method}: {len(res.burstlets)} burstlets")
+    return batch
+
+
 def load_or_run_batch(
     root: Path,
     analysis_root: Path | None,
     *,
     force_recompute: bool = False,
+    method: str = "iterative",
 ) -> tuple[BatchResults, bool]:
     """Return ``(batch, came_from_cache)``. Writes the cache on a fresh run.
 
@@ -1401,14 +1485,21 @@ def load_or_run_batch(
     if not sources:
         raise FileNotFoundError(f"No Kilosort sources under {root}")
 
+    ck = f"{cache_key(root)}_{method}"
     cache_file: Path | None = None
     if analysis_root is not None:
-        cache_file = cache_path(analysis_root, cache_key(root))
+        cache_file = cache_path(analysis_root, ck)
         if not force_recompute and cache_file.exists():
             with cache_file.open("rb") as fh:
                 return pickle.load(fh), True
 
-    batch = run_batch(sources, labels=frozenset({"good"}), verbose=False)
+    if method == "iterative":
+        batch = run_batch(sources, labels=frozenset({"good"}), verbose=False)
+    else:
+        batch = run_batch_generic(
+            sources, method=method, labels=frozenset({"good"}), verbose=False,
+        )
+
     if cache_file is not None:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         with cache_file.open("wb") as fh:

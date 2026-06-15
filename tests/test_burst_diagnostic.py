@@ -94,7 +94,7 @@ def test_load_or_run_batch_writes_and_reads_cache():
             batch1, from_cache1 = load_or_run_batch(ks_root, analysis_root)
         assert from_cache1 is False
         assert mock_run.call_count == 1
-        assert cache_path(analysis_root, cache_key(ks_root)).exists()
+        assert cache_path(analysis_root, f"{cache_key(ks_root)}_iterative").exists()
 
         # Second call: cache hit → run_batch NOT called.
         with patch(
@@ -124,7 +124,7 @@ def test_load_or_run_batch_force_recompute_bypasses_cache_and_overwrites():
         ):
             load_or_run_batch(ks_root, analysis_root)
 
-        cache_file = cache_path(analysis_root, cache_key(ks_root))
+        cache_file = cache_path(analysis_root, f"{cache_key(ks_root)}_iterative")
         assert cache_file.exists()
 
         # force_recompute=True → call run_batch even though cache exists,

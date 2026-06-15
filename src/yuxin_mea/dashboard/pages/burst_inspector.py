@@ -1,9 +1,16 @@
 """Per-well Burst inspector page.
 
-Single-well, disk-first inspector for the iterative burst detector.
-Reads ``debug_trace.pkl`` written by ``IterativeBurstDetectionTask`` (when
-``debug=True``); falls back to an on-demand in-process recompute when the
-debug artifacts are missing — same UI either way.
+Single-well inspector supporting three burst detection methods:
+- **iterative** — full diagnostic traces with iteration slider, LDA/GMM views
+- **traditional** — standard BurstResults only (no debug trace)
+- **ml** — standard BurstResults + optional MLBurstTrace
+
+For iterative, reads ``debug_trace.pkl`` written by
+``IterativeBurstDetectionTask`` (when ``debug=True``); falls back to an
+on-demand in-process recompute when debug artifacts are missing.
+
+For traditional/ML, loads the standard pickle output (burstlets.pkl,
+plot_signals.npy, etc.) and shows simplified diagnostic views.
 
 State held in two server-side stores:
 - ``burst-insp-bundle-key`` (Store): hash key into ``_BUNDLE_CACHE``.
@@ -21,7 +28,11 @@ from dash import Input, Output, State, callback, ctx, dcc, html
 from flask import current_app
 
 from yuxin_mea.analysis.burst_inspector import (
+    METHOD_SUBDIRS,
+    METHOD_TASK_NAMES,
+    METHOD_TERMINALS,
     InspectorBundle,
+    fig_composite_basic,
     fig_composite_with_threshold,
     fig_event_gmm_clusters,
     fig_iteration_trajectory,
@@ -29,6 +40,8 @@ from yuxin_mea.analysis.burst_inspector import (
     fig_pca_feature_space,
     fig_per_bin_gmm_strip,
     fig_raster,
+    fig_raster_basic,
+    load_generic_bundle,
     load_inspector_bundle,
     summary_card,
 )
@@ -53,6 +66,23 @@ _EMPTY_FIGURE = go.Figure().update_layout(
     margin={"l": 20, "r": 20, "t": 20, "b": 20}, height=240,
 )
 
+_NA_FIGURE = go.Figure().update_layout(
+    annotations=[{
+        "text": "(only available for iterative method)",
+        "xref": "paper", "yref": "paper",
+        "x": 0.5, "y": 0.5, "showarrow": False,
+        "font": {"size": 14, "color": "#84807a"},
+    }],
+    xaxis={"visible": False}, yaxis={"visible": False},
+    margin={"l": 20, "r": 20, "t": 20, "b": 20}, height=160,
+)
+
+_METHOD_OPTIONS = [
+    {"label": "traditional", "value": "traditional"},
+    {"label": "iterative", "value": "iterative"},
+    {"label": "ml", "value": "ml"},
+]
+
 
 # ---------------------------------------------------------------------------
 # Layout
@@ -75,14 +105,13 @@ layout = html.Div([
             html.Div([
                 html.Div([
                     html.Span("workspace"),
-                    html.Span("iterative_burst_detection"),
+                    html.Span("burst_detection"),
                     html.Span("inspector"),
                 ], className="breadcrumb"),
                 html.H1("Burst inspector"),
                 html.Div(
-                    "Single-well diagnostic for the iterative burst detector. "
-                    "Reads `debug_trace.pkl` when present; otherwise recomputes "
-                    "on demand (slower).",
+                    "Single-well diagnostic for burst detectors. "
+                    "Select a method, then a recording and well.",
                     className="subtitle",
                 ),
             ]),
@@ -90,15 +119,24 @@ layout = html.Div([
         className="view-head",
     ),
 
-    # Control strip: root, recording, well, iteration, status
     html.Div(id="burst-insp-root-status",
              style={"color": "var(--ink-3)", "fontFamily": "var(--font-mono)",
                     "fontSize": "11px", "marginBottom": "8px"}),
+
+    # Method selector + root input + rescan
     html.Div([
+        html.Label("Method:", className="section-label",
+                   style={"marginBottom": "0"}),
+        html.Div(dcc.Dropdown(
+            id="burst-insp-method-dropdown",
+            options=_METHOD_OPTIONS,
+            value="iterative",
+            clearable=False,
+        ), style={"width": "140px"}),
         dcc.Input(
             id="burst-insp-root-input", value="", type="text",
-            placeholder="iterative_burst_detection output_root",
-            style={**_input_style(), "flex": "1 1 480px", "marginRight": "8px"},
+            placeholder="output_root",
+            style={**_input_style(), "flex": "1 1 480px"},
         ),
         html.Button("Rescan", id="burst-insp-rescan-btn",
                     n_clicks=0, className="btn primary"),
@@ -110,6 +148,7 @@ layout = html.Div([
     ], style={"display": "flex", "alignItems": "center", "gap": "6px",
               "marginBottom": "12px"}),
 
+    # Recording / well / iteration controls
     html.Div([
         html.Label("Recording", className="section-label",
                    style={"marginRight": "6px"}),
@@ -124,11 +163,13 @@ layout = html.Div([
                  style={"width": "160px"}),
         html.Span(style={"display": "inline-block", "width": "16px"}),
         html.Label("Iteration", className="section-label",
+                   id="burst-insp-iter-label-title",
                    style={"marginRight": "6px"}),
         html.Div(dcc.Slider(id="burst-insp-iter-slider",
                             min=0, max=19, step=1, value=19,
                             tooltip={"placement": "bottom",
                                      "always_visible": False}),
+                 id="burst-insp-iter-slider-container",
                  style={"width": "260px"}),
         html.Span(id="burst-insp-iter-label",
                   style={"marginLeft": "8px", "color": "var(--ink-3)",
@@ -210,21 +251,17 @@ def _resolve_under_analysis_root(raw: str | None) -> Path | None:
     return Path(root) / p
 
 
-def _discover_wells(output_root: Path) -> dict[str, list[tuple[str, str, str]]]:
-    """Walk ``output_root`` and group ``(recording_key, rec_name, well_id)`` by recording.
-
-    Recording key may itself contain slashes (e.g. ``Sample/Date/Plate/Type/RunID``).
-    We pin to ``.../iterative_burst_detection`` directories and back out the
-    last two parts (rec_name, well_id), treating everything in between as
-    the multi-segment recording key.
-    """
+def _discover_wells(
+    output_root: Path,
+    terminal: str = "iterative_burst_detection",
+) -> dict[str, list[tuple[str, str, str]]]:
+    """Walk ``output_root`` and group ``(recording_key, rec_name, well_id)`` by recording."""
     if not output_root.exists() or not output_root.is_dir():
         return {}
     grouped: dict[str, list[tuple[str, str, str]]] = {}
-    for ibd in output_root.rglob("iterative_burst_detection"):
+    for ibd in output_root.rglob(terminal):
         if not ibd.is_dir():
             continue
-        # parent layout: <output_root>/<recording_key>/<rec_name>/<well_id>/iterative_burst_detection
         try:
             rel = ibd.parent.relative_to(output_root)
         except ValueError:
@@ -246,11 +283,7 @@ def _bundle_key(root: str, rec_key: str, rec_name: str, well_id: str) -> str:
 
 
 def _config_for(rec_key: str, rec_name: str, well_id: str) -> IterativeBurstConfig:
-    """Build an IterativeBurstConfig from the user's pipeline config.
-
-    Falls back to defaults if the task block is missing. On-demand fallback
-    needs this so the recompute matches what the task would have produced.
-    """
+    """Build an IterativeBurstConfig from the user's pipeline config."""
     cm = _load_config_manager()
     params = cm.get_task_params("iterative_burst_detection") or {}
     defaults = IterativeBurstConfig()
@@ -309,27 +342,29 @@ def _curated_spike_times_path(rec_key: str, rec_name: str, well_id: str) -> Path
 @callback(
     Output("burst-insp-root-input", "value"),
     Output("burst-insp-root-status", "children"),
-    Input("burst-insp-root-input", "id"),
+    Input("burst-insp-method-dropdown", "value"),
 )
-def _prefill_root(_id: str):
-    """Auto-fill output_root from config (then conventional fallback)."""
-    ctx = _yuxin_ctx()
-    analysis_root = ctx.get("analysis_root")
+def _prefill_root(method: str | None):
+    """Auto-fill output_root from config based on selected method."""
+    method = method or "iterative"
+    ctx_app = _yuxin_ctx()
+    analysis_root = ctx_app.get("analysis_root")
     if analysis_root is None:
         return "", "(analysis_root not set in config — set output_root manually.)"
+
+    task_name = METHOD_TASK_NAMES.get(method, "iterative_burst_detection")
+    subdir = METHOD_SUBDIRS.get(method, "iterative_burst_data")
+
     cm = _load_config_manager()
-    params = cm.get_task_params("iterative_burst_detection") or {}
+    params = cm.get_task_params(task_name) or {}
     raw = params.get("output_root")
     p = _resolve_under_analysis_root(raw) if raw else None
     if p is not None and p.exists():
-        return str(p), f"Default from `iterative_burst_detection.output_root`: {p}"
-    fallback = Path(analysis_root) / "iterative_burst_data"
+        return str(p), f"Default from `{task_name}.output_root`: {p}"
+    fallback = Path(analysis_root) / subdir
     if fallback.exists():
         return str(fallback), f"Default from convention: {fallback}"
-    return "", (
-        "No iterative_burst_detection output directory found. "
-        "Re-run the task with debug=True, or set output_root manually."
-    )
+    return "", f"No {task_name} output directory found. Set output_root manually."
 
 
 @callback(
@@ -337,15 +372,15 @@ def _prefill_root(_id: str):
     Output("burst-insp-rec-dropdown", "value"),
     Input("burst-insp-root-input", "value"),
     Input("burst-insp-rescan-btn", "n_clicks"),
+    State("burst-insp-method-dropdown", "value"),
 )
-def _populate_recordings(root: str, _n: int):
-    # Rescan should invalidate stale bundles so the user sees fresh debug
-    # artifacts after a task re-run with debug=True.
+def _populate_recordings(root: str, _n: int, method: str | None):
     if ctx.triggered_id == "burst-insp-rescan-btn":
         _BUNDLE_CACHE.clear()
     if not root:
         return [], None
-    grouped = _discover_wells(Path(root))
+    terminal = METHOD_TERMINALS.get(method or "iterative", "iterative_burst_detection")
+    grouped = _discover_wells(Path(root), terminal=terminal)
     if not grouped:
         return [], None
     rec_keys = sorted(grouped.keys())
@@ -358,11 +393,13 @@ def _populate_recordings(root: str, _n: int):
     Output("burst-insp-well-dropdown", "value"),
     Input("burst-insp-rec-dropdown", "value"),
     State("burst-insp-root-input", "value"),
+    State("burst-insp-method-dropdown", "value"),
 )
-def _populate_wells(rec_key: str | None, root: str | None):
+def _populate_wells(rec_key: str | None, root: str | None, method: str | None):
     if not (rec_key and root):
         return [], None
-    grouped = _discover_wells(Path(root))
+    terminal = METHOD_TERMINALS.get(method or "iterative", "iterative_burst_detection")
+    grouped = _discover_wells(Path(root), terminal=terminal)
     triples = grouped.get(rec_key, [])
     options = [
         {"label": f"{rec_name}/{well_id}",
@@ -381,8 +418,14 @@ def _populate_wells(rec_key: str | None, root: str | None):
     Input("burst-insp-rec-dropdown", "value"),
     Input("burst-insp-well-dropdown", "value"),
     State("burst-insp-root-input", "value"),
+    State("burst-insp-method-dropdown", "value"),
 )
-def _load_bundle(rec_key: str | None, well_value: str | None, root: str | None):
+def _load_bundle(
+    rec_key: str | None,
+    well_value: str | None,
+    root: str | None,
+    method: str | None,
+):
     badge_base = {
         "marginLeft": "12px", "padding": "2px 10px",
         "borderRadius": "10px", "fontFamily": "var(--font-mono)",
@@ -392,34 +435,18 @@ def _load_bundle(rec_key: str | None, well_value: str | None, root: str | None):
         return None, "none", "no well", {**badge_base,
                                           "background": "var(--bg-2)",
                                           "color": "var(--ink-3)"}
+    method = method or "iterative"
     rec_name, well_id = well_value.split("|", 1)
-    config = _config_for(rec_key, rec_name, well_id)
-
-    # Probe for the disk pickle first so we only pay the curated spike-time
-    # load on the actual fallback path. Saves a multi-MB read per well
-    # switch on the common (debug=True ran) case.
-    output_dir = (
-        Path(root) / rec_key / rec_name / well_id / "iterative_burst_detection"
-    )
-    disk_hit = (output_dir / "debug_trace.pkl").exists()
-
-    spike_times_for_fallback = None
-    if not disk_hit:
-        sp_path = _curated_spike_times_path(rec_key, rec_name, well_id)
-        if sp_path is not None:
-            try:
-                spike_times_for_fallback = np.load(sp_path, allow_pickle=True).item()
-            except Exception:
-                spike_times_for_fallback = None
 
     try:
-        bundle = load_inspector_bundle(
-            Path(root), rec_key, rec_name, well_id,
-            on_demand_spike_times=spike_times_for_fallback,
-            on_demand_config=config,
-        )
+        if method == "iterative":
+            bundle = _load_iterative_bundle(root, rec_key, rec_name, well_id)
+        else:
+            bundle = load_generic_bundle(
+                Path(root), rec_key, rec_name, well_id, method=method,
+            )
     except FileNotFoundError as exc:
-        return None, "none", f"❌ {exc}", {
+        return None, "none", f"error: {exc}", {
             **badge_base, "background": "#fdecec", "color": "#c62828"
         }
 
@@ -435,21 +462,57 @@ def _load_bundle(rec_key: str | None, well_value: str | None, root: str | None):
     }
 
 
+def _load_iterative_bundle(
+    root: str, rec_key: str, rec_name: str, well_id: str,
+) -> InspectorBundle:
+    """Load iterative bundle with disk-first + on-demand fallback."""
+    config = _config_for(rec_key, rec_name, well_id)
+    output_dir = (
+        Path(root) / rec_key / rec_name / well_id / "iterative_burst_detection"
+    )
+    disk_hit = (output_dir / "debug_trace.pkl").exists()
+
+    spike_times_for_fallback = None
+    if not disk_hit:
+        sp_path = _curated_spike_times_path(rec_key, rec_name, well_id)
+        if sp_path is not None:
+            try:
+                spike_times_for_fallback = np.load(sp_path, allow_pickle=True).item()
+            except Exception:
+                spike_times_for_fallback = None
+
+    return load_inspector_bundle(
+        Path(root), rec_key, rec_name, well_id,
+        on_demand_spike_times=spike_times_for_fallback,
+        on_demand_config=config,
+    )
+
+
 @callback(
     Output("burst-insp-iter-label", "children"),
+    Output("burst-insp-iter-slider-container", "style"),
+    Output("burst-insp-iter-label-title", "style"),
     Input("burst-insp-bundle-key", "data"),
     Input("burst-insp-iter-slider", "value"),
 )
 def _iter_label(bundle_key: str | None, slider_value: int):
+    hidden = {"display": "none"}
+    visible_slider = {"width": "260px"}
+    visible_label = {"marginRight": "6px"}
+
     if not bundle_key or bundle_key not in _BUNDLE_CACHE:
-        return ""
+        return "", hidden, hidden
     bundle = _BUNDLE_CACHE[bundle_key]
+
+    if bundle.method != "iterative" or bundle.trace is None:
+        return "", hidden, hidden
+
     n = len(bundle.trace.iterations)
     if n == 0:
-        return "(no iterations)"
+        return "(no iterations)", visible_slider, visible_label
     eff = min(int(slider_value or 0), n - 1)
     suffix = " (final)" if eff == n - 1 else ""
-    return f"iter {eff} / {n - 1}{suffix}"
+    return f"iter {eff} / {n - 1}{suffix}", visible_slider, visible_label
 
 
 def _render_summary(bundle: InspectorBundle) -> Any:
@@ -458,7 +521,7 @@ def _render_summary(bundle: InspectorBundle) -> Any:
     rows = []
     for k, v in data.items():
         if isinstance(v, dict):
-            v = ", ".join(f"{kk}={vv}" for kk, vv in v.items()) or "—"
+            v = ", ".join(f"{kk}={vv}" for kk, vv in v.items()) or "---"
         elif isinstance(v, float):
             v = f"{v:.4g}"
         rows.append(html.Tr([
@@ -498,6 +561,19 @@ def _render_tabs(bundle_key: str | None, iteration: int | None):
         return ("(no well selected)", empty, empty, empty, empty, empty, empty, empty)
 
     bundle = _BUNDLE_CACHE[bundle_key]
+
+    if bundle.method != "iterative" or bundle.trace is None:
+        return (
+            _render_summary(bundle),
+            fig_composite_basic(bundle),
+            fig_raster_basic(bundle),
+            _NA_FIGURE,
+            _NA_FIGURE,
+            _NA_FIGURE,
+            _NA_FIGURE,
+            _NA_FIGURE,
+        )
+
     it: int | str = "final"
     if iteration is not None:
         n = len(bundle.trace.iterations)

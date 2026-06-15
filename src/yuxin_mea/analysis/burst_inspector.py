@@ -1,8 +1,13 @@
-"""Per-well diagnostic library for the iterative burst detector.
+"""Per-well diagnostic library for burst detectors.
 
 Pure-library figure builders used by
 ``yuxin_mea.dashboard.pages.burst_inspector``. No Dash imports — so the same
 figures can be rendered in notebooks/HTML reports.
+
+Supports three methods:
+- **iterative** — full diagnostic traces (iterations, LDA, GMM)
+- **traditional** — standard BurstResults only (no debug trace)
+- **ml** — standard BurstResults + optional MLBurstTrace
 
 Public API:
 - ``InspectorBundle`` — dataclass holding everything one panel needs.
@@ -28,6 +33,27 @@ from yuxin_mea.analysis.iterative_burst_detector import (
     compute_iterative_bursts,
 )
 
+# Method → terminal directory name inside each well's output path.
+METHOD_TERMINALS: dict[str, str] = {
+    "traditional": "burst_detection",
+    "iterative": "iterative_burst_detection",
+    "ml": "ml_burst_detection",
+}
+
+# Method → pipeline config task name (for output_root lookup).
+METHOD_TASK_NAMES: dict[str, str] = {
+    "traditional": "burst_detection",
+    "iterative": "iterative_burst_detection",
+    "ml": "ml_burst_detection",
+}
+
+# Method → conventional subdir under analysis_root (fallback).
+METHOD_SUBDIRS: dict[str, str] = {
+    "traditional": "burst_detection_data",
+    "iterative": "iterative_burst_data",
+    "ml": "ml_burst_data",
+}
+
 
 # ---------------------------------------------------------------------------
 # Bundle + loader
@@ -41,17 +67,25 @@ class InspectorBundle:
     ``source`` lets the page show a "disk" vs "on-demand" status badge so the
     user knows whether they're looking at persisted task output or a live
     in-process re-run.
+
+    ``method`` indicates which detector produced the data. Algorithm-specific
+    tabs are rendered only when the matching method is active.
+
+    For non-iterative methods, ``trace`` and ``config`` are ``None`` and
+    ``results`` holds the standard ``BurstResults``.
     """
 
-    trace: IterativeBurstTrace
+    trace: IterativeBurstTrace | None
     spike_times: dict[str, np.ndarray]
     burstlets: pd.DataFrame
-    config: IterativeBurstConfig
+    config: IterativeBurstConfig | None
     recording_key: str
     rec_name: str
     well_id: str
     source: Literal["disk", "on_demand"]
+    method: str = "iterative"
     output_dir: Path | None = None
+    results: Any = None  # BurstResults — stored for non-iterative summary_card
 
 
 def _try_load_disk(
@@ -159,6 +193,48 @@ def load_inspector_bundle(
         well_id=well_id,
         source="on_demand",
         output_dir=output_dir if output_dir.exists() else None,
+    )
+
+
+def load_generic_bundle(
+    output_root: Path,
+    recording_key: str,
+    rec_name: str,
+    well_id: str,
+    method: str,
+) -> InspectorBundle:
+    """Load a BurstResults bundle for any detector method.
+
+    Used by the dashboard when the user picks traditional or ML. Reads the
+    standard pickle output (burstlets.pkl, metrics.json, etc.) without
+    requiring a debug trace.
+    """
+    from yuxin_mea.analysis.burst_output import PickleBurstOutputWriter
+
+    terminal = METHOD_TERMINALS[method]
+    output_dir = Path(output_root) / recording_key / rec_name / well_id / terminal
+    if not output_dir.exists():
+        raise FileNotFoundError(f"No output at {output_dir}")
+
+    results = PickleBurstOutputWriter().read(output_dir)
+
+    spike_times: dict[str, np.ndarray] = {}
+    spikes_path = output_dir / "debug_spike_times.npy"
+    if spikes_path.exists():
+        spike_times = np.load(spikes_path, allow_pickle=True).item()
+
+    return InspectorBundle(
+        trace=None,
+        spike_times=spike_times,
+        burstlets=results.burstlets,
+        config=None,
+        recording_key=recording_key,
+        rec_name=rec_name,
+        well_id=well_id,
+        source="disk",
+        method=method,
+        output_dir=output_dir,
+        results=results,
     )
 
 
@@ -803,6 +879,9 @@ def fig_label_comparison_table(bundle: InspectorBundle) -> go.Figure:
 
 def summary_card(bundle: InspectorBundle) -> dict[str, Any]:
     """Compact summary of detector state — rendered as a KV card by the page."""
+    if bundle.method != "iterative" or bundle.trace is None:
+        return _summary_card_generic(bundle)
+
     trace = bundle.trace
     df = _classify_events(trace)
     kill_breakdown = (
@@ -818,6 +897,7 @@ def summary_card(bundle: InspectorBundle) -> dict[str, Any]:
     return {
         "well": f"{bundle.recording_key} / {bundle.rec_name} / {bundle.well_id}",
         "source": bundle.source,
+        "method": bundle.method,
         "n_units": len(bundle.spike_times),
         "n_iterations_run": n_iter,
         "converged": converged,
@@ -831,3 +911,107 @@ def summary_card(bundle: InspectorBundle) -> dict[str, Any]:
         "cluster_events_enabled": bool(bundle.config.cluster_events),
         "bin_size_s": trace.bin_size,
     }
+
+
+def _summary_card_generic(bundle: InspectorBundle) -> dict[str, Any]:
+    """Summary card for traditional / ML bundles (no iterative trace)."""
+    card: dict[str, Any] = {
+        "well": f"{bundle.recording_key} / {bundle.rec_name} / {bundle.well_id}",
+        "source": bundle.source,
+        "method": bundle.method,
+        "n_units": len(bundle.spike_times) if bundle.spike_times else "n/a",
+        "n_burstlets": int(len(bundle.burstlets)),
+    }
+    if bundle.results is not None:
+        card["n_network_bursts"] = int(len(bundle.results.network_bursts))
+        card["n_superbursts"] = int(len(bundle.results.superbursts))
+        for key in ("n_units", "adaptive_bin_ms", "burst_activity_detected"):
+            val = bundle.results.diagnostics.get(key)
+            if val is not None:
+                card[key] = val
+    return card
+
+
+# ---------------------------------------------------------------------------
+# Basic figures for non-iterative methods
+# ---------------------------------------------------------------------------
+
+
+def fig_raster_basic(bundle: InspectorBundle, max_units: int = 64) -> go.Figure:
+    """Spike raster with burstlet event overlays — no iteration trace needed."""
+    spike_times = bundle.spike_times
+    if not spike_times:
+        return _empty_figure("No spike times available.")
+
+    sp_by_uid = _spike_times_by_str_uid(spike_times)
+    unit_ids = sorted(sp_by_uid.keys())
+    if len(unit_ids) > max_units:
+        step = len(unit_ids) // max_units
+        unit_ids = unit_ids[::step][:max_units]
+
+    fig = go.Figure()
+    for row, uid in enumerate(unit_ids):
+        spikes = np.asarray(sp_by_uid.get(uid, []), dtype=float)
+        if spikes.size == 0:
+            continue
+        fig.add_trace(go.Scattergl(
+            x=spikes, y=np.full(spikes.size, row),
+            mode="markers",
+            marker=dict(size=2.5, color="#222", line=dict(width=0)),
+            hoverinfo="skip", showlegend=False, name=uid,
+        ))
+
+    for _, evt in bundle.burstlets.iterrows():
+        fig.add_vrect(
+            x0=float(evt["start"]), x1=float(evt["end"]),
+            fillcolor="rgba(220, 80, 60, 0.12)", line_width=0, layer="below",
+        )
+
+    fig.update_layout(
+        height=max(220, 12 * len(unit_ids)),
+        margin=dict(l=40, r=20, t=20, b=40),
+        xaxis_title="time (s)", yaxis_title="unit", plot_bgcolor="white",
+    )
+    fig.update_yaxes(
+        tickmode="array", tickvals=list(range(len(unit_ids))),
+        ticktext=unit_ids, autorange="reversed",
+    )
+    return fig
+
+
+def fig_composite_basic(bundle: InspectorBundle) -> go.Figure:
+    """Composite signal from plot_data with burstlet event overlays."""
+    if bundle.results is None or not bundle.results.plot_data:
+        return _empty_figure("No plot data available.")
+
+    pd_data = bundle.results.plot_data
+    t = np.asarray(pd_data.get("t", []), dtype=float)
+    if t.size == 0:
+        return _empty_figure("Empty time axis in plot data.")
+
+    fig = go.Figure()
+    for key, label, color in [
+        ("participation_signal", "participation", "#1f77b4"),
+        ("rate_signal", "PFR", "#ff7f0e"),
+    ]:
+        y = pd_data.get(key)
+        if y is not None:
+            fig.add_trace(go.Scattergl(
+                x=t, y=np.asarray(y, dtype=float),
+                mode="lines", name=label,
+                line=dict(width=1.5, color=color),
+            ))
+
+    for _, evt in bundle.burstlets.iterrows():
+        fig.add_vrect(
+            x0=float(evt["start"]), x1=float(evt["end"]),
+            fillcolor="rgba(220, 80, 60, 0.12)", line_width=0, layer="below",
+        )
+
+    fig.update_layout(
+        height=300,
+        margin=dict(l=40, r=20, t=20, b=40),
+        xaxis_title="time (s)", yaxis_title="signal",
+        plot_bgcolor="white", legend=dict(orientation="h", y=1.02),
+    )
+    return fig

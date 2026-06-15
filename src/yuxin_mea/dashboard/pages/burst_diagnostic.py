@@ -24,6 +24,7 @@ from yuxin_mea.analysis.burst_diagnostic import (
     BatchResults,
     cache_key,
     fig_cross_stage_flow,
+    fig_generic_summary,
     fig_kill_attribution,
     fig_section_c_lda_pca,
     fig_section_d_boundary_shift,
@@ -74,8 +75,10 @@ layout = html.Div([
                     ),
                     html.H1("Burst diagnostic"),
                     html.Div(
-                        "Iterative burst detector per-stage diagnostics. First "
-                        "load may take a few minutes; cached afterwards.",
+                        "Burst detector per-stage diagnostics. "
+                        "Full diagnostic views for iterative method; "
+                        "summary views for traditional/ML. "
+                        "First load may take a few minutes; cached afterwards.",
                         className="subtitle",
                     ),
                 ]
@@ -87,10 +90,22 @@ layout = html.Div([
              style={"color": "var(--ink-3)", "fontFamily": "var(--font-mono)",
                     "fontSize": "11px", "marginBottom": "8px"}),
     html.Div([
+        html.Label("Method:", className="section-label",
+                   style={"marginBottom": "0"}),
+        html.Div(dcc.Dropdown(
+            id="burst-diag-method-dropdown",
+            options=[
+                {"label": "traditional", "value": "traditional"},
+                {"label": "iterative", "value": "iterative"},
+                {"label": "ml", "value": "ml"},
+            ],
+            value="iterative",
+            clearable=False,
+        ), style={"width": "140px"}),
         dcc.Input(
             id="burst-diag-root-input", value="", type="text",
-            placeholder="Kilosort root directory",
-            style={"flex": "1 1 480px", "marginRight": "8px",
+            placeholder="Spike-source root directory",
+            style={"flex": "1 1 480px",
                    "fontFamily": "var(--font-mono)", "fontSize": "12px",
                    "padding": "4px 10px",
                    "background": "var(--bg)", "color": "var(--ink)",
@@ -236,33 +251,48 @@ def _prefill_default_root(_id: str):
     Input("burst-diag-load-btn", "n_clicks"),
     Input("burst-diag-recompute-btn", "n_clicks"),
     State("burst-diag-root-input", "value"),
+    State("burst-diag-method-dropdown", "value"),
     prevent_initial_call=True,
 )
-def _load_or_recompute(_l: int, _r: int, root: str):
+def _load_or_recompute(_l: int, _r: int, root: str, method: str | None):
     if not root:
-        return dash.no_update, "Please set a Kilosort root first."
+        return dash.no_update, "Please set a spike-source root first."
 
+    method = method or "iterative"
     force = ctx.triggered_id == "burst-diag-recompute-btn"
     analysis_root = current_app.config.get("YUXIN_MEA", {}).get("analysis_root")
     try:
         batch, from_cache = load_or_run_batch(
-            Path(root), analysis_root, force_recompute=force,
+            Path(root), analysis_root,
+            force_recompute=force, method=method,
         )
     except FileNotFoundError as exc:
-        return dash.no_update, f"❌ {exc}"
+        return dash.no_update, f"error: {exc}"
 
-    key = cache_key(Path(root))
+    key = f"{cache_key(Path(root))}_{method}"
     _LOADED_BATCHES[key] = batch
     if analysis_root is None:
         suffix = "(fresh run — no cache; analysis_root not set)"
     else:
         suffix = "(from cache)" if from_cache else "(fresh run)"
-    return key, f"✓ Loaded {len(batch.recording_names)} recording(s) {suffix}"
+    return key, f"Loaded {len(batch.recording_names)} recording(s) [{method}] {suffix}"
 
 
 # ---------------------------------------------------------------------------
 # 3) batch_key → recording dropdown + cross-recording figures
 # ---------------------------------------------------------------------------
+
+
+_NA_FIGURE = go.Figure().update_layout(
+    annotations=[{
+        "text": "(only available for iterative method)",
+        "xref": "paper", "yref": "paper",
+        "x": 0.5, "y": 0.5, "showarrow": False,
+        "font": {"size": 14, "color": "#84807a"},
+    }],
+    xaxis={"visible": False}, yaxis={"visible": False},
+    margin={"l": 20, "r": 20, "t": 20, "b": 20}, height=160,
+)
 
 
 @callback(
@@ -280,6 +310,11 @@ def _populate_cross_recording(batch_key: str | None):
     batch = _LOADED_BATCHES[batch_key]
     options = [{"label": n, "value": n} for n in batch.recording_names]
     first = batch.recording_names[0] if batch.recording_names else None
+
+    if batch.method != "iterative":
+        summary = fig_generic_summary(batch)
+        return options, first, summary, _NA_FIGURE, _NA_FIGURE, _NA_FIGURE
+
     return (
         options, first,
         fig_kill_attribution(batch),
@@ -310,6 +345,10 @@ def _per_recording(batch_key: str | None, recording: str | None, trace_kind: str
     if not batch_key or batch_key not in _LOADED_BATCHES or not recording:
         return (_EMPTY_FIGURE,) * 7
     batch = _LOADED_BATCHES[batch_key]
+
+    if batch.method != "iterative":
+        return (_NA_FIGURE,) * 7
+
     return (
         fig_stage1_composite_slider(batch, recording, trace_kind),
         fig_stage4_gmm_pca(batch, recording),
