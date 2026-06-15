@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -225,8 +226,7 @@ class SortingTask(BaseAnalysisTask):
         well_id: str,
     ) -> tuple[Path, Path]:
         base = Path(output_root) / Path(recording_key) / rec_name / well_id
-        output = base / "sorter_output"
-        return output, output
+        return base / "sorter_output", base / "sorting"
 
     @staticmethod
     def _detect_total_vram_gb(torch_module: Any) -> float:
@@ -324,16 +324,28 @@ class SortingTask(BaseAnalysisTask):
         if total_vram_gb > 0:
             torch.cuda.empty_cache()
 
-        sorting = si.run_sorter(
-            sorter_name=p["sorter"],
-            recording=recording,
-            folder=str(sorter_output),
-            delete_output_folder=bool(p["delete_output_folder"]),
-            remove_existing_folder=bool(p["remove_existing_folder"]),
-            verbose=bool(p["verbose"]),
-            docker_image=p["docker_image"],
-            **sorter_params,
-        )
+        ks_filter = None
+        if not bool(p["verbose"]):
+            ks_filter = logging.Filter()
+            ks_filter.filter = lambda _: False
+            logging.getLogger("kilosort").addFilter(ks_filter)
+
+        try:
+            sorting = si.run_sorter(
+                sorter_name=p["sorter"],
+                recording=recording,
+                folder=str(sorter_output),
+                delete_output_folder=bool(p["delete_output_folder"]),
+                remove_existing_folder=bool(p["remove_existing_folder"]),
+                verbose=bool(p["verbose"]),
+                docker_image=p["docker_image"],
+                **sorter_params,
+            )
+        finally:
+            if ks_filter is not None:
+                logging.getLogger("kilosort").removeFilter(ks_filter)
+                for h in logging.getLogger("kilosort").handlers[:]:
+                    logging.getLogger("kilosort").removeHandler(h)
 
         if not isinstance(sorting, si.BaseSorting):
             raise ValueError(
