@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import dash
-from dash import Input, Output, callback, html
+from dash import Input, Output, callback, dcc, html
 from flask import current_app
 
 from yuxin_mea.dashboard.components import no_config_banner
@@ -129,6 +129,7 @@ def _ready_row(pipeline_key: str, task_name: str) -> html.Tr:
 
 layout = html.Div(
     [
+        dcc.Interval(id="home-auto-refresh", interval=30_000, n_intervals=0),
         html.Div(
             [
                 html.Div(
@@ -242,14 +243,15 @@ layout = html.Div(
     Output("home-ready-rows", "children"),
     Output("home-ready-count", "children"),
     Input("home-refresh", "n_clicks"),
+    Input("home-auto-refresh", "n_intervals"),
 )
-def _render(_n: int):
+def _render(_n: int, _intervals: int):
     ctx = current_app.config["YUXIN_MEA"]
     banner = None if ctx.get("config_exists") else no_config_banner()
     analysis_root = ctx.get("analysis_root")
 
     subtitle = html.Span(
-        ["Yuxin_MEA · ", html.Code(ctx.get("config_path") or "no config")],
+        ["Yuxin_MEA · ", html.Code(str(ctx.get("config_path") or "no config"))],
         style={"fontFamily": "var(--font-mono)", "fontSize": "11px"},
     )
 

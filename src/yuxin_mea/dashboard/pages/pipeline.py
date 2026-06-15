@@ -45,6 +45,7 @@ layout = html.Div(
     [
         dcc.Store(id="pipeline-selected-cell", data={}),
         dcc.Store(id="pipeline-filter-store", data="all"),
+        dcc.Interval(id="pipeline-auto-refresh", interval=30_000, n_intervals=0),
 
         # ── view-head ────────────────────────────────────────────────────
         html.Div(
@@ -456,10 +457,11 @@ clientside_callback(
     Output("pipeline-matrix", "children"),
     Output("pipeline-matrix-title", "children"),
     Input("pipeline-refresh", "n_clicks"),
+    Input("pipeline-auto-refresh", "n_intervals"),
     Input("pipeline-filter-store", "data"),
     Input("pipeline-selected-cell", "data"),
 )
-def _refresh(_n: int, filter_val: str, selected_cell: dict):
+def _refresh(_n: int, _intervals: int, filter_val: str, selected_cell: dict):
     ctx_app = current_app.config["YUXIN_MEA"]
     banner = None if ctx_app.get("config_exists") else no_config_banner()
     analysis_root = ctx_app.get("analysis_root")
