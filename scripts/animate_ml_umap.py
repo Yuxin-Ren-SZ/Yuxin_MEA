@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -87,6 +89,18 @@ def _ranked_raster(
             sp = sp[:: int(np.ceil(sp.size / per_cap))]
         positions.append(sp)
     return positions, t_end
+
+
+def _valid_mp4(path: Path) -> bool:
+    """True if ``path`` is a readable video (catches a missing moov atom)."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=nb_frames", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60)
+    except Exception:  # noqa: BLE001 — ffprobe missing/timeout ⇒ treat as invalid
+        return False
+    return r.returncode == 0 and r.stdout.strip() not in ("", "0", "N/A")
 
 
 def _animate_well(
@@ -207,10 +221,19 @@ def _animate_well(
     anim = FuncAnimation(fig, update, frames=n, interval=1000.0 / fps, blit=False)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Render to a sibling temp file, validate it, then atomically swap into place.
+    # An interrupted ffmpeg leaves the temp (not the final path) corrupt, so a
+    # killed batch can never leave an unplayable file masquerading as "done".
+    # Keep the real extension so ffmpeg still infers the mp4 muxer from it.
+    tmp_path = out_path.with_name(out_path.stem + ".tmp" + out_path.suffix)
     try:
         writer = FFMpegWriter(fps=fps, bitrate=2400)
-        anim.save(str(out_path), writer=writer, dpi=dpi)
-    except Exception as exc:  # noqa: BLE001 — ffmpeg missing or failed
+        anim.save(str(tmp_path), writer=writer, dpi=dpi)
+        if not _valid_mp4(tmp_path):
+            raise RuntimeError("ffmpeg produced an unreadable file (no moov atom?)")
+        os.replace(tmp_path, out_path)
+    except Exception as exc:  # noqa: BLE001 — ffmpeg missing/failed/incomplete
+        tmp_path.unlink(missing_ok=True)
         gif_path = out_path.with_suffix(".gif")
         logger.warning("ffmpeg failed (%s); falling back to GIF %s", exc, gif_path.name)
         anim.save(str(gif_path), writer=PillowWriter(fps=fps), dpi=dpi)
