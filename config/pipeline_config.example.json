@@ -95,31 +95,6 @@
       "min_relative_height": 0.1,
       "extent_frac": 0.3,
       "network_merge_gap_min_s": 0.75
-    },
-    "iterative_burst_detection": {
-      "curation_output_root": "./curation_data",
-      "output_root": "./iterative_burst_data",
-      "permissive_mad_scale": 0.3,
-      "permissive_percentile": 70.0,
-      "mad_fallback_threshold": 0.01,
-      "composite_mad_scale": 0.75,
-      "extent_frac": 0.3,
-      "merge_floor_frac": 0.7,
-      "network_merge_gap_min_s": 0.75,
-      "max_iterations": 20,
-      "convergence_eps": 0.005,
-      "fisher_alpha_frac": 0.001,
-      "ff_scale_multipliers": [
-        0.5,
-        1.0,
-        2.0,
-        5.0
-      ],
-      "min_burst_modulation": 0.1,
-      "cluster_events": true,
-      "cluster_initial_components": 6,
-      "cluster_min_events": 5,
-      "cluster_min_separation": 1.5
     }
   }
 }

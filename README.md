@@ -19,7 +19,7 @@ preprocessing (bandpass + common reference)
    → network burst detection
 ```
 
-Two burst detectors ship with the project: a classic threshold-based detector (`burst_detection`) and an **iterative Fisher-LDA detector** (`iterative_burst_detection`) that refines a composite firing-rate signal across iterations, with optional GMM event clustering for super-burst structure. Outputs feed an interactive Plotly **plate viewer** (one HTML per recording) and a multipage **Dash dashboard** for non-technical browsing of dataset, pipeline status, and burst diagnostics.
+Two burst detectors ship with the project: a classic threshold-based detector (`burst_detection`) and an **ML detector** (`ml_burst_detection`) that combines per-unit Poisson HMMs with HDBSCAN clustering over a multi-scale feature matrix and a burstlet → network-burst → superburst hierarchy. Outputs feed an interactive Plotly **plate viewer** (one HTML per recording) and a multipage **Dash dashboard** for non-technical browsing of dataset, pipeline status, and burst diagnostics.
 
 ## Repo layout
 
@@ -30,7 +30,7 @@ src/yuxin_mea/          installable namespace (`pip install -e .`)
   pipeline/             per-well task DAG + JSON status cache
   tasks/                preprocessing, sorting, auto_merge, analyzer,
                         auto_curation, burst_detection,
-                        iterative_burst_detection, plate_viewer
+                        ml_burst_detection, plate_viewer
   analysis/             algorithm code (burst detectors, burst_diagnostic lib,
                         curation_summary, synthetic_validation)
   dashboard/            multipage Dash app (Home / Recordings / Pipeline /
@@ -71,7 +71,7 @@ Then open `http://127.0.0.1:8050`. Pages:
 - **Home** — config path, data roots, cache entry counts
 - **Recordings** — sortable/filterable table from `experiment_cache.json`
 - **Pipeline** — `(recording × well) × task` status matrix
-- **Burst Diagnostic** — batch-run the iterative burst detector and browse diagnostic figures
+- **Burst Diagnostic** — batch-run a burst detector (traditional/ML) and browse summary figures
 - **Settings** — schema-driven config editor (validated against each task's `ParamSpec` declarations)
 
 If the config file doesn't exist yet, the dashboard still launches and shows a banner — use the Settings page to bootstrap one.
@@ -85,7 +85,6 @@ notebooks/v2/01_plate_viewer.ipynb
 notebooks/v2/03_auto_merge.ipynb
 notebooks/v2/04_analyzer.ipynb
 notebooks/v2/05_auto_curation.ipynb
-notebooks/v2/06_iterative_burst_detector_synthetic_validation.ipynb
 ```
 
 Open in JupyterLab from the `yuxin_mea` conda env. The original `notebooks/` are kept for reference but not maintained post-refactor.
@@ -96,7 +95,7 @@ Open in JupyterLab from the `yuxin_mea` conda env. The original `notebooks/` are
 from yuxin_mea.dataset import DatasetManager
 from yuxin_mea.pipeline import PipelineManager
 from yuxin_mea.config import ConfigManager
-from yuxin_mea.analysis.iterative_burst_detector import compute_iterative_bursts
+from yuxin_mea.analysis.ml_burst_detector import compute_ml_bursts
 ```
 
 See `AGENTS.md` for the full public surface (module-by-module symbol map).
@@ -118,9 +117,9 @@ A single JSON file holds everything:
     "auto_merge":     { "enabled": false, ... },
     "analyzer":       { ... },
     "auto_curation":  { "presence_ratio_min": 0.75, ... },
-    "burst_detection":           { ... },
-    "iterative_burst_detection": { ... },
-    "plate_viewer":              { ... }
+    "burst_detection":    { ... },
+    "ml_burst_detection": { ... },
+    "plate_viewer":       { ... }
   }
 }
 ```
@@ -131,7 +130,7 @@ Edit it via the **Settings** tab in the dashboard (each field is validated again
 
 ```
 raw → preprocessing → sorting → (auto_merge) → analyzer → auto_curation → burst_detection
-                                                                       ↘ iterative_burst_detection → plate_viewer
+                                                                       ↘ ml_burst_detection → plate_viewer
 ```
 
 Design notes:

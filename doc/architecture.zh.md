@@ -111,7 +111,7 @@ class SortingTask(BaseAnalysisTask):
 ```
 preprocessing → sorting → auto_merge → analyzer → auto_curation → burst_detection
                                                                 ↘
-                                                                 iterative_burst_detection
+                                                                 ml_burst_detection
 ```
 
 （Phase 5 从 pipeline 中移除了 `plate_viewer`：可视化不是 processing。
@@ -155,7 +155,9 @@ config/
 ```
 analysis/
 ├── burst_detector.py              compute_network_bursts（传统检测）
-├── iterative_burst_detector.py    compute_iterative_bursts（迭代检测）
+├── ml_burst_detector.py           compute_ml_bursts（HMM + HDBSCAN 检测）
+├── ml_burst_hmm.py / ml_burst_features.py / ml_burst_cluster.py  ML 检测器构件
+├── burst_common.py                共享底层工具（脉冲矩阵、多尺度 FF、合并）
 ├── burst_output.py                把 BurstResults 序列化为 pickle/parquet
 ├── plate_raster_synchrony.py      多孔板可视化的 Plotly 图表
 ├── burst_diagnostic.py            ← Phase 2b：诊断仪表板用的图函数 + run_batch + 缓存

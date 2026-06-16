@@ -68,64 +68,6 @@
       "extent_frac": 0.3,
       "network_merge_gap_min_s": 0.75
     },
-    "iterative_burst_detection": {
-      "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
-      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/iterative_burst_data",
-      "permissive_mad_scale": 0.3,
-      "permissive_percentile": 70.0,
-      "mad_fallback_threshold": 0.01,
-      "composite_mad_scale": 0.75,
-      "extent_frac": 0.3,
-      "merge_floor_frac": 0.7,
-      "merge_gap_tolerance_bins": 3,
-      "strict_merge_gap_tolerance_bins": 2,
-      "merge_strict_floor_frac": 1.0,
-      "network_merge_gap_min_s": 0.75,
-      "max_iterations": 30,
-      "convergence_eps": 0.005,
-      "fisher_alpha_frac": 0.001,
-      "ff_scale_multipliers": [
-        0.5,
-        1.0,
-        2.0,
-        5.0
-      ],
-      "min_burst_modulation": 0.1,
-      "peak_synchrony_floor_frac": 0.0,
-      "participation_gate_mode": "and",
-      "cluster_events": true,
-      "cluster_initial_components": 6,
-      "cluster_min_events": 5,
-      "cluster_min_separation": 1.5,
-      "debug": true,
-      "inner_partitioner": "gmm_em",
-      "lda_exclude_silence": true,
-      "lda_sign_pinned_feature_names": [
-        "PFR",
-        "P",
-        "LLR"
-      ],
-      "gmm_k_range": [
-        2,
-        3
-      ],
-      "gmm_bic_margin": 5.0,
-      "gmm_em_n_init": 5,
-      "gmm_em_reg_covar": 0.0001,
-      "gmm_burst_score_weights": [
-        0.2,
-        0.25,
-        0.05,
-        0.1,
-        0.1,
-        0.05,
-        0.2,
-        0.05
-      ],
-      "gmm_posterior_threshold": 0.5,
-      "gmm_component_merge_distance": 0.5,
-      "gmm_burst_top_fraction": 1.0
-    },
     "ml_burst_detection": {
       "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
       "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/ml_burst_data",

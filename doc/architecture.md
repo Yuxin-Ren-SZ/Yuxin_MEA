@@ -111,7 +111,7 @@ Current 7 tasks (DAG order):
 ```
 preprocessing → sorting → auto_merge → analyzer → auto_curation → burst_detection
                                                                 ↘
-                                                                 iterative_burst_detection
+                                                                 ml_burst_detection
 ```
 
 (Phase 5 removed `plate_viewer` from the pipeline: visualization isn't
@@ -155,7 +155,9 @@ config/
 ```
 analysis/
 ├── burst_detector.py              compute_network_bursts (classical detection)
-├── iterative_burst_detector.py    compute_iterative_bursts (iterative detection)
+├── ml_burst_detector.py           compute_ml_bursts (HMM + HDBSCAN detection)
+├── ml_burst_hmm.py / ml_burst_features.py / ml_burst_cluster.py  ML detector building blocks
+├── burst_common.py                shared low-level helpers (spike matrix, multi-scale FF, merges)
 ├── burst_output.py                BurstResults → pickle/parquet
 ├── plate_raster_synchrony.py      Plotly figures for multi-well visualization
 ├── burst_diagnostic.py            ← Phase 2b: diagnostic-dashboard figures + run_batch + caching
