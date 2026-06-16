@@ -71,10 +71,8 @@ _DEFAULT_CURATION_SUBDIR = "curation_data"
 
 # Mapping: data-source key -> (analysis_root subdir, per-well terminal dir).
 # "traditional" reads the original burst detector's output (default, back-compat).
-# "iterative" reads the iterative burst detector's output.
 _SOURCE_OPTIONS: dict[str, tuple[str, str]] = {
     "traditional": ("burst_detection_data", "burst_detection"),
-    "iterative": ("iterative_burst_data", "iterative_burst_detection"),
     "ml": ("ml_burst_data", "ml_burst_detection"),
 }
 
@@ -176,7 +174,6 @@ layout = html.Div([
                 id="plate-viewer-source",
                 options=[
                     {"label": "traditional", "value": "traditional"},
-                    {"label": "iterative", "value": "iterative"},
                     {"label": "ml", "value": "ml"},
                 ],
                 value="traditional",

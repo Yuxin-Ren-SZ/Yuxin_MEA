@@ -2,7 +2,6 @@ from .analyzer import AnalyzerTask
 from .auto_curation import AutoCurationTask
 from .auto_merge import AutoMergeTask
 from .burst_detection import BurstDetectionTask
-from .iterative_burst_detection import IterativeBurstDetectionTask
 from .ml_burst_detection import MLBurstDetectionTask
 from .preprocessing import PreprocessingTask
 from .sorting import SortingTask
@@ -16,7 +15,6 @@ TASK_CLASSES = (
     AnalyzerTask,
     AutoCurationTask,
     BurstDetectionTask,
-    IterativeBurstDetectionTask,
     MLBurstDetectionTask,
 )
 
@@ -25,7 +23,6 @@ __all__ = [
     "AutoCurationTask",
     "AutoMergeTask",
     "BurstDetectionTask",
-    "IterativeBurstDetectionTask",
     "MLBurstDetectionTask",
     "PreprocessingTask",
     "SortingTask",

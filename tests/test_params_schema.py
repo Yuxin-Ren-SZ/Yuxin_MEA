@@ -16,7 +16,6 @@ from yuxin_mea.tasks import (
     AutoCurationTask,
     AutoMergeTask,
     BurstDetectionTask,
-    IterativeBurstDetectionTask,
     MLBurstDetectionTask,
     PreprocessingTask,
     SortingTask,
@@ -30,7 +29,6 @@ ALL_TASKS = [
     AnalyzerTask,
     AutoCurationTask,
     BurstDetectionTask,
-    IterativeBurstDetectionTask,
     MLBurstDetectionTask,
 ]
 

@@ -18,7 +18,7 @@ This module owns ``MLBurstConfig`` (frozen dataclass with every tunable),
 ``MLBurstTrace`` (optional debug bundle), and ``MLBurstError``. It depends on
 :mod:`yuxin_mea.analysis.ml_burst_hmm`, :mod:`ml_burst_features`,
 :mod:`ml_burst_cluster`, and reuses helpers from
-:mod:`iterative_burst_detector` (multi-scale FF, hierarchy merges, candidate
+:mod:`burst_common` (multi-scale FF, hierarchy merges, candidate
 materialisation).
 """
 from __future__ import annotations
@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 
-from .iterative_burst_detector import (
+from .burst_common import (
     _compute_spike_matrix,
     _level_metrics,
 )
@@ -155,14 +155,13 @@ def _ml_finalize_event(
 ) -> dict:
     """Aggregate sub-events into a single merged event spanning [s, e).
 
-    Mirrors ``iterative_burst_detector._finalize_event`` but renames the
-    composite-derived quality columns to reflect their ML meaning:
+    Renames the composite-derived quality columns to reflect their ML meaning:
 
       composite_peak  →  posterior_peak
       composite_mean  →  posterior_mean
 
-    ``llr_aggregate`` and ``ff_peak`` keep their iterative-detector names to
-    minimise downstream surprise.
+    ``llr_aggregate`` and ``ff_peak`` keep their original names to minimise
+    downstream surprise.
     """
     in_ev = (t_centers >= s) & (t_centers < e)
     participating = sum(

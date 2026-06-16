@@ -25,7 +25,7 @@ from typing import Optional
 
 import numpy as np
 
-from .iterative_burst_detector import _iter_merge, _mask_to_candidates
+from .burst_common import _iter_merge, _mask_to_candidates
 
 
 @dataclass

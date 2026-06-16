@@ -487,7 +487,7 @@ def _refresh(_n: int, _intervals: int, filter_val: str, selected_cell: dict):
 
     selected_task = (selected_cell or {}).get("task")
     # Insert explicit arrows only on actual dependency edges, not between
-    # parallel siblings (e.g. burst_detection and iterative_burst_detection
+    # parallel siblings (e.g. burst_detection and ml_burst_detection
     # both depend on auto_curation — no arrow between them).
     dag_items: list = []
     for i, tc in enumerate(TASK_CLASSES):

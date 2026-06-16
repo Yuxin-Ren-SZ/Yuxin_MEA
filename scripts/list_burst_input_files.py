@@ -1,6 +1,6 @@
 """Write a manifest of every file the burst detectors consume.
 
-Both the traditional (BurstDetectionTask) and ML (IterativeBurstDetectionTask)
+Both the traditional (BurstDetectionTask) and ML (MLBurstDetectionTask)
 detectors read exactly one file per well — ``curated_spike_times.npy`` produced
 by AutoCurationTask. This script walks pipeline_cache.json next to
 analysis_root, collects the absolute path of every such file from wells whose

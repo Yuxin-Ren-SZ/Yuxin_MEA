@@ -7,9 +7,8 @@ writes a standard BurstResults bundle (``burstlets.pkl``,
 ``diagnostics.json``, ``plot_signals.npy``) to its own output directory.
 
 When ``debug=True`` it also persists ``debug_trace.pkl``,
-``debug_spike_times.npy``, and ``debug_config.json`` — same convention as
-``IterativeBurstDetectionTask`` so a future ML-aware burst-inspector page can
-share most of the loading code.
+``debug_spike_times.npy``, and ``debug_config.json`` so a future ML-aware
+burst-inspector page can share most of the loading code.
 """
 from __future__ import annotations
 
@@ -24,10 +23,9 @@ from yuxin_mea.tasks.preprocessing import PreprocessingTask
 class MLBurstDetectionTask(BaseAnalysisTask):
     """Unsupervised ML-based network burst detection.
 
-    Reads the same ``curated_spike_times.npy`` as ``BurstDetectionTask`` /
-    ``IterativeBurstDetectionTask`` but detects bursts via a per-unit 2-state
-    Poisson HMM (calibrated λ_bg/λ_burst per unit) plus HDBSCAN clustering on
-    a 26-column bin-level feature matrix.
+    Reads the same ``curated_spike_times.npy`` as ``BurstDetectionTask`` but
+    detects bursts via a per-unit 2-state Poisson HMM (calibrated λ_bg/λ_burst
+    per unit) plus HDBSCAN clustering on a 26-column bin-level feature matrix.
 
     Output schema mirrors the other detectors (``BurstResults`` pickle layout)
     with four per-event quality columns: ``posterior_peak``, ``posterior_mean``,

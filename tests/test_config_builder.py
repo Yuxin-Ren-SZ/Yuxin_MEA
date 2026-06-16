@@ -321,7 +321,7 @@ def test_example_config_round_trips_clean():
     """config/pipeline_config.example.json must validate against all task schemas."""
     from yuxin_mea.tasks import (
         AnalyzerTask, AutoCurationTask, AutoMergeTask, BurstDetectionTask,
-        IterativeBurstDetectionTask, PreprocessingTask, SortingTask,
+        PreprocessingTask, SortingTask,
     )
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -332,7 +332,7 @@ def test_example_config_round_trips_clean():
     cm.load(example)
     schemas = {tc.task_name: tc.params_schema() for tc in [
         PreprocessingTask, SortingTask, AutoMergeTask, AnalyzerTask,
-        AutoCurationTask, BurstDetectionTask, IterativeBurstDetectionTask,
+        AutoCurationTask, BurstDetectionTask,
     ]}
     assert cm.validate_loaded(schemas) == {}, (
         "Example config has keys not in any task schema. "

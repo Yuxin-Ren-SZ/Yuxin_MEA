@@ -722,8 +722,8 @@ def load_plate_data(
             unreadable cache → wells default to ``well_name="?", groupname="?"``.
         burst_terminal: per-well terminal directory inside ``burst_detection_root``
             holding ``plot_signals.npy`` and the event tables. ``"burst_detection"``
-            (default) reads the traditional detector; pass ``"iterative_burst_detection"``
-            to read the iterative detector's outputs.
+            (default) reads the traditional detector; pass ``"ml_burst_detection"``
+            to read the ML detector's outputs.
 
     Returns:
         list[WellRecord]: 24 entries, one per well slot.

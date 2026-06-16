@@ -88,17 +88,17 @@ def test_load_or_run_batch_writes_and_reads_cache():
 
         # First call: cache miss → run_batch invoked, result pickled.
         with patch(
-            "yuxin_mea.analysis.burst_diagnostic.run_batch",
+            "yuxin_mea.analysis.burst_diagnostic.run_batch_generic",
             return_value=fake_batch,
         ) as mock_run:
             batch1, from_cache1 = load_or_run_batch(ks_root, analysis_root)
         assert from_cache1 is False
         assert mock_run.call_count == 1
-        assert cache_path(analysis_root, f"{cache_key(ks_root)}_iterative").exists()
+        assert cache_path(analysis_root, f"{cache_key(ks_root)}_ml").exists()
 
         # Second call: cache hit → run_batch NOT called.
         with patch(
-            "yuxin_mea.analysis.burst_diagnostic.run_batch",
+            "yuxin_mea.analysis.burst_diagnostic.run_batch_generic",
             return_value=fake_batch,
         ) as mock_run:
             batch2, from_cache2 = load_or_run_batch(ks_root, analysis_root)
@@ -119,12 +119,12 @@ def test_load_or_run_batch_force_recompute_bypasses_cache_and_overwrites():
         first = BatchResults()
         first.spike_times["first"] = {}
         with patch(
-            "yuxin_mea.analysis.burst_diagnostic.run_batch",
+            "yuxin_mea.analysis.burst_diagnostic.run_batch_generic",
             return_value=first,
         ):
             load_or_run_batch(ks_root, analysis_root)
 
-        cache_file = cache_path(analysis_root, f"{cache_key(ks_root)}_iterative")
+        cache_file = cache_path(analysis_root, f"{cache_key(ks_root)}_ml")
         assert cache_file.exists()
 
         # force_recompute=True → call run_batch even though cache exists,
@@ -132,7 +132,7 @@ def test_load_or_run_batch_force_recompute_bypasses_cache_and_overwrites():
         second = BatchResults()
         second.spike_times["second"] = {}
         with patch(
-            "yuxin_mea.analysis.burst_diagnostic.run_batch",
+            "yuxin_mea.analysis.burst_diagnostic.run_batch_generic",
             return_value=second,
         ) as mock_run:
             returned, from_cache = load_or_run_batch(
@@ -145,7 +145,7 @@ def test_load_or_run_batch_force_recompute_bypasses_cache_and_overwrites():
         # Subsequent cache-hit load must return the *new* contents, proving
         # the cache file was overwritten (not just bypassed).
         with patch(
-            "yuxin_mea.analysis.burst_diagnostic.run_batch"
+            "yuxin_mea.analysis.burst_diagnostic.run_batch_generic"
         ) as mock_run_again:
             cached, from_cache2 = load_or_run_batch(ks_root, analysis_root)
         assert from_cache2 is True
@@ -162,7 +162,7 @@ def test_load_or_run_batch_none_analysis_root_skips_cache_io():
         _make_fake_kilosort_dir(ks_root, "rec0")
 
         with patch(
-            "yuxin_mea.analysis.burst_diagnostic.run_batch",
+            "yuxin_mea.analysis.burst_diagnostic.run_batch_generic",
             return_value=BatchResults(),
         ) as mock_run:
             batch, from_cache = load_or_run_batch(ks_root, None)

@@ -5,7 +5,7 @@ the 4x6 plate shows:
   - a raster of curated spikes (units ranked by firing rate; rich hover with
     unit id, time, firing rate, and bin info when available),
   - a marginal "burst events" lane with three sub-tracks: burstlets,
-    network_bursts, superbursts. For the ML / iterative detector the tracks
+    network_bursts, superbursts. For the ML detector the tracks
     represent the three hierarchy levels; "all labels" = burstlets and
     "burst labels" = network_bursts.
 
@@ -36,10 +36,10 @@ DETECTORS = {
         "subdir": "burst_detection",
         "title": "Traditional burst detector",
     },
-    "iterative": {
-        "task_name": "iterative_burst_detection",
-        "subdir": "iterative_burst_detection",
-        "title": "ML / iterative burst detector",
+    "ml": {
+        "task_name": "ml_burst_detection",
+        "subdir": "ml_burst_detection",
+        "title": "ML burst detector",
     },
 }
 
@@ -542,7 +542,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="Path to pipeline_config.json (read for analysis_root + figure_root).")
     p.add_argument("--output-dir", type=Path, default=None,
                    help="Override output directory. Defaults to global.figure_root.")
-    p.add_argument("--detector", choices=["traditional", "iterative", "both"],
+    p.add_argument("--detector", choices=["traditional", "ml", "both"],
                    default="both")
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])

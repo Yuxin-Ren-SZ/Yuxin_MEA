@@ -27,7 +27,7 @@ from typing import Iterable
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
-from .iterative_burst_detector import _compute_multiscale_ff, _compute_spike_matrix
+from .burst_common import _compute_multiscale_ff, _compute_spike_matrix
 from .ml_burst_hmm import UnitHMMFit
 
 

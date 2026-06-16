@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from yuxin_mea.analysis.iterative_burst_detector import _compute_spike_matrix
+from yuxin_mea.analysis.burst_common import _compute_spike_matrix
 from yuxin_mea.analysis.ml_burst_features import (
     build_feature_matrix,
     feature_names_for,

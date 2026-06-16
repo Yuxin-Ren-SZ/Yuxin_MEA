@@ -1,4 +1,10 @@
-"""Smoke tests for burst_inspector pure-library figure builders."""
+"""Smoke tests for burst_inspector pure-library figure builders.
+
+Exercises the generic (traditional / ML) inspector path: a BurstResults
+bundle loaded from disk or built in-process, with raster + composite figures
+and the summary card. The iterative-specific machinery was removed, so these
+tests no longer depend on an iterative trace.
+"""
 from __future__ import annotations
 
 import unittest
@@ -8,41 +14,50 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import plotly.graph_objects as go
 
+from yuxin_mea.analysis.burst_detector import compute_network_bursts
 from yuxin_mea.analysis.burst_inspector import (
     InspectorBundle,
-    _classify_events,
-    fig_composite_with_threshold,
-    fig_event_gmm_clusters,
-    fig_iteration_trajectory,
-    fig_label_comparison_table,
-    fig_pca_feature_space,
-    fig_raster,
-    load_inspector_bundle,
+    fig_composite_basic,
+    fig_raster_basic,
+    load_generic_bundle,
     summary_card,
 )
-from yuxin_mea.analysis.iterative_burst_detector import (
-    IterativeBurstConfig,
-    IterativeBurstTrace,
-    compute_iterative_bursts,
-)
-from tests.test_iterative_burst_detector import _cascade_spike_trains
+from yuxin_mea.analysis.burst_output import PickleBurstOutputWriter
 
 
-def _make_bundle() -> InspectorBundle:
-    """Build an InspectorBundle from a fresh in-process detector run."""
-    spike_times = _cascade_spike_trains(n_units=18, duration_s=80.0)
-    config = IterativeBurstConfig(max_iterations=6)
-    trace = IterativeBurstTrace()
-    results = compute_iterative_bursts(spike_times, config=config, trace=trace)
+def _synthetic_burst_spike_trains(
+    n_units: int = 16, duration_s: float = 60.0, seed: int = 0,
+) -> dict[str, np.ndarray]:
+    """Background Poisson firing plus periodic synchronous network bursts."""
+    rng = np.random.default_rng(seed)
+    spike_times: dict[str, np.ndarray] = {}
+    burst_onsets = np.arange(5.0, duration_s, 8.0)
+    for u in range(n_units):
+        # Sparse background.
+        n_bg = rng.poisson(0.5 * duration_s)
+        bg = rng.uniform(0.0, duration_s, size=n_bg)
+        # Dense, tightly synchronised firing at each burst onset.
+        burst = []
+        for onset in burst_onsets:
+            burst.append(onset + rng.uniform(0.0, 0.08, size=rng.integers(8, 16)))
+        spikes = np.concatenate([bg, *burst]) if burst else bg
+        spike_times[f"cluster_{u:03d}"] = np.sort(spikes[(spikes >= 0) & (spikes < duration_s)])
+    return spike_times
+
+
+def _make_bundle(method: str = "traditional") -> InspectorBundle:
+    """Build an InspectorBundle from a fresh in-process traditional-detector run."""
+    spike_times = _synthetic_burst_spike_trains()
+    results = compute_network_bursts(spike_times)
     return InspectorBundle(
-        trace=trace,
         spike_times=spike_times,
         burstlets=results.burstlets,
-        config=config,
         recording_key="testkey",
         rec_name="rec0000",
         well_id="well000",
         source="on_demand",
+        method=method,
+        results=results,
     )
 
 
@@ -57,88 +72,44 @@ class FigureBuildersTests(unittest.TestCase):
         # (empty-state figures are still legitimate).
         self.assertTrue(len(fig.data) > 0 or len(fig.layout.annotations) > 0)
 
-    def test_fig_raster(self):
-        self._assert_nonempty_figure(fig_raster(self.bundle))
-        self._assert_nonempty_figure(fig_raster(self.bundle, iteration=0))
+    def test_fig_raster_basic(self):
+        self._assert_nonempty_figure(fig_raster_basic(self.bundle))
 
-    def test_fig_composite_with_threshold(self):
-        self._assert_nonempty_figure(fig_composite_with_threshold(self.bundle))
-
-    def test_fig_iteration_trajectory(self):
-        fig = fig_iteration_trajectory(self.bundle)
-        self.assertEqual(len(fig.data), 3)  # n_cands, deltas, thrs
-
-    def test_fig_pca_feature_space(self):
-        fig = fig_pca_feature_space(self.bundle)
-        # 2 scatter traces (bg + burst) + 2 loading bars (PC1 + PC2)
-        self.assertGreaterEqual(len(fig.data), 3)
-
-    def test_fig_event_gmm_clusters(self):
-        # Either a populated figure or a legitimate "skipped" annotation.
-        self._assert_nonempty_figure(fig_event_gmm_clusters(self.bundle))
-
-    def test_fig_label_comparison_table_row_count(self):
-        fig = fig_label_comparison_table(self.bundle)
-        if not self.bundle.trace.burstlets_pre_gates:
-            # No events to show — degenerate fixture; still legitimate.
-            self.assertGreater(len(fig.layout.annotations), 0)
-            return
-        self.assertEqual(len(fig.data), 1)
-        # First column's cell list length == number of pre-gate events
-        self.assertEqual(
-            len(fig.data[0].cells.values[0]),
-            len(self.bundle.trace.burstlets_pre_gates),
-        )
-
-    def test_classify_events_kill_reason_invariants(self):
-        df = _classify_events(self.bundle.trace)
-        if df.empty:
-            self.skipTest("Cascade fixture produced no pre-gate events.")
-
-        allowed_reasons = {"—", "participation", "BMI", "GMM"}
-        self.assertTrue(set(df["kill_reason"].unique()).issubset(allowed_reasons))
-
-        # Survivors (kept == "Y") must report no kill reason.
-        kept = df[df["kept"] == "Y"]
-        self.assertTrue((kept["kill_reason"] == "—").all())
-
-        # And kill_reason != "—" implies kept == "N".
-        killed = df[df["kill_reason"] != "—"]
-        self.assertTrue((killed["kept"] == "N").all())
-
-        # Final burstlets should equal the kept rows.
-        self.assertEqual(int((df["kept"] == "Y").sum()),
-                         len(self.bundle.burstlets))
+    def test_fig_composite_basic(self):
+        self._assert_nonempty_figure(fig_composite_basic(self.bundle))
 
     def test_summary_card_has_required_keys(self):
         card = summary_card(self.bundle)
-        for key in (
-            "well", "source", "n_units", "n_iterations_run",
-            "converged", "n_final_burstlets", "kill_breakdown",
-        ):
+        for key in ("well", "source", "method", "n_units", "n_burstlets"):
             self.assertIn(key, card)
+        # results is populated, so the network/superburst counts appear.
+        self.assertIn("n_network_bursts", card)
+        self.assertIn("n_superbursts", card)
 
 
 class LoaderTests(unittest.TestCase):
-    def test_load_missing_disk_falls_back_to_on_demand(self):
-        spike_times = _cascade_spike_trains(n_units=12, duration_s=60.0)
+    def test_load_generic_bundle_round_trip(self):
+        spike_times = _synthetic_burst_spike_trains(n_units=12, duration_s=40.0, seed=1)
+        results = compute_network_bursts(spike_times)
         with TemporaryDirectory() as tmp:
-            bundle = load_inspector_bundle(
-                Path(tmp),
-                "any_key",
-                "rec0000",
-                "well000",
-                on_demand_spike_times=spike_times,
-                on_demand_config=IterativeBurstConfig(max_iterations=4),
+            output_dir = (
+                Path(tmp) / "any_key" / "rec0000" / "well000" / "burst_detection"
             )
-            self.assertEqual(bundle.source, "on_demand")
-            self.assertGreater(len(bundle.trace.iterations), 0)
+            output_dir.mkdir(parents=True)
+            PickleBurstOutputWriter().write(results, output_dir)
 
-    def test_load_missing_disk_without_fallback_raises(self):
+            bundle = load_generic_bundle(
+                Path(tmp), "any_key", "rec0000", "well000", method="traditional",
+            )
+            self.assertEqual(bundle.source, "disk")
+            self.assertEqual(bundle.method, "traditional")
+            self.assertEqual(len(bundle.burstlets), len(results.burstlets))
+
+    def test_load_generic_bundle_missing_dir_raises(self):
         with TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):
-                load_inspector_bundle(
-                    Path(tmp), "any_key", "rec0000", "well000",
+                load_generic_bundle(
+                    Path(tmp), "any_key", "rec0000", "well000", method="traditional",
                 )
 
 
