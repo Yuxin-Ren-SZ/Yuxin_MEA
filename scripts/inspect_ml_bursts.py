@@ -65,6 +65,24 @@ NOISE_COLOR = "rgba(180, 180, 180, 0.55)"
 BURST_COLOR = "#d62728"
 
 
+def _burst_label_set(diagnostics: dict[str, Any] | None) -> set[int]:
+    """Cluster ids selected as burst.
+
+    Prefers the multi-cluster ``cluster_burst_labels`` (UMAP burst trajectories
+    fragment across several clusters); falls back to the legacy single
+    ``cluster_burst_label`` for traces written before that change.
+    """
+    if not diagnostics:
+        return set()
+    labels = diagnostics.get("cluster_burst_labels")
+    if labels:
+        return {int(c) for c in labels if c is not None and int(c) != -1}
+    bl = diagnostics.get("cluster_burst_label")
+    if bl is not None and int(bl) != -1:
+        return {int(bl)}
+    return set()
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -398,11 +416,7 @@ def _hdbscan_strip(trace, diagnostics: dict[str, Any] | None) -> go.Heatmap | No
     t = np.asarray(trace.t_centers, dtype=float)
     if labels.size == 0 or t.size != labels.size:
         return None
-    burst_label = None
-    if diagnostics is not None:
-        bl = diagnostics.get("cluster_burst_label")
-        if bl is not None and bl != -1:
-            burst_label = int(bl)
+    burst_labels = _burst_label_set(diagnostics)
 
     unique = sorted(set(int(v) for v in labels.tolist()))
     # Assign a categorical colour per label. Map labels -> small integer codes
@@ -414,7 +428,7 @@ def _hdbscan_strip(trace, diagnostics: dict[str, Any] | None) -> go.Heatmap | No
         code_of[lbl] = len(code_of)
         if lbl == -1:
             colors.append(NOISE_COLOR)
-        elif burst_label is not None and lbl == burst_label:
+        elif lbl in burst_labels:
             colors.append(BURST_COLOR)
         else:
             try:
@@ -447,13 +461,15 @@ def _hdbscan_strip(trace, diagnostics: dict[str, Any] | None) -> go.Heatmap | No
 
 
 def _cluster_color_map(
-    labels: np.ndarray, burst_label: int | None
+    labels: np.ndarray, burst_labels: set[int] | None
 ) -> tuple[dict[int, str], dict[int, str]]:
     """Return (color_by_label, display_name_by_label) for HDBSCAN labels.
 
-    Noise (-1) is gray; the cluster matching ``burst_label`` is the burst red;
-    other clusters draw sequentially from ``CLUSTER_PALETTE``.
+    Noise (-1) is gray; clusters in ``burst_labels`` are burst red (the burst
+    trajectory fragments across several clusters on the manifold); other
+    clusters draw sequentially from ``CLUSTER_PALETTE``.
     """
+    burst_labels = burst_labels or set()
     color_by: dict[int, str] = {}
     name_by: dict[int, str] = {}
     palette_iter = iter(CLUSTER_PALETTE)
@@ -461,7 +477,7 @@ def _cluster_color_map(
         if lbl == -1:
             color_by[lbl] = NOISE_COLOR
             name_by[lbl] = "noise (-1)"
-        elif burst_label is not None and lbl == burst_label:
+        elif lbl in burst_labels:
             color_by[lbl] = BURST_COLOR
             name_by[lbl] = f"cluster {lbl} (burst)"
         else:
@@ -557,16 +573,74 @@ def _compute_umap_axes(
     return coords, "UMAP-1", "UMAP-2", kept
 
 
+def _feature_spread(trace) -> tuple[list[str], np.ndarray] | None:
+    """Per-feature std in the z-normed space HDBSCAN actually clustered.
+
+    z-norm scales each feature by its *background* std, so the std across *all*
+    bins is a faithful proxy for how much that feature drives the euclidean
+    distances HDBSCAN sees. Returned sorted ascending so a horizontal bar chart
+    reads top-down by contribution.
+    """
+    Z = _znorm_from_trace(trace)
+    if Z is None or Z.shape[1] < 2:
+        return None
+    names = list(getattr(trace, "feature_names", None) or [])
+    if len(names) != Z.shape[1]:
+        names = [f"f{i}" for i in range(Z.shape[1])]
+    spread = Z.std(axis=0)
+    order = np.argsort(spread)  # ascending; Plotly draws first at the bottom
+    return [names[int(i)] for i in order], spread[order]
+
+
+def _compute_pca_scree(trace) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return (explained_variance_ratio, cumulative) over all components.
+
+    Answers "how many dims do I actually need?" — the intrinsic dimensionality
+    of the z-normed feature space, which directly informs dimension reduction.
+    """
+    Z = _znorm_from_trace(trace)
+    if Z is None or Z.shape[0] < 3 or Z.shape[1] < 2:
+        return None
+    try:
+        from sklearn.decomposition import PCA
+    except ImportError:
+        return None
+    n_comp = min(Z.shape[1], Z.shape[0] - 1)
+    if n_comp < 2:
+        return None
+    pca = PCA(n_components=n_comp, random_state=0).fit(Z)
+    evr = np.asarray(pca.explained_variance_ratio_, dtype=float)
+    return evr, np.cumsum(evr)
+
+
+def _feature_corr(trace) -> tuple[np.ndarray, list[str]] | None:
+    """Return (|correlation| matrix, feature_names) over the z-normed features.
+
+    Exposes redundant features (|corr| ~ 1) that are safe to drop before
+    clustering on a lower-dimensional space.
+    """
+    Z = _znorm_from_trace(trace)
+    if Z is None or Z.shape[1] < 2 or Z.shape[0] < 3:
+        return None
+    names = list(getattr(trace, "feature_names", None) or [])
+    if len(names) != Z.shape[1]:
+        names = [f"f{i}" for i in range(Z.shape[1])]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        corr = np.corrcoef(Z, rowvar=False)
+    corr = np.nan_to_num(np.abs(corr), nan=0.0, posinf=0.0, neginf=0.0)
+    return corr, names
+
+
 def _projection_scatter_traces(
     coords: np.ndarray,        # (n, 2)
     labels: np.ndarray,        # (n,)
     t_centers: np.ndarray,     # (n,)
-    burst_label: int | None,
+    burst_labels: set[int] | None,
     x_axis_label: str,
     y_axis_label: str,
     legend_group: str,         # "pca" or "umap" — separate so per-panel legends don't fight
 ) -> list[go.Scattergl]:
-    color_by, name_by = _cluster_color_map(labels, burst_label)
+    color_by, name_by = _cluster_color_map(labels, burst_labels)
     traces: list[go.Scattergl] = []
     for lbl in sorted(color_by.keys()):
         mask = labels == lbl
@@ -617,12 +691,7 @@ def _ranking_hist_traces(
         rank_name = fnames[0]
     col = X[:, fnames.index(rank_name)]
     labels = np.asarray(trace.hdbscan_labels)
-    burst_label = None
-    if diagnostics is not None:
-        bl = diagnostics.get("cluster_burst_label")
-        if bl is not None and bl != -1:
-            burst_label = int(bl)
-    color_by, name_by = _cluster_color_map(labels, burst_label)
+    color_by, name_by = _cluster_color_map(labels, _burst_label_set(diagnostics))
     finite = col[np.isfinite(col)]
     if not finite.size:
         return [], rank_name, None
@@ -656,14 +725,86 @@ def _ranking_hist_traces(
     return traces, rank_name, threshold
 
 
+def _feature_spread_traces(
+    trace, diagnostics: dict[str, Any] | None,
+) -> tuple[list[go.Bar], str | None]:
+    """Horizontal bar of per-feature z-space spread (contribution to distances).
+
+    The ranking feature is drawn in burst red so the feature the detector
+    *ranks* on is visible against the features that *separate* the space.
+    """
+    res = _feature_spread(trace)
+    if res is None:
+        return [], None
+    names, spread = res
+    rank_name = (diagnostics or {}).get("ranking_feature")
+    colors = [BURST_COLOR if n == rank_name else "#1f77b4" for n in names]
+    bar = go.Bar(
+        x=spread, y=names, orientation="h",
+        marker=dict(color=colors),
+        hovertemplate="%{y}<br>z-space std = %{x:.3f}<extra></extra>",
+        showlegend=False,
+        name="feature spread",
+    )
+    return [bar], rank_name
+
+
+def _pca_scree_traces(
+    trace,
+) -> tuple[list[go.Bar | go.Scatter], int | None, int | None]:
+    """Per-component explained variance bars + cumulative line.
+
+    Returns (traces, n_comp_90, n_comp_95): the component counts needed to reach
+    90% / 95% cumulative variance, for annotation.
+    """
+    res = _compute_pca_scree(trace)
+    if res is None:
+        return [], None, None
+    evr, cum = res
+    x = list(range(1, evr.size + 1))
+    n90 = int(np.searchsorted(cum, 0.90) + 1) if cum[-1] >= 0.90 else None
+    n95 = int(np.searchsorted(cum, 0.95) + 1) if cum[-1] >= 0.95 else None
+    traces: list[go.Bar | go.Scatter] = [
+        go.Bar(
+            x=x, y=evr, marker=dict(color="#9467bd"),
+            name="per-PC variance",
+            hovertemplate="PC%{x}<br>explained = %{y:.3f}<extra></extra>",
+            showlegend=False,
+        ),
+        go.Scatter(
+            x=x, y=cum, mode="lines+markers",
+            line=dict(color="#d62728", width=1.5),
+            marker=dict(size=4),
+            name="cumulative",
+            hovertemplate="PC%{x}<br>cumulative = %{y:.3f}<extra></extra>",
+            showlegend=False,
+        ),
+    ]
+    return traces, n90, n95
+
+
+def _feature_corr_heatmap(trace) -> go.Heatmap | None:
+    """|correlation| heatmap of the z-normed features — spots redundancy."""
+    res = _feature_corr(trace)
+    if res is None:
+        return None
+    corr, names = res
+    return go.Heatmap(
+        z=corr, x=names, y=names,
+        colorscale="Viridis", zmin=0.0, zmax=1.0,
+        colorbar=dict(title=dict(text="|corr|", side="right")),
+        hovertemplate="%{y} vs %{x}<br>|corr| = %{z:.2f}<extra></extra>",
+        name="feature |corr|",
+    )
+
+
 def _cluster_table(diagnostics: dict[str, Any] | None, trace) -> go.Table | None:
     if diagnostics is None:
         return None
     ranking = diagnostics.get("cluster_ranking") or {}
     if not ranking:
         return None
-    burst_label = diagnostics.get("cluster_burst_label")
-    burst_label_int = None if burst_label in (None, -1) else int(burst_label)
+    burst_labels = _burst_label_set(diagnostics)
 
     n_bins_by_label: dict[int, int] = {}
     if trace is not None and getattr(trace, "hdbscan_labels", None) is not None:
@@ -677,7 +818,7 @@ def _cluster_table(diagnostics: dict[str, Any] | None, trace) -> go.Table | None
             lbl = int(lbl_str)
         except (TypeError, ValueError):
             continue
-        is_burst = "yes" if burst_label_int is not None and lbl == burst_label_int else ""
+        is_burst = "yes" if lbl in burst_labels else ""
         rows.append((lbl, n_bins_by_label.get(lbl, 0), float(score), is_burst))
     rows.sort(key=lambda r: -r[2])
 
@@ -760,6 +901,13 @@ def build_well_figure(well: WellBundle) -> go.Figure:
     has_pca = pca_result is not None
     has_umap = umap_result is not None
 
+    # Feature-contribution panels (label-independent: what HDBSCAN's distances
+    # are built from, and how compressible the space is).
+    spread_result = _feature_spread(well.trace) if has_trace else None
+    scree_result = _compute_pca_scree(well.trace) if has_trace else None
+    corr_result = _feature_corr(well.trace) if has_trace else None
+    has_feat_spread = spread_result is not None
+
     # Row layout. Time-domain rows (raster/events/signals/strip) share an x-axis;
     # the projections rows are independent xy; the hist row is independent xy;
     # tables come last.
@@ -795,6 +943,18 @@ def build_well_figure(well: WellBundle) -> go.Figure:
         rows_spec.append([{"colspan": 2, "type": "xy"}, None])
         row_heights.append(0.14); row_meanings.append("hist")
 
+    if has_feat_spread:
+        rows_spec.append([{"colspan": 2, "type": "xy"}, None])
+        row_heights.append(0.24); row_meanings.append("feat_spread")
+
+    if scree_result is not None:
+        rows_spec.append([{"colspan": 2, "type": "xy"}, None])
+        row_heights.append(0.16); row_meanings.append("feat_scree")
+
+    if corr_result is not None:
+        rows_spec.append([{"colspan": 2, "type": "heatmap"}, None])
+        row_heights.append(0.26); row_meanings.append("feat_corr")
+
     rows_spec.append([{"type": "table"}, {"type": "table"}])
     row_heights.append(0.18); row_meanings.append("tables")
 
@@ -813,6 +973,9 @@ def build_well_figure(well: WellBundle) -> go.Figure:
         "pca_only":  "PCA(2) of z-normed features — what HDBSCAN saw",
         "umap_only": "UMAP(2) of z-normed features",
         "hist":      "Ranking-feature distribution per HDBSCAN cluster",
+        "feat_spread": "Feature contribution: z-space spread per feature (drives HDBSCAN distances)",
+        "feat_scree":  "PCA scree — cumulative variance (intrinsic dimensionality)",
+        "feat_corr":   "Feature |correlation| — redundant features are safe to drop",
     }
     flat_titles: list[str] = []
     for name in row_meanings:
@@ -884,11 +1047,7 @@ def build_well_figure(well: WellBundle) -> go.Figure:
                          row=row_idx["strip"], col=1)
 
     # ----- PCA + UMAP projections -----
-    burst_label_int: int | None = None
-    if well.diagnostics is not None:
-        bl = well.diagnostics.get("cluster_burst_label")
-        if bl is not None and bl != -1:
-            burst_label_int = int(bl)
+    burst_labels_set = _burst_label_set(well.diagnostics)
     labels_full = (
         np.asarray(well.trace.hdbscan_labels)
         if has_trace and getattr(well.trace, "hdbscan_labels", None) is not None
@@ -912,7 +1071,7 @@ def build_well_figure(well: WellBundle) -> go.Figure:
         else:
             lbl_in = labels_full[kept_indices]
             t_in = t_full[kept_indices]
-        for tr in _projection_scatter_traces(coords, lbl_in, t_in, burst_label_int,
+        for tr in _projection_scatter_traces(coords, lbl_in, t_in, burst_labels_set,
                                              xl, yl, row_name):
             fig.add_trace(tr, row=row_idx[row_name], col=col_int)
         fig.update_xaxes(title_text=xl, row=row_idx[row_name], col=col_int)
@@ -944,6 +1103,71 @@ def build_well_figure(well: WellBundle) -> go.Figure:
         if hist_traces:
             fig.update_xaxes(title_text=rank_name, row=row_idx["hist"], col=1)
             fig.update_yaxes(title_text="bin count", row=row_idx["hist"], col=1)
+
+    # ----- Feature contribution: per-feature z-space spread -----
+    if "feat_spread" in row_idx:
+        spread_traces, rank_name_sp = _feature_spread_traces(well.trace, well.diagnostics)
+        for tr in spread_traces:
+            fig.add_trace(tr, row=row_idx["feat_spread"], col=1)
+        if spread_traces:
+            fig.update_xaxes(title_text="z-space std", row=row_idx["feat_spread"], col=1)
+            fig.update_yaxes(automargin=True, tickfont=dict(size=9),
+                             row=row_idx["feat_spread"], col=1)
+            if rank_name_sp:
+                fig.add_annotation(
+                    text=f"red = ranking feature ({rank_name_sp})",
+                    showarrow=False, xref="x domain", yref="y domain",
+                    x=0.98, y=0.04, xanchor="right", font=dict(size=9, color="#d62728"),
+                    row=row_idx["feat_spread"], col=1,
+                )
+
+    # ----- Feature dimensionality: PCA scree (own full-width row) -----
+    if "feat_scree" in row_idx:
+        scree_traces, n90, n95 = _pca_scree_traces(well.trace)
+        for tr in scree_traces:
+            fig.add_trace(tr, row=row_idx["feat_scree"], col=1)
+        if scree_traces:
+            fig.update_xaxes(title_text="principal component",
+                             row=row_idx["feat_scree"], col=1)
+            fig.update_yaxes(title_text="variance ratio", range=[0, 1.02],
+                             row=row_idx["feat_scree"], col=1)
+            parts = []
+            if n90 is not None:
+                parts.append(f"90% @ {n90} PCs")
+            if n95 is not None:
+                parts.append(f"95% @ {n95} PCs")
+            if parts:
+                fig.add_annotation(
+                    text="  ·  ".join(parts), showarrow=False,
+                    xref="x domain", yref="y domain", x=0.98, y=0.12,
+                    xanchor="right", font=dict(size=10, color="#333"),
+                    row=row_idx["feat_scree"], col=1,
+                )
+
+    # ----- Feature redundancy: |correlation| heatmap (own full-width row) -----
+    if "feat_corr" in row_idx:
+        corr_hm = _feature_corr_heatmap(well.trace)
+        if corr_hm is not None:
+            r = row_idx["feat_corr"]
+            fig.add_trace(corr_hm, row=r, col=1)
+            fig.update_xaxes(tickfont=dict(size=8), tickangle=90, row=r, col=1)
+            fig.update_yaxes(tickfont=dict(size=8), autorange="reversed", row=r, col=1)
+            # The heatmap spans the full row width, leaving no room for a colorbar.
+            # Reserve a right gutter by shrinking its x-domain, then anchor the
+            # colorbar to this subplot's y-domain so it sits beside the heatmap
+            # (not floating at figure-center on default paper coords).
+            ref = fig.get_subplot(row=r, col=1)
+            xdom = list(ref.xaxis.domain)
+            ydom = list(ref.yaxis.domain)
+            gutter = 0.10
+            new_x1 = xdom[1] - gutter
+            fig.update_xaxes(domain=[xdom[0], new_x1], row=r, col=1)
+            fig.data[-1].colorbar.update(
+                lenmode="fraction", len=max(0.05, ydom[1] - ydom[0]),
+                y=0.5 * (ydom[0] + ydom[1]), yanchor="middle",
+                x=new_x1 + 0.015, xanchor="left",
+                thickness=10,
+            )
 
     # ----- Tables -----
     ct = _cluster_table(well.diagnostics, well.trace)
@@ -1000,10 +1224,13 @@ def build_well_figure(well: WellBundle) -> go.Figure:
     proj_h = 320 if "pca_umap" in row_idx else (260 if ("pca_only" in row_idx or "umap_only" in row_idx) else 0)
     hist_h = 200 if "hist" in row_idx else 0
     strip_h = 60 if has_strip else 0
+    feat_h = (max(300, 16 * len(spread_result[0])) if "feat_spread" in row_idx else 0) \
+        + (240 if "feat_scree" in row_idx else 0) \
+        + (max(360, 16 * len(corr_result[1])) if "feat_corr" in row_idx else 0)
     fig.update_layout(
         title=dict(text=title, x=0.005, xanchor="left", y=0.995, yanchor="top",
                    font=dict(size=13)),
-        height=900 + proj_h + hist_h + strip_h,
+        height=900 + proj_h + hist_h + strip_h + feat_h,
         width=1500,
         margin=dict(l=60, r=20, t=60, b=60),
         plot_bgcolor="white",

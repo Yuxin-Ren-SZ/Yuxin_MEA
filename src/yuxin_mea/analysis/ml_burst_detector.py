@@ -81,6 +81,13 @@ class MLBurstConfig:
     # ---- Dim reduction ----------------------------------------------------
     pca_n_components: int = 0  # 0 = disabled
 
+    # ---- Clustering embedding & multi-cluster burst selection -------------
+    cluster_embedding_mode: str = "none"  # "none" | "umap"
+    umap_n_neighbors: int = 30
+    umap_min_dist: float = 0.0
+    umap_n_components: int = 5
+    burst_mad_scale: float = 3.0
+
     # ---- HDBSCAN ----------------------------------------------------------
     hdbscan_min_cluster_size: int = 30
     hdbscan_min_samples: int = 5
@@ -120,6 +127,7 @@ class MLBurstTrace:
     hdbscan_probabilities: Optional[np.ndarray] = None
     cluster_ranking: Optional[dict] = None
     burst_label: Optional[int] = None
+    burst_labels: Optional[list] = None
     burst_mask_pre_merge: Optional[np.ndarray] = None
     burst_mask_post_closing: Optional[np.ndarray] = None
     merge_threshold: Optional[float] = None
@@ -328,6 +336,11 @@ def compute_ml_bursts(
         metric=str(config.hdbscan_metric),
         fallback_posterior_threshold=float(config.fallback_posterior_threshold),
         pca_n_components=int(config.pca_n_components),
+        cluster_embedding_mode=str(config.cluster_embedding_mode),
+        umap_n_neighbors=int(config.umap_n_neighbors),
+        umap_min_dist=float(config.umap_min_dist),
+        umap_n_components=int(config.umap_n_components),
+        burst_mad_scale=float(config.burst_mad_scale),
     )
     mask_pre_merge = burst_bin_mask(assignment)
 
@@ -477,8 +490,10 @@ def compute_ml_bursts(
             f.unit_id: float(f.lambda_burst) for f in fits if f.skipped_reason is None
         },
         "cluster_decision": assignment.decision,
+        "cluster_embedding_mode": str(config.cluster_embedding_mode),
         "cluster_n_clusters": int(assignment.n_clusters),
         "cluster_burst_label": int(assignment.burst_label),
+        "cluster_burst_labels": [int(c) for c in (assignment.burst_labels or [])],
         "cluster_ranking": {int(k): float(v) for k, v in assignment.cluster_rank.items()},
         "merge_threshold": float(merge_threshold),
         "burst_modulation_index": float(burst_modulation_index),
@@ -524,6 +539,7 @@ def compute_ml_bursts(
         trace.hdbscan_probabilities = assignment.probabilities.copy()
         trace.cluster_ranking = {int(k): float(v) for k, v in assignment.cluster_rank.items()}
         trace.burst_label = int(assignment.burst_label)
+        trace.burst_labels = [int(c) for c in (assignment.burst_labels or [])]
         trace.burst_mask_pre_merge = mask_pre_merge.copy()
         trace.burst_mask_post_closing = closed_mask.copy()
         trace.merge_threshold = float(merge_threshold)

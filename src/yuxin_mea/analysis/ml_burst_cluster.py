@@ -38,7 +38,13 @@ class ClusterAssignment:
         (n_bins,) cluster-membership probabilities from HDBSCAN. Zero for noise.
     burst_label
         Cluster id that ranked highest by ``ranking_feature``. ``-2`` denotes
-        "fell back to thresholding" (HDBSCAN found no clusters).
+        "fell back to thresholding" (HDBSCAN found no clusters). Kept for
+        back-compat; ``burst_labels`` is the authoritative burst set.
+    burst_labels
+        All cluster ids selected as burst — the top-ranked cluster plus any
+        cluster whose mean ranking exceeds the adaptive threshold. On a manifold
+        the burst trajectory fragments across several clusters, so the burst is a
+        *set*, not one cluster. ``burst_bin_mask`` keys off this.
     cluster_rank
         Mapping {cluster_id → ranking score}. Sorted descending in iteration
         order.
@@ -47,7 +53,8 @@ class ClusterAssignment:
         debug trace can reconstruct the scaled space.
     decision
         Short tag describing the path taken: "hdbscan", "hdbscan_single",
-        "hdbscan_all_noise", "fallback_threshold".
+        "hdbscan_all_noise", "fallback_threshold". UMAP embedding appends
+        "+umap" (e.g. "hdbscan+umap").
     """
 
     labels: np.ndarray
@@ -59,6 +66,7 @@ class ClusterAssignment:
     decision: str = "hdbscan"
     n_clusters: int = 0
     fallback_threshold: Optional[float] = None
+    burst_labels: list = field(default_factory=list)
 
 
 def _background_mask_from_feature(
@@ -87,6 +95,72 @@ def _znorm_with_stats(X: np.ndarray, bg_mask: np.ndarray) -> tuple[np.ndarray, n
     return (X - mu) / std, mu, std
 
 
+def _umap_embed(
+    X_norm: np.ndarray,
+    *,
+    n_components: int,
+    n_neighbors: int,
+    min_dist: float,
+    metric: str,
+) -> Optional[np.ndarray]:
+    """UMAP embedding of the z-normed features for density-based clustering.
+
+    Returns None when ``umap-learn`` is unavailable so the caller can fall back
+    to clustering the raw z-normed space.
+    """
+    try:
+        import umap  # type: ignore
+    except ImportError:
+        return None
+    n = X_norm.shape[0]
+    n_comp = int(min(int(n_components), X_norm.shape[1], max(2, n - 1)))
+    nn = max(2, min(int(n_neighbors), n - 1))
+    reducer = umap.UMAP(
+        n_components=n_comp, n_neighbors=nn, min_dist=float(min_dist),
+        metric=str(metric), random_state=42,
+    )
+    return reducer.fit_transform(X_norm)
+
+
+def _select_burst_clusters(
+    labels: np.ndarray,
+    rank_values_raw: np.ndarray,
+    cluster_rank: dict,
+    *,
+    mad_scale: float,
+) -> list[int]:
+    """Burst = top-ranked cluster ∪ clusters whose mean ranking exceeds an
+    adaptive threshold (median + mad_scale·MAD of the lower half).
+
+    On a UMAP manifold the burst trajectory fragments across several clusters,
+    so a single top cluster under-captures it. The adaptive threshold (computed
+    on the lower half of the ranking signal = background) keeps the small outer
+    non-burst clusters out, since their mean ranking stays low. Always keeping
+    the top-ranked cluster preserves single-cluster / no-burst behavior.
+    """
+    if not cluster_rank:
+        return []
+    top = int(next(iter(cluster_rank)))
+    top_score = float(cluster_rank[top])
+    base = rank_values_raw[rank_values_raw <= np.median(rank_values_raw)]
+    if base.size:
+        med = float(np.median(base))
+        mad = float(np.median(np.abs(base - med)))
+    else:
+        med, mad = float(np.median(rank_values_raw)), 0.0
+    # Adaptive threshold from background spread, floored to at least 25% of the
+    # gap up to the strongest cluster. The floor prevents over-selection when the
+    # background MAD collapses (~0): without it a near-background cluster squeaks
+    # over median+k*MAD and drags resting bins into the burst set.
+    thr = med + float(mad_scale) * max(mad, 1e-6)
+    thr = max(thr, med + 0.25 * (top_score - med))
+    selected = {top}
+    for c, score in cluster_rank.items():
+        if int(c) >= 0 and float(score) > thr:
+            selected.add(int(c))
+    return sorted(selected)
+
+
 def cluster_bins(
     X: np.ndarray,
     feature_names: list[str],
@@ -100,11 +174,26 @@ def cluster_bins(
     metric: str = "euclidean",
     fallback_posterior_threshold: float = 0.3,
     pca_n_components: int = 0,
+    cluster_embedding_mode: str = "none",
+    umap_n_neighbors: int = 30,
+    umap_min_dist: float = 0.0,
+    umap_n_components: int = 5,
+    burst_mad_scale: float = 3.0,
 ) -> ClusterAssignment:
-    """Cluster bins with HDBSCAN; identify the burst cluster by ranking_feature.
+    """Cluster bins with HDBSCAN; identify the burst cluster(s) by ranking_feature.
 
-    Parameters mirror the ``hdbscan.HDBSCAN`` constructor. ``pca_n_components``
-    of 0 disables PCA; any positive value applies sklearn's PCA after z-norm.
+    Parameters mirror the ``hdbscan.HDBSCAN`` constructor. The clustering space
+    is selected by ``cluster_embedding_mode``:
+
+    - ``"none"``: cluster the z-normed features directly (optionally PCA-reduced
+      when ``pca_n_components`` > 0 — kept for back-compat).
+    - ``"umap"``: cluster a UMAP embedding of the z-normed features. The burst is
+      a low-density trajectory that HDBSCAN discards as noise in the raw space;
+      UMAP collapses it into a dense region HDBSCAN can recover.
+
+    Burst selection is multi-cluster (see ``_select_burst_clusters``): the burst
+    trajectory fragments across clusters on the manifold, so ``burst_labels`` is
+    a set, while ``burst_label`` remains the top-ranked id for back-compat.
     """
     if ranking_feature not in feature_names:
         raise ValueError(
@@ -117,7 +206,21 @@ def cluster_bins(
     bg_mask = _background_mask_from_feature(rank_values_raw, background_quantile)
     X_norm, mu, std = _znorm_with_stats(X, bg_mask)
 
-    if pca_n_components and int(pca_n_components) > 0:
+    embed_suffix = ""
+    if str(cluster_embedding_mode) == "umap":
+        emb = _umap_embed(
+            X_norm,
+            n_components=umap_n_components,
+            n_neighbors=umap_n_neighbors,
+            min_dist=umap_min_dist,
+            metric=metric,
+        )
+        if emb is not None:
+            X_to_cluster = emb
+            embed_suffix = "+umap"
+        else:
+            X_to_cluster = X_norm  # umap-learn unavailable; degrade to raw space
+    elif pca_n_components and int(pca_n_components) > 0:
         try:
             from sklearn.decomposition import PCA
         except ImportError:
@@ -145,9 +248,11 @@ def cluster_bins(
         probabilities = np.clip(rank_values_raw, 0.0, 1.0)
         # Treat the "above threshold" bin set as a single synthetic cluster.
         burst_label = 1
+        burst_labels: list = []
         if (labels == 1).any():
             cluster_rank = {1: float(rank_values_raw[labels == 1].mean())}
             n_clusters = 1
+            burst_labels = [1]
         return ClusterAssignment(
             labels=labels,
             probabilities=probabilities,
@@ -158,6 +263,7 @@ def cluster_bins(
             decision=decision,
             n_clusters=n_clusters,
             fallback_threshold=fallback_threshold,
+            burst_labels=burst_labels,
         )
 
     clusterer = hdbscan.HDBSCAN(
@@ -173,9 +279,10 @@ def cluster_bins(
     unique = sorted(set(int(c) for c in labels if c >= 0))
     n_clusters = len(unique)
 
+    burst_labels: list = []
     if n_clusters == 0:
         # All noise — fall back to thresholding on the ranking feature.
-        decision = "hdbscan_all_noise"
+        decision = "hdbscan_all_noise" + embed_suffix
         fallback_threshold = float(fallback_posterior_threshold)
         labels = np.where(rank_values_raw > fallback_threshold, 1, -1).astype(int)
         probabilities = np.clip(rank_values_raw, 0.0, 1.0)
@@ -183,6 +290,7 @@ def cluster_bins(
         if (labels == 1).any():
             cluster_rank = {1: float(rank_values_raw[labels == 1].mean())}
             n_clusters = 1
+            burst_labels = [1]
     else:
         # Rank clusters by mean of the ranking feature in the original (raw)
         # space — that's the interpretable quantity (e.g. mean fraction of
@@ -193,8 +301,12 @@ def cluster_bins(
         # Sort by score descending so iteration order is stable
         cluster_rank = dict(sorted(cluster_rank.items(), key=lambda kv: -kv[1]))
         burst_label = int(next(iter(cluster_rank)))
-        if n_clusters == 1:
-            decision = "hdbscan_single"
+        # Multi-cluster burst selection: the trajectory fragments across clusters
+        # on the manifold, so select every high-ranking cluster, not just the top.
+        burst_labels = _select_burst_clusters(
+            labels, rank_values_raw, cluster_rank, mad_scale=burst_mad_scale
+        )
+        decision = ("hdbscan_single" if n_clusters == 1 else "hdbscan") + embed_suffix
 
     return ClusterAssignment(
         labels=labels,
@@ -206,12 +318,15 @@ def cluster_bins(
         decision=decision,
         n_clusters=n_clusters,
         fallback_threshold=fallback_threshold,
+        burst_labels=burst_labels,
     )
 
 
 def burst_bin_mask(assignment: ClusterAssignment) -> np.ndarray:
-    """Boolean mask selecting bins assigned to the burst cluster."""
-    return assignment.labels == assignment.burst_label
+    """Boolean mask selecting bins assigned to any burst cluster."""
+    bl = assignment.burst_labels or ([assignment.burst_label]
+                                     if assignment.burst_label is not None else [])
+    return np.isin(assignment.labels, list(bl))
 
 
 def _binary_closing_1d(mask: np.ndarray, size: int) -> np.ndarray:

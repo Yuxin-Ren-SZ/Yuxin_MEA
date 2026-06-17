@@ -44,18 +44,20 @@ TRAIL_LINE_ALPHA = 0.4
 BALL_SIZE = 220
 
 
-def _cluster_rgba_map(labels: np.ndarray, burst_label: int | None) -> dict[int, tuple]:
+def _cluster_rgba_map(labels: np.ndarray, burst_labels: set[int] | None) -> dict[int, tuple]:
     """Map each HDBSCAN label to a matplotlib RGBA tuple.
 
     Mirrors inspect_ml_bursts colors (burst = red, noise = grey, others cycle
     the palette) but as RGBA tuples so per-point alpha is trivial to apply.
+    The burst trajectory may span several clusters, so ``burst_labels`` is a set.
     """
+    burst_labels = burst_labels or set()
     out: dict[int, tuple] = {}
     palette_i = 0
     for lbl in sorted(set(int(x) for x in labels)):
         if lbl == -1:
             out[lbl] = NOISE_RGBA
-        elif burst_label is not None and lbl == int(burst_label):
+        elif lbl in burst_labels:
             out[lbl] = to_rgba(iml.BURST_COLOR)
         else:
             out[lbl] = to_rgba(iml.CLUSTER_PALETTE[palette_i % len(iml.CLUSTER_PALETTE)])
@@ -128,10 +130,15 @@ def _animate_well(
         labels = np.asarray(labels_full)[kept].astype(int)
     else:
         labels = np.full(coords.shape[0], -1, dtype=int)
-    burst_label = getattr(trace, "burst_label", None)
+    burst_labels = getattr(trace, "burst_labels", None)
+    if burst_labels:
+        burst_labels = {int(c) for c in burst_labels if int(c) != -1}
+    else:
+        bl = getattr(trace, "burst_label", None)
+        burst_labels = {int(bl)} if bl is not None and int(bl) != -1 else set()
 
     n = coords.shape[0]
-    rgba_map = _cluster_rgba_map(labels, burst_label)
+    rgba_map = _cluster_rgba_map(labels, burst_labels)
     point_rgba = np.array([rgba_map[int(l)] for l in labels], dtype=float)  # (n, 4)
 
     # Derive fps from target duration, but cap at 60 (players choke above that);

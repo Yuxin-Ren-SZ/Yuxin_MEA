@@ -14,6 +14,7 @@ from yuxin_mea.analysis.ml_burst_cluster import (
 
 
 HDBSCAN_AVAILABLE = importlib.util.find_spec("hdbscan") is not None
+UMAP_AVAILABLE = importlib.util.find_spec("umap") is not None
 
 
 def _two_blob_features(
@@ -61,10 +62,33 @@ class ClusterBinsTests(unittest.TestCase):
         # Should find at least one cluster, and burst_label should match the
         # synthetic "burst" regime majority-wise.
         self.assertGreaterEqual(assignment.n_clusters, 1)
+        # burst_labels is the authoritative set and must contain the top label.
+        self.assertIn(assignment.burst_label, assignment.burst_labels)
         recovered = burst_bin_mask(assignment)
         # Recovered burst bins should overlap heavily with the true burst bins.
         overlap = (recovered & true_mask).sum() / max(true_mask.sum(), 1)
         self.assertGreater(overlap, 0.7)
+
+    @unittest.skipUnless(HDBSCAN_AVAILABLE and UMAP_AVAILABLE,
+                         "hdbscan/umap not installed")
+    def test_umap_embedding_recovers_burst(self):
+        X, names, true_mask = _two_blob_features(seed=7)
+        assignment = cluster_bins(
+            X, names,
+            ranking_feature="post_frac_gt_0_5",
+            min_cluster_size=20, min_samples=5,
+            cluster_embedding_mode="umap",
+            umap_n_components=5, umap_n_neighbors=30, umap_min_dist=0.0,
+        )
+        self.assertTrue(assignment.decision.endswith("+umap"))
+        self.assertGreaterEqual(len(assignment.burst_labels), 1)
+        recovered = burst_bin_mask(assignment)
+        overlap = (recovered & true_mask).sum() / max(true_mask.sum(), 1)
+        self.assertGreater(overlap, 0.7)
+        # Resting bins should not be swept into burst (multi-cluster selection
+        # keeps the low-posterior background out).
+        fp = (recovered & ~true_mask).sum() / max((~true_mask).sum(), 1)
+        self.assertLess(fp, 0.2)
 
     def test_fallback_when_hdbscan_unavailable_or_all_noise(self):
         # Use a 1-feature blob with low contrast so even if hdbscan is present
@@ -79,13 +103,14 @@ class ClusterBinsTests(unittest.TestCase):
         assignment = cluster_bins(
             X, names,
             ranking_feature="post_frac_gt_0_5",
-            min_cluster_size=100,  # forces hdbscan to find no clusters → fallback
+            min_cluster_size=n + 100,  # larger than n_bins → no cluster can form → fallback
             min_samples=5,
             fallback_posterior_threshold=0.5,
         )
         self.assertIn(assignment.decision, {"hdbscan_all_noise", "fallback_threshold", "hdbscan_single"})
         if assignment.decision != "hdbscan_single":
             self.assertEqual(assignment.burst_label, 1)
+            self.assertEqual(assignment.burst_labels, [1])
             mask = burst_bin_mask(assignment)
             self.assertGreaterEqual(mask.sum(), 1)
 

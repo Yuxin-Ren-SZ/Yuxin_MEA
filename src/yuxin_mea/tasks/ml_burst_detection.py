@@ -62,6 +62,12 @@ class MLBurstDetectionTask(BaseAnalysisTask):
             "unit_agg_quantile": 0.9,
             # ---- Dim reduction -------------------------------------------
             "pca_n_components": 0,
+            # ---- Clustering embedding & multi-cluster burst selection -----
+            "cluster_embedding_mode": "none",
+            "umap_n_neighbors": 30,
+            "umap_min_dist": 0.0,
+            "umap_n_components": 5,
+            "burst_mad_scale": 3.0,
             # ---- HDBSCAN --------------------------------------------------
             "hdbscan_min_cluster_size": 30,
             "hdbscan_min_samples": 5,
@@ -190,7 +196,40 @@ class MLBurstDetectionTask(BaseAnalysisTask):
             "pca_n_components": ParamSpec(
                 "int", defaults["pca_n_components"],
                 "If > 0, apply PCA to the z-normed feature matrix before "
-                "HDBSCAN. 0 disables PCA (default).",
+                "HDBSCAN. 0 disables PCA (default). Ignored when "
+                "cluster_embedding_mode='umap'.",
+                min=0,
+            ),
+            "cluster_embedding_mode": ParamSpec(
+                "str", defaults["cluster_embedding_mode"],
+                "Space HDBSCAN clusters in. 'none' = z-normed features (or PCA "
+                "if pca_n_components>0); 'umap' = UMAP embedding of the z-normed "
+                "features, which recovers the low-density burst trajectory that "
+                "HDBSCAN discards as noise in the raw space.",
+                choices=["none", "umap"],
+            ),
+            "umap_n_neighbors": ParamSpec(
+                "int", defaults["umap_n_neighbors"],
+                "UMAP n_neighbors when cluster_embedding_mode='umap'.",
+                min=2,
+            ),
+            "umap_min_dist": ParamSpec(
+                "float", defaults["umap_min_dist"],
+                "UMAP min_dist when cluster_embedding_mode='umap' (0 packs "
+                "points tightly, best for clustering).",
+                min=0, max=1,
+            ),
+            "umap_n_components": ParamSpec(
+                "int", defaults["umap_n_components"],
+                "UMAP output dimensionality clustered by HDBSCAN when "
+                "cluster_embedding_mode='umap'.",
+                min=2,
+            ),
+            "burst_mad_scale": ParamSpec(
+                "float", defaults["burst_mad_scale"],
+                "Multi-cluster burst selection: a cluster is burst if its mean "
+                "ranking feature exceeds median+mad_scale*MAD of the background "
+                "(lower half). The top-ranked cluster is always included.",
                 min=0,
             ),
             "hdbscan_min_cluster_size": ParamSpec(
@@ -363,6 +402,11 @@ class MLBurstDetectionTask(BaseAnalysisTask):
             background_quantile=float(p["background_quantile"]),
             unit_agg_quantile=float(p["unit_agg_quantile"]),
             pca_n_components=int(p["pca_n_components"]),
+            cluster_embedding_mode=str(p["cluster_embedding_mode"]),
+            umap_n_neighbors=int(p["umap_n_neighbors"]),
+            umap_min_dist=float(p["umap_min_dist"]),
+            umap_n_components=int(p["umap_n_components"]),
+            burst_mad_scale=float(p["burst_mad_scale"]),
             hdbscan_min_cluster_size=int(p["hdbscan_min_cluster_size"]),
             hdbscan_min_samples=int(p["hdbscan_min_samples"]),
             hdbscan_cluster_selection_epsilon=float(p["hdbscan_cluster_selection_epsilon"]),
