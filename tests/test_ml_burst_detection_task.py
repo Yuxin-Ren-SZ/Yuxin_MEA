@@ -167,5 +167,22 @@ class MLBurstDetectionTaskOutputTests(unittest.TestCase):
         self.assertEqual(schema["debug"].type, "bool")
 
 
+class MLBurstConfigFromParamsTests(unittest.TestCase):
+    def test_full_default_params_round_trip(self):
+        # default_params() carries extra keys (output_root, debug, ...) that are
+        # not config fields; from_task_params must ignore them and cast the rest.
+        cfg = MLBurstConfig.from_task_params(MLBurstDetectionTask.default_params())
+        self.assertEqual(cfg.cluster_embedding_mode, "none")
+        self.assertIsInstance(cfg.ff_scale_multipliers, tuple)
+
+    def test_partial_params_keep_defaults_and_cast(self):
+        cfg = MLBurstConfig.from_task_params(
+            {"cluster_embedding_mode": "umap", "umap_n_components": "7"}
+        )
+        self.assertEqual(cfg.cluster_embedding_mode, "umap")
+        self.assertEqual(cfg.umap_n_components, 7)          # cast str -> int
+        self.assertEqual(cfg.hmm_max_iter, MLBurstConfig().hmm_max_iter)  # default kept
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,7 @@ from yuxin_mea.analysis.burst_inspector import (
     fig_composite_basic,
     fig_raster_basic,
     load_generic_bundle,
+    output_root_from_cache,
     summary_card,
 )
 from yuxin_mea.config import ConfigManager
@@ -238,6 +239,12 @@ def _prefill_root(method: str | None):
 
     task_name = METHOD_TASK_NAMES.get(method, "ml_burst_detection")
     subdir = METHOD_SUBDIRS.get(method, "ml_burst_data")
+
+    # Source of truth: where the pipeline actually wrote (follows re-runs /
+    # changed output_root). Fall back to config output_root, then convention.
+    from_cache = output_root_from_cache(analysis_root, method)
+    if from_cache is not None and from_cache.exists():
+        return str(from_cache), f"Default from pipeline_cache (`{task_name}.output_path`): {from_cache}"
 
     cm = _load_config_manager()
     params = cm.get_task_params(task_name) or {}

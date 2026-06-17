@@ -16,6 +16,8 @@ Public API:
 """
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -23,6 +25,8 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+
+logger = logging.getLogger(__name__)
 
 # Method → terminal directory name inside each well's output path.
 METHOD_TERMINALS: dict[str, str] = {
@@ -41,6 +45,56 @@ METHOD_SUBDIRS: dict[str, str] = {
     "traditional": "burst_detection_data",
     "ml": "ml_burst_data",
 }
+
+
+def output_root_from_cache(analysis_root: Path | str, method: str) -> Path | None:
+    """Recover a method's burst output_root from ``pipeline_cache.json``.
+
+    The pipeline cache is the source of truth for where task outputs live (it
+    records the actual ``output_path`` the detector wrote to), so this stays
+    correct even when ``output_root`` is changed between runs — unlike resolving
+    from the config or a hardcoded convention subdir. Mirrors how
+    ``scripts/inspect_ml_bursts.py`` discovers wells.
+
+    Each completed entry stores ``output_path`` as
+    ``<root>/<recording_key>/<rec_name>/<well_id>/<terminal>``; we strip that
+    per-well suffix to recover the shared ``<root>``. Returns None when the cache
+    is missing or has no completed entry for the method's task.
+    """
+    task = METHOD_TASK_NAMES.get(method)
+    terminal = METHOD_TERMINALS.get(method)
+    if not task or not terminal:
+        return None
+    pc_path = Path(analysis_root) / "pipeline_cache.json"
+    if not pc_path.exists():
+        return None
+    try:
+        with pc_path.open() as fh:
+            cache = json.load(fh)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to read %s: %s", pc_path, exc)
+        return None
+    for entry in cache.values():
+        t = (entry.get("tasks") or {}).get(task)
+        if not t or t.get("status") != "complete":
+            continue
+        op = t.get("output_path")
+        rec_key = entry.get("recording_key")
+        compound = entry.get("well_id", "")
+        if not op or not rec_key or "/" not in compound:
+            continue
+        rec_name, well_id = compound.split("/", 1)
+        rel = Path(rec_key) / rec_name / well_id / terminal
+        op_path = Path(op)
+        # Only trust entries whose output_path actually ends with the expected
+        # per-well suffix, then strip it to get the shared root.
+        if op_path.parts[-len(rel.parts):] != rel.parts:
+            continue
+        root = op_path
+        for _ in range(len(rel.parts)):
+            root = root.parent
+        return root
+    return None
 
 
 # ---------------------------------------------------------------------------

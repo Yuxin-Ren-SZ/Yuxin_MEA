@@ -23,7 +23,7 @@ materialisation).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as _dc_fields
 from typing import Optional
 
 import numpy as np
@@ -103,6 +103,35 @@ class MLBurstConfig:
     merge_floor_frac: float = 0.70
     network_merge_gap_min_s: float = 0.75
     min_burst_modulation: float = 0.1
+
+    @classmethod
+    def from_task_params(cls, params: dict) -> "MLBurstConfig":
+        """Build a config from a task-params dict (e.g. pipeline config).
+
+        Only known dataclass fields are read; each is cast by the type of its
+        default and missing keys keep the default. Extra keys (output_root,
+        debug, ...) are ignored. Used by the detection task and by the dashboard
+        burst-diagnostic page so an on-demand recompute honors the same params
+        as the pipeline run instead of silently using bare defaults.
+        """
+        kwargs: dict = {}
+        for f in _dc_fields(cls):
+            if f.name not in params:
+                continue
+            v = params[f.name]
+            if f.name == "ff_scale_multipliers":
+                kwargs[f.name] = tuple(float(x) for x in v)
+            elif isinstance(f.default, bool):
+                kwargs[f.name] = bool(v)
+            elif isinstance(f.default, int):
+                kwargs[f.name] = int(v)
+            elif isinstance(f.default, float):
+                kwargs[f.name] = float(v)
+            elif isinstance(f.default, str):
+                kwargs[f.name] = str(v)
+            else:
+                kwargs[f.name] = v
+        return cls(**kwargs)
 
 
 @dataclass

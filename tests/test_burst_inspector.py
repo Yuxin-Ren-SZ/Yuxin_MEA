@@ -20,9 +20,40 @@ from yuxin_mea.analysis.burst_inspector import (
     fig_composite_basic,
     fig_raster_basic,
     load_generic_bundle,
+    output_root_from_cache,
     summary_card,
 )
 from yuxin_mea.analysis.burst_output import PickleBurstOutputWriter
+
+
+class OutputRootFromCacheTests(unittest.TestCase):
+    def _write_cache(self, analysis_root: Path, output_root: str) -> None:
+        import json
+        rec_key = "EXP/2026/Plate/Network/000001"
+        cache = {
+            "EXP::rec0000/well000": {
+                "recording_key": rec_key,
+                "well_id": "rec0000/well000",
+                "tasks": {
+                    "ml_burst_detection": {
+                        "status": "complete",
+                        "output_path": f"{output_root}/{rec_key}/rec0000/well000/ml_burst_detection",
+                    }
+                },
+            }
+        }
+        (analysis_root / "pipeline_cache.json").write_text(json.dumps(cache))
+
+    def test_recovers_root_from_output_path(self):
+        with TemporaryDirectory() as tmp:
+            ar = Path(tmp)
+            new_root = "/data/analysis/EXP/ml_burst_data_umap"
+            self._write_cache(ar, new_root)
+            self.assertEqual(output_root_from_cache(ar, "ml"), Path(new_root))
+
+    def test_missing_cache_returns_none(self):
+        with TemporaryDirectory() as tmp:
+            self.assertIsNone(output_root_from_cache(Path(tmp), "ml"))
 
 
 def _synthetic_burst_spike_trains(

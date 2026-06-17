@@ -26,6 +26,7 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback, ctx, dcc, html
 from flask import current_app
 
+from yuxin_mea.analysis.burst_inspector import output_root_from_cache
 from yuxin_mea.analysis.plate_raster_synchrony import (
     PlateViewerConfig,
     build_plate_figure,
@@ -234,6 +235,12 @@ def _resolve_source(source: str | None) -> tuple[str, str]:
 
 
 def _resolve_burst_root(analysis_root: Path, source: str | None) -> Path:
+    # Prefer the pipeline cache (source of truth for where the detector actually
+    # wrote), so the viewer follows re-runs / changed output_root. Fall back to
+    # the conventional subdir only when the cache has nothing for this method.
+    from_cache = output_root_from_cache(analysis_root, str(source or "traditional"))
+    if from_cache is not None:
+        return from_cache
     burst_subdir, _ = _resolve_source(source)
     return Path(analysis_root) / burst_subdir
 

@@ -384,42 +384,7 @@ class MLBurstDetectionTask(BaseAnalysisTask):
             spike_times_path, allow_pickle=True
         ).item()
 
-        config = MLBurstConfig(
-            bin_size_mode=str(p["bin_size_mode"]),
-            fixed_bin_size_s=float(p["fixed_bin_size_s"]),
-            hmm_max_iter=int(p["hmm_max_iter"]),
-            hmm_tol=float(p["hmm_tol"]),
-            hmm_min_spikes=int(p["hmm_min_spikes"]),
-            hmm_init_strategy=str(p["hmm_init_strategy"]),
-            hmm_min_rate_ratio=float(p["hmm_min_rate_ratio"]),
-            hmm_random_state=int(p["hmm_random_state"]),
-            hmm_n_jobs=int(p["hmm_n_jobs"]),
-            ff_scale_multipliers=tuple(float(x) for x in p["ff_scale_multipliers"]),
-            posterior_quantile=float(p["posterior_quantile"]),
-            isi_window_bins=int(p["isi_window_bins"]),
-            deriv_sigma_short_bins=float(p["deriv_sigma_short_bins"]),
-            deriv_sigma_long_bins=float(p["deriv_sigma_long_bins"]),
-            background_quantile=float(p["background_quantile"]),
-            unit_agg_quantile=float(p["unit_agg_quantile"]),
-            pca_n_components=int(p["pca_n_components"]),
-            cluster_embedding_mode=str(p["cluster_embedding_mode"]),
-            umap_n_neighbors=int(p["umap_n_neighbors"]),
-            umap_min_dist=float(p["umap_min_dist"]),
-            umap_n_components=int(p["umap_n_components"]),
-            burst_mad_scale=float(p["burst_mad_scale"]),
-            hdbscan_min_cluster_size=int(p["hdbscan_min_cluster_size"]),
-            hdbscan_min_samples=int(p["hdbscan_min_samples"]),
-            hdbscan_cluster_selection_epsilon=float(p["hdbscan_cluster_selection_epsilon"]),
-            hdbscan_cluster_selection_method=str(p["hdbscan_cluster_selection_method"]),
-            hdbscan_metric=str(p["hdbscan_metric"]),
-            cluster_ranking_feature=str(p["cluster_ranking_feature"]),
-            fallback_posterior_threshold=float(p["fallback_posterior_threshold"]),
-            closing_bins=int(p["closing_bins"]),
-            merge_mad_scale=float(p["merge_mad_scale"]),
-            merge_floor_frac=float(p["merge_floor_frac"]),
-            network_merge_gap_min_s=float(p["network_merge_gap_min_s"]),
-            min_burst_modulation=float(p["min_burst_modulation"]),
-        )
+        config = MLBurstConfig.from_task_params(p)
 
         debug_enabled = bool(p.get("debug", False))
         trace = MLBurstTrace() if debug_enabled else None

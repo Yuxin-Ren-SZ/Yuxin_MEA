@@ -218,16 +218,33 @@ def cache_path(analysis_root: Path, key: str) -> Path:
     return Path(analysis_root) / "burst_diagnostic_cache" / f"{key}.pkl"
 
 
+def _ml_config_fingerprint(ml_config) -> str:
+    """Short stable hash of an MLBurstConfig's fields (or '' when None).
+
+    Appended to the diagnostic cache key so changing detector params (e.g.
+    cluster_embedding_mode none → umap) invalidates the cached recompute instead
+    of silently returning stale results.
+    """
+    if ml_config is None:
+        return ""
+    import dataclasses
+    payload = repr(sorted(dataclasses.asdict(ml_config).items()))
+    return "_cfg" + hashlib.sha1(payload.encode()).hexdigest()[:8]
+
+
 def run_batch_generic(
     sources: list[Path],
     method: str,
     labels: set[str] | None = frozenset({"good"}),
     verbose: bool = True,
+    ml_config=None,
 ) -> BatchResults:
     """Run a burst detector on every source.
 
     Supports ``"traditional"`` and ``"ml"`` methods. Returns a BatchResults
-    with ``results`` populated.
+    with ``results`` populated. ``ml_config`` (an ``MLBurstConfig``) is passed to
+    the ML detector so an on-demand recompute honors the pipeline params; None
+    falls back to the detector defaults.
     """
     batch = BatchResults(method=method)
     for source in sources:
@@ -240,7 +257,7 @@ def run_batch_generic(
             res = compute_network_bursts(st)
         elif method == "ml":
             from yuxin_mea.analysis.ml_burst_detector import compute_ml_bursts
-            res = compute_ml_bursts(st)
+            res = compute_ml_bursts(st, config=ml_config)
         else:
             raise ValueError(f"Unknown method: {method!r}")
 
@@ -256,6 +273,7 @@ def load_or_run_batch(
     *,
     force_recompute: bool = False,
     method: str = "ml",
+    ml_config=None,
 ) -> tuple[BatchResults, bool]:
     """Return ``(batch, came_from_cache)``. Writes the cache on a fresh run.
 
@@ -271,7 +289,7 @@ def load_or_run_batch(
     if not sources:
         raise FileNotFoundError(f"No Kilosort sources under {root}")
 
-    ck = f"{cache_key(root)}_{method}"
+    ck = f"{cache_key(root)}_{method}{_ml_config_fingerprint(ml_config)}"
     cache_file: Path | None = None
     if analysis_root is not None:
         cache_file = cache_path(analysis_root, ck)
@@ -281,6 +299,7 @@ def load_or_run_batch(
 
     batch = run_batch_generic(
         sources, method=method, labels=frozenset({"good"}), verbose=False,
+        ml_config=ml_config,
     )
 
     if cache_file is not None:

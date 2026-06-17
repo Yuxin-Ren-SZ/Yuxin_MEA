@@ -26,6 +26,7 @@ from yuxin_mea.analysis.burst_diagnostic import (
     fig_generic_summary,
     load_or_run_batch,
 )
+from yuxin_mea.analysis.ml_burst_detector import MLBurstConfig
 from yuxin_mea.config import ConfigManager
 
 
@@ -189,11 +190,24 @@ def _load_or_recompute(_l: int, _r: int, root: str, method: str | None):
 
     method = method or "ml"
     force = ctx.triggered_id == "burst-diag-recompute-btn"
-    analysis_root = current_app.config.get("YUXIN_MEA", {}).get("analysis_root")
+    yuxin_ctx = current_app.config.get("YUXIN_MEA", {})
+    analysis_root = yuxin_ctx.get("analysis_root")
+    config_path = yuxin_ctx.get("config_path")
+
+    # Honor the pipeline's ML params on recompute so the diagnostic matches the
+    # configured detector (e.g. UMAP embedding) instead of bare defaults.
+    ml_config = None
+    if method == "ml" and config_path is not None:
+        cm = ConfigManager()
+        cm.load(config_path)
+        params = cm.get_task_params("ml_burst_detection") or {}
+        if params:
+            ml_config = MLBurstConfig.from_task_params(params)
+
     try:
         batch, from_cache = load_or_run_batch(
             Path(root), analysis_root,
-            force_recompute=force, method=method,
+            force_recompute=force, method=method, ml_config=ml_config,
         )
     except FileNotFoundError as exc:
         return dash.no_update, f"error: {exc}"
