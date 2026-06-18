@@ -2,9 +2,10 @@
 
 Loads ``curated_spike_times.npy`` from ``auto_curation`` output, constructs an
 ``MLBurstConfig`` from the resolved params, runs ``compute_ml_bursts``, and
-writes a standard BurstResults bundle (``burstlets.pkl``,
-``network_bursts.pkl``, ``superbursts.pkl``, ``metrics.json``,
-``diagnostics.json``, ``plot_signals.npy``) to its own output directory.
+writes a single-level BurstResults bundle (``network_bursts.pkl`` — the bursts,
+each row carrying ``cluster_ids`` — plus ``metrics.json``, ``diagnostics.json``,
+``plot_signals.npy``) to its own output directory. The burstlet and superburst
+tiers are intentionally not written.
 
 When ``debug=True`` it also persists ``debug_trace.pkl``,
 ``debug_spike_times.npy``, and ``debug_config.json`` so a future ML-aware
@@ -396,7 +397,9 @@ class MLBurstDetectionTask(BaseAnalysisTask):
             rec_name,
             actual_well_id,
         )
-        PickleBurstOutputWriter().write(results, output_dir)
+        # ML detector emits a single burst level — write only network_bursts.pkl
+        # (burstlets/superbursts are dropped, not written as empty files).
+        PickleBurstOutputWriter().write(results, output_dir, levels={"network_bursts"})
 
         if trace is not None:
             with open(output_dir / "debug_trace.pkl", "wb") as fh:

@@ -71,7 +71,7 @@ def _params(tmp_path: Path, *, debug: bool, override: dict | None = None) -> dic
 
 
 class MLBurstDetectionTaskOutputTests(unittest.TestCase):
-    def test_writes_standard_burst_results_layout(self):
+    def test_writes_single_level_burst_results_layout(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             _stage_curation_dir(tmp_path)
@@ -81,10 +81,9 @@ class MLBurstDetectionTaskOutputTests(unittest.TestCase):
                 tmp_path / "data.h5",
                 _params(tmp_path, debug=False),
             )
+            # Single burst level: only network_bursts.pkl plus the non-event files.
             for name in (
-                "burstlets.pkl",
                 "network_bursts.pkl",
-                "superbursts.pkl",
                 "metrics.json",
                 "diagnostics.json",
                 "plot_signals.npy",
@@ -93,6 +92,18 @@ class MLBurstDetectionTaskOutputTests(unittest.TestCase):
                     (output_path / name).exists(),
                     f"missing output file: {name}",
                 )
+            # Burstlet and superburst tiers are dropped, not written as empty files.
+            for name in ("burstlets.pkl", "superbursts.pkl"):
+                self.assertFalse(
+                    (output_path / name).exists(),
+                    f"unexpected output file: {name}",
+                )
+            # Each burst row carries its source HDBSCAN cluster id(s).
+            import pandas as pd
+
+            bursts = pd.read_pickle(output_path / "network_bursts.pkl")
+            if not bursts.empty:
+                self.assertIn("cluster_ids", bursts.columns)
 
     def test_debug_true_persists_trace_and_config(self):
         with TemporaryDirectory() as tmp:

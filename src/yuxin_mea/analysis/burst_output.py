@@ -52,15 +52,33 @@ class PickleBurstOutputWriter(BurstOutputWriter):
         "superbursts": "superbursts.pkl",
     }
 
-    def write(self, results: BurstResults, output_dir: Path) -> None:
+    def write(
+        self,
+        results: BurstResults,
+        output_dir: Path,
+        levels: set[str] | None = None,
+    ) -> None:
+        """Persist results into output_dir.
+
+        ``levels`` selects which event tiers to write. ``None`` (default) writes
+        all three (``burstlets``/``network_bursts``/``superbursts``) — the
+        traditional detector relies on this. Passing an explicit set (e.g.
+        ``{"network_bursts"}`` for the single-level ML detector) writes only
+        those tiers and removes any stale pickle for an omitted tier.
+        """
         import pandas as pd
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         for attr, filename in self._EVENT_FILES.items():
-            df = getattr(results, attr)
             dest = output_dir / filename
+            if levels is not None and attr not in levels:
+                # Tier intentionally omitted — drop any stale file from a prior run.
+                if dest.exists():
+                    dest.unlink()
+                continue
+            df = getattr(results, attr)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 df.to_pickle(dest)
             else:

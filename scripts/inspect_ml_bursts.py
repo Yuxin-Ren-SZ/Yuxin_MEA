@@ -49,9 +49,7 @@ CUR_TASK = "auto_curation"
 PLATE_COLS = 6
 
 EVENT_TRACKS = [
-    ("burstlets", "Burstlets", "rgba(31, 119, 180, 0.55)"),
-    ("network_bursts", "Network bursts", "rgba(255, 127, 14, 0.75)"),
-    ("superbursts", "Superbursts", "rgba(148, 103, 189, 0.55)"),
+    ("network_bursts", "Bursts", "rgba(255, 127, 14, 0.75)"),
 ]
 RASTER_COLOR = "rgba(40, 40, 40, 0.85)"
 MAX_RASTER_POINTS_PER_WELL = 12_000
@@ -522,7 +520,7 @@ def _compute_pca_axes(trace) -> tuple[np.ndarray, str, str] | None:
     n_comp = min(2, Z.shape[1])
     if n_comp < 2:
         return None
-    pca = PCA(n_components=2, random_state=0).fit(Z)
+    pca = PCA(n_components=2, random_state=42).fit(Z)
     coords = pca.transform(Z)
     fnames = list(trace.feature_names or [])
 
@@ -608,7 +606,7 @@ def _compute_pca_scree(trace) -> tuple[np.ndarray, np.ndarray] | None:
     n_comp = min(Z.shape[1], Z.shape[0] - 1)
     if n_comp < 2:
         return None
-    pca = PCA(n_components=n_comp, random_state=0).fit(Z)
+    pca = PCA(n_components=n_comp, random_state=42).fit(Z)
     evr = np.asarray(pca.explained_variance_ratio_, dtype=float)
     return evr, np.cumsum(evr)
 
@@ -967,7 +965,7 @@ def build_well_figure(well: WellBundle) -> go.Figure:
     # title each and 2-cell rows (pca_umap, tables) contribute two.
     SINGLE_TITLES = {
         "raster":    "Spike raster (units ranked by firing rate)",
-        "events":    "Burst events (lanes: burstlets / network_bursts / superbursts)",
+        "events":    "Burst events",
         "signals":   "Driving signals (ranking_signal drives HDBSCAN ranking)",
         "strip":     "HDBSCAN cluster label per bin",
         "pca_only":  "PCA(2) of z-normed features — what HDBSCAN saw",

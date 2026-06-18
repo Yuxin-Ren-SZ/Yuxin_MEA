@@ -6,10 +6,12 @@ Wires together the four building blocks:
   2. Per-unit 2-state Poisson HMM → (λ_bg_u, λ_burst_u, posterior) per unit
   3. Bin-level feature matrix (HMM aggregates + population + per-unit LLR/ISI
      + temporal derivatives)
-  4. HDBSCAN cluster → burst-label bin mask → temporal merge → hierarchy
-     (burstlets → strict-merge network_bursts → clustered-merge superbursts)
-  5. ``BurstResults`` materialisation (same layout as iterative detector so
-     dashboard tooling and ``PickleBurstOutputWriter`` work unchanged)
+  4. HDBSCAN cluster → burst-label bin mask → temporal merge → bursts
+     (single level; the materialised candidate events are the bursts)
+  5. ``BurstResults`` materialisation. The ML detector emits a SINGLE burst
+     level, carried in the ``network_bursts`` field (``burstlets`` and
+     ``superbursts`` are left empty); each burst row also carries
+     ``cluster_ids`` — the HDBSCAN cluster id(s) spanning it.
 
 The output schema additions for the ML detector are the four per-event quality
 columns: ``posterior_peak``, ``posterior_mean``, ``llr_aggregate``, ``ff_peak``.
@@ -170,61 +172,6 @@ class MLBurstTrace:
 # ---------------------------------------------------------------------------
 # Internal helpers (event materialisation / finalisation)
 # ---------------------------------------------------------------------------
-
-
-def _ml_finalize_event(
-    evs: list[dict],
-    s: float,
-    e: float,
-    *,
-    units: list,
-    spike_times: dict,
-    n_units: int,
-    composite: np.ndarray,        # ranking_signal (post_frac_gt_0_5)
-    t_centers: np.ndarray,
-    bin_size: float,
-    spike_counts_total: np.ndarray,
-    pfr: np.ndarray,
-    ws_sharp: np.ndarray,
-    ws_smooth: np.ndarray,
-    ff1: np.ndarray,
-    llr_signal: np.ndarray,
-) -> dict:
-    """Aggregate sub-events into a single merged event spanning [s, e).
-
-    Renames the composite-derived quality columns to reflect their ML meaning:
-
-      composite_peak  →  posterior_peak
-      composite_mean  →  posterior_mean
-
-    ``llr_aggregate`` and ``ff_peak`` keep their original names to minimise
-    downstream surprise.
-    """
-    in_ev = (t_centers >= s) & (t_centers < e)
-    participating = sum(
-        1 for u in units if np.any((spike_times[u] >= s) & (spike_times[u] < e))
-    )
-    total_spikes = int(spike_counts_total[in_ev].sum())
-    best = max(evs, key=lambda x: x["peak_synchrony"])
-
-    comp_vals = composite[in_ev]
-    return {
-        "start": float(s),
-        "end": float(e),
-        "duration_s": float(e - s),
-        "peak_synchrony": float(ws_sharp[in_ev].max()) if in_ev.any() else 0.0,
-        "peak_time": float(best["peak_time"]),
-        "synchrony_energy": float(ws_smooth[in_ev].sum() * bin_size) if in_ev.any() else 0.0,
-        "participation": participating / max(1, n_units),
-        "total_spikes": total_spikes,
-        "burst_peak": float(pfr[in_ev].max()) if in_ev.any() else 0.0,
-        "fragment_count": sum(ev.get("fragment_count", 1) for ev in evs),
-        "n_sub_events": len(evs),
-        "llr_aggregate": float(llr_signal[in_ev].mean()) if in_ev.any() else 0.0,
-        "posterior_peak": float(comp_vals.max()) if comp_vals.size > 0 else 0.0,
-        "posterior_mean": float(comp_vals.mean()) if comp_vals.size > 0 else 0.0,
-        "ff_peak": float(ff1[in_ev].max()) if in_ev.any() else 0.0,
-    }
 
 
 def _adaptive_bin_size_s(spike_times: dict, units: list) -> tuple[float, float]:
@@ -416,6 +363,9 @@ def compute_ml_bursts(
         peak_synchrony = float(ws_sharp[peak_abs_idx])
         peak_time = float(t_centers[peak_abs_idx])
         comp_vals = ranking_signal[in_ev]
+        # Source HDBSCAN cluster id(s) spanning this burst — full set incl -1 (noise)
+        # so a burst can be traced back to the cluster(s) that produced it.
+        cluster_ids = sorted({int(c) for c in assignment.labels[in_ev]})
         event = {
             "start": float(s_t),
             "end": float(e_t),
@@ -427,10 +377,12 @@ def compute_ml_bursts(
             "total_spikes": total_spikes,
             "burst_peak": float(pfr[in_ev].max()),
             "fragment_count": 1,
+            "n_sub_events": 1,
             "llr_aggregate": float(llr_signal[in_ev].mean()),
             "posterior_peak": float(comp_vals.max()),
             "posterior_mean": float(comp_vals.mean()),
             "ff_peak": float(ff1[in_ev].max()),
+            "cluster_ids": cluster_ids,
         }
         pre_gate_events.append(dict(event))
         burstlets_raw.append(event)
@@ -451,54 +403,22 @@ def compute_ml_bursts(
         }
         burstlets_raw = kept
 
-    # ---- 6. Hierarchy merge (reuse iterative-detector machinery) ----------
-    # _merge_strict_hier / _merge_clustered_hier call _finalize_event from
-    # the iterative detector module, which writes "composite_peak"/
-    # "composite_mean" keys onto the merged events. For ML-flavored events we
-    # want "posterior_peak"/"posterior_mean" instead, so we patch the context
-    # dict to use the ML-flavored finaliser by monkey-routing through a
-    # wrapper module attribute.
-    #
-    # Concretely: _merge_*_hier closes over the module-level _finalize_event
-    # symbol, so we can't substitute it from here. Easiest path: re-implement
-    # the two-level merge inline using the same gap / valley conditions but
-    # with our _ml_finalize_event.
-    hier_ctx = dict(
-        units=units,
-        spike_times=spike_times,
-        n_units=n_units,
-        composite=ranking_signal,
-        t_centers=t_centers,
-        bin_size=bin_size,
-        spike_counts_total=spike_counts_total,
-        pfr=pfr,
-        ws_sharp=ws_sharp,
-        ws_smooth=ws_smooth,
-        ff1=ff1,
-        llr_signal=llr_signal,
-    )
-    network_bursts = _merge_strict_local(
-        burstlets_raw,
-        gap=burstlet_merge_gap_s,
-        threshold=merge_threshold,
-        ctx=hier_ctx,
-    )
-    superbursts = _merge_clustered_local(
-        network_bursts,
-        gap=network_merge_gap_s,
-        baseline=float(np.median(ranking_signal[~closed_mask])) if (~closed_mask).any() else 0.0,
-        threshold=merge_threshold,
-        ctx=hier_ctx,
-    )
+    # ---- 6. Single burst level --------------------------------------------
+    # The earlier temporal_merge (closing + valley merge at the bin level)
+    # already performs all merging when building `candidates`. The former
+    # burstlet→network strict-merge re-ran the same gap/valley logic on the
+    # already-merged events and was a structural no-op (verified across all
+    # wells of CX138/000012: identical counts and boundaries). The
+    # network→superburst clustered-merge tier is intentionally dropped too.
+    # So the materialised events ARE the bursts.
+    network_bursts = burstlets_raw
 
     # ---- 7. Build BurstResults --------------------------------------------
     def _to_df(evs: list[dict]) -> pd.DataFrame:
         return pd.DataFrame(evs) if evs else pd.DataFrame()
 
     metrics = {
-        "burstlets": _level_metrics(burstlets_raw, total_dur),
         "network_bursts": _level_metrics(network_bursts, total_dur),
-        "superbursts": _level_metrics(superbursts, total_dur),
     }
 
     diagnostics = {
@@ -579,71 +499,12 @@ def compute_ml_bursts(
         trace.fallback_threshold = assignment.fallback_threshold
 
     return BurstResults(
-        burstlets=_to_df(burstlets_raw),
+        burstlets=pd.DataFrame(),
         network_bursts=_to_df(network_bursts),
-        superbursts=_to_df(superbursts),
+        superbursts=pd.DataFrame(),
         metrics=metrics,
         diagnostics=diagnostics,
         plot_data=plot_data,
     )
 
 
-# ---------------------------------------------------------------------------
-# Local hierarchy merge — copies of the iterative-detector logic but using
-# _ml_finalize_event so the merged events carry posterior_* keys instead of
-# composite_* keys.
-# ---------------------------------------------------------------------------
-
-
-def _valley_min(prev: dict, nxt: dict, composite: np.ndarray, t_centers: np.ndarray) -> float | None:
-    mask = (t_centers >= prev["end"]) & (t_centers <= nxt["start"])
-    if not mask.any():
-        return None
-    v = composite[mask]
-    return float(v.min()) if v.size > 0 else None
-
-
-def _merge_strict_local(events: list[dict], gap: float, threshold: float, ctx: dict) -> list[dict]:
-    if not events:
-        return []
-    composite, t_centers, bin_size = ctx["composite"], ctx["t_centers"], ctx["bin_size"]
-    events = sorted(events, key=lambda x: x["start"])
-    merged, curr_evs = [], [events[0]]
-    s, e = events[0]["start"], events[0]["end"]
-    for nxt in events[1:]:
-        vm = _valley_min(curr_evs[-1], nxt, composite, t_centers)
-        valley_ok = (nxt["start"] - e <= bin_size) if vm is None else (vm >= threshold)
-        if (nxt["start"] - e) <= gap and valley_ok:
-            curr_evs.append(nxt)
-            e = max(e, nxt["end"])
-        else:
-            merged.append(_ml_finalize_event(curr_evs, s, e, **ctx))
-            curr_evs, s, e = [nxt], nxt["start"], nxt["end"]
-    merged.append(_ml_finalize_event(curr_evs, s, e, **ctx))
-    return [m for m in merged if m["duration_s"] > 0]
-
-
-def _merge_clustered_local(
-    events: list[dict],
-    gap: float,
-    baseline: float,
-    threshold: float,
-    ctx: dict,
-) -> list[dict]:
-    if not events:
-        return []
-    composite, t_centers, bin_size = ctx["composite"], ctx["t_centers"], ctx["bin_size"]
-    events = sorted(events, key=lambda x: x["start"])
-    merged, curr_evs = [], [events[0]]
-    s, e = events[0]["start"], events[0]["end"]
-    for nxt in events[1:]:
-        vm = _valley_min(curr_evs[-1], nxt, composite, t_centers)
-        valley_ok = (nxt["start"] - e <= bin_size) if vm is None else (baseline < vm < threshold)
-        if (nxt["start"] - e) <= gap and valley_ok:
-            curr_evs.append(nxt)
-            e = max(e, nxt["end"])
-        else:
-            merged.append(_ml_finalize_event(curr_evs, s, e, **ctx))
-            curr_evs, s, e = [nxt], nxt["start"], nxt["end"]
-    merged.append(_ml_finalize_event(curr_evs, s, e, **ctx))
-    return [m for m in merged if m["duration_s"] > 0 and m["n_sub_events"] >= 2]
