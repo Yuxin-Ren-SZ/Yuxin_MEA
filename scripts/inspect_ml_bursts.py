@@ -54,10 +54,12 @@ EVENT_TRACKS = [
 RASTER_COLOR = "rgba(40, 40, 40, 0.85)"
 MAX_RASTER_POINTS_PER_WELL = 12_000
 
-# Distinguishable hues for non-burst, non-noise HDBSCAN clusters.
+# Distinguishable hues for non-noise HDBSCAN clusters (burst + non-burst alike;
+# burst-ness is now carried by marker shape, not color).
 CLUSTER_PALETTE = [
     "#1f77b4", "#2ca02c", "#9467bd", "#8c564b", "#e377c2",
     "#7f7f7f", "#bcbd22", "#17becf", "#aec7e8", "#ffbb78",
+    "#d62728", "#ff7f0e", "#393b79", "#637939", "#8c6d31", "#843c39",
 ]
 NOISE_COLOR = "rgba(180, 180, 180, 0.55)"
 BURST_COLOR = "#d62728"
@@ -463,9 +465,10 @@ def _cluster_color_map(
 ) -> tuple[dict[int, str], dict[int, str]]:
     """Return (color_by_label, display_name_by_label) for HDBSCAN labels.
 
-    Noise (-1) is gray; clusters in ``burst_labels`` are burst red (the burst
-    trajectory fragments across several clusters on the manifold); other
-    clusters draw sequentially from ``CLUSTER_PALETTE``.
+    Color encodes cluster identity: noise (-1) is gray; every other cluster
+    (burst or not) draws sequentially from ``CLUSTER_PALETTE``. Burst-ness is
+    carried by marker shape at draw time, not by color; ``burst_labels`` here
+    only flavors the display name with a ``(burst)`` suffix.
     """
     burst_labels = burst_labels or set()
     color_by: dict[int, str] = {}
@@ -475,15 +478,14 @@ def _cluster_color_map(
         if lbl == -1:
             color_by[lbl] = NOISE_COLOR
             name_by[lbl] = "noise (-1)"
-        elif lbl in burst_labels:
-            color_by[lbl] = BURST_COLOR
-            name_by[lbl] = f"cluster {lbl} (burst)"
         else:
             try:
                 color_by[lbl] = next(palette_iter)
             except StopIteration:
                 color_by[lbl] = "#666666"
-            name_by[lbl] = f"cluster {lbl}"
+            name_by[lbl] = (
+                f"cluster {lbl} (burst)" if lbl in burst_labels else f"cluster {lbl}"
+            )
     return color_by, name_by
 
 
@@ -638,12 +640,16 @@ def _projection_scatter_traces(
     y_axis_label: str,
     legend_group: str,         # "pca" or "umap" — separate so per-panel legends don't fight
 ) -> list[go.Scattergl]:
+    burst_labels = burst_labels or set()
     color_by, name_by = _cluster_color_map(labels, burst_labels)
     traces: list[go.Scattergl] = []
     for lbl in sorted(color_by.keys()):
         mask = labels == lbl
         if not mask.any():
             continue
+        is_burst = lbl in burst_labels
+        # Shape encodes burst-ness: diamond = burst cluster, circle = non-burst.
+        symbol = "diamond" if is_burst else "circle"
         cd = (t_centers[mask]
               if t_centers is not None and t_centers.size == coords.shape[0]
               else np.zeros(int(mask.sum())))
@@ -651,7 +657,8 @@ def _projection_scatter_traces(
             x=coords[mask, 0], y=coords[mask, 1],
             mode="markers",
             marker=dict(
-                size=5 if lbl != -1 else 3,
+                size=(6 if is_burst else 5) if lbl != -1 else 3,
+                symbol=symbol,
                 color=color_by[lbl],
                 opacity=0.85 if lbl != -1 else 0.35,
                 line=dict(width=0),
@@ -1242,6 +1249,89 @@ def build_well_figure(well: WellBundle) -> go.Figure:
     fig.update_yaxes(showgrid=False, zeroline=False, ticks="outside")
     for ann in fig.layout.annotations:
         ann.font = dict(size=11, color="#333")
+    return fig
+
+
+def build_well_figure_slim(well: WellBundle) -> go.Figure:
+    """Compact 3-panel figure: spike raster, burst-events lane, UMAP(2) scatter.
+
+    A trimmed `build_well_figure` for side-by-side cross-condition comparison
+    (e.g. UMAP clustering-dim sweeps). Raster and events share the time x-axis;
+    the UMAP panel is independent. Reuses the same trace builders so colors and
+    burst-label semantics match the full inspector.
+    """
+    has_trace = well.trace is not None
+    umap_result = _compute_umap_axes(well.trace) if has_trace else None
+    has_umap = umap_result is not None
+
+    row_meanings = ["raster", "events"]
+    rows_spec = [[{"type": "xy"}], [{"type": "xy"}]]
+    row_heights = [0.5, 0.16]
+    if has_umap:
+        row_meanings.append("umap")
+        rows_spec.append([{"type": "xy"}])
+        row_heights.append(0.34)
+    row_heights = [h / sum(row_heights) for h in row_heights]
+    titles = {
+        "raster": "Spike raster (units ranked by firing rate)",
+        "events": "Burst events",
+        "umap": "UMAP(2) — color = cluster id, ◆ = burst",
+    }
+
+    fig = make_subplots(
+        rows=len(rows_spec), cols=1, specs=rows_spec, row_heights=row_heights,
+        vertical_spacing=0.07,
+        subplot_titles=[titles[m] for m in row_meanings],
+    )
+    row_idx = {name: i + 1 for i, name in enumerate(row_meanings)}
+
+    # ----- Raster -----
+    if well.spike_times:
+        traces, _t_end, _n = _raster_traces(well.spike_times)
+        for tr in traces:
+            fig.add_trace(tr, row=row_idx["raster"], col=1)
+        fig.update_yaxes(title_text="unit rank", row=row_idx["raster"], col=1)
+    else:
+        fig.add_annotation(text="no spike times", showarrow=False,
+                           xref="x domain", yref="y domain", x=0.5, y=0.5,
+                           row=row_idx["raster"], col=1)
+
+    # ----- Events -----
+    for tr in _event_traces(well.events):
+        fig.add_trace(tr, row=row_idx["events"], col=1)
+    fig.update_yaxes(
+        tickmode="array", tickvals=[0, 1, 2],
+        ticktext=[k for k, *_ in EVENT_TRACKS], range=[-0.6, 2.6],
+        showgrid=False, row=row_idx["events"], col=1,
+    )
+    # Match events time axis to the raster's.
+    fig.update_xaxes(matches=f"x{row_idx['raster']}", row=row_idx["events"], col=1)
+    fig.update_xaxes(title_text="time (s)", row=row_idx["events"], col=1)
+
+    # ----- UMAP -----
+    if has_umap:
+        burst_labels_set = _burst_label_set(well.diagnostics)
+        labels_full = (np.asarray(well.trace.hdbscan_labels)
+                       if getattr(well.trace, "hdbscan_labels", None) is not None else None)
+        t_full = (np.asarray(well.trace.t_centers, dtype=float)
+                  if getattr(well.trace, "t_centers", None) is not None else None)
+        if labels_full is not None and t_full is not None:
+            coords, xl, yl, kept = umap_result
+            for tr in _projection_scatter_traces(coords, labels_full[kept], t_full[kept],
+                                                 burst_labels_set, xl, yl, "umap"):
+                fig.add_trace(tr, row=row_idx["umap"], col=1)
+            fig.update_xaxes(title_text=xl, row=row_idx["umap"], col=1)
+            fig.update_yaxes(title_text=yl, row=row_idx["umap"], col=1)
+
+    bl = sorted(_burst_label_set(well.diagnostics))
+    ncl = (well.diagnostics or {}).get("cluster_n_clusters")
+    fig.update_layout(
+        height=820, width=760, showlegend=True,
+        legend=dict(font=dict(size=9), orientation="v", x=1.01, y=1),
+        margin=dict(l=50, r=10, t=46, b=36),
+        title_text=f"{well.well_name} ({well.well_id}) — clusters={ncl} burst_labels={bl}",
+        title_font_size=12,
+    )
     return fig
 
 
