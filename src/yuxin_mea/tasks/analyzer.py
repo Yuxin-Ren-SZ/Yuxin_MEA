@@ -175,7 +175,9 @@ class AnalyzerTask(BaseAnalysisTask):
             "quality_metrics": {
                 "metric_names": [
                     "presence_ratio",
-                    "rp_contamination",
+                    # SI ≥0.104 renamed the metric to "rp_violation"; its output
+                    # still includes the "rp_contamination" column that auto_curation reads.
+                    "rp_violation",
                     "firing_rate",
                     "amplitude_median",
                 ],
