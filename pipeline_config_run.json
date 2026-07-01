@@ -1,12 +1,12 @@
 {
   "global": {
-    "data_root": "/mnt/benshalom-nas/raw_data/rbs_maxtwo_desktop/harddisk20tbV2/Sadegh_Lab/",
+    "data_root": "/mnt/benshalom-nas/raw_data/rbs_maxtwo_desktop/harddisk20tbV2/Sadegh_Lab",
     "analysis_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis",
-    "figure_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/figures"
+    "figure_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis"
   },
   "tasks": {
     "preprocessing": {
-      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/preprocessed_data",
+      "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/preprocessed_data",
       "bandpass_freq_min": 300,
       "bandpass_freq_max": 3000,
       "reference": "local",
@@ -22,14 +22,14 @@
       "overwrite": true
     },
     "sorting": {
-      "preprocessing_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/preprocessed_data",
-      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/spikesorted_data",
+      "preprocessing_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/preprocessed_data",
+      "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/spikesorted_data",
       "sorter": "kilosort4"
     },
     "auto_merge": {
-      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/auto_merge_data",
-      "sorting_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/spikesorted_data",
-      "preprocessing_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/preprocessed_data",
+      "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/auto_merge_data",
+      "sorting_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/spikesorted_data",
+      "preprocessing_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/preprocessed_data",
       "enabled": false,
       "presets": [
         "firing_rate_similarity",
@@ -39,9 +39,9 @@
       "n_jobs": 1
     },
     "analyzer": {
-      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/analyzer_data",
-      "preprocessing_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/preprocessed_data",
-      "auto_merge_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/auto_merge_data",
+      "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/analyzer_data",
+      "preprocessing_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/preprocessed_data",
+      "auto_merge_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/auto_merge_data",
       "radius_um": 50.0,
       "ms_before": 1.0,
       "ms_after": 2.0,
@@ -49,8 +49,8 @@
       "n_jobs": 1
     },
     "auto_curation": {
-      "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
-      "analyzer_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/analyzer_data",
+      "curation_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/curation_data",
+      "analyzer_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/analyzer_data",
       "enabled": true,
       "presence_ratio_min": 0.75,
       "rp_contamination_max": 0.15,
@@ -58,8 +58,8 @@
       "amplitude_median_max": -20.0
     },
     "burst_detection": {
-      "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
-      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/burst_detection_data",
+      "curation_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/curation_data",
+      "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/burst_detection_data",
       "gamma": 1.0,
       "min_burstlet_participation": 0.2,
       "min_absolute_rate_hz": 0.5,
@@ -69,8 +69,8 @@
       "network_merge_gap_min_s": 0.75
     },
     "ml_burst_detection": {
-      "curation_output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/curation_data",
-      "output_root": "/mnt/benshalom-nas/analysis/Sadegh/new/CX138/ml_burst_data_umap",
+      "curation_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/curation_data",
+      "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/ml_burst_data_umap",
       "bin_size_mode": "adaptive",
       "fixed_bin_size_s": 0.02,
       "hmm_max_iter": 100,

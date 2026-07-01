@@ -98,8 +98,6 @@ pipeline_config.json.bak
 src/yuxin_mea/pipeline_config.json
 src/yuxin_mea/preprocessed_data/
 notebooks/pipline_config.json
-pipeline_config_run.json
-pipeline_config_run*.json
 config/*copy*.json
 notebooks/archieved/
 
