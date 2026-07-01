@@ -228,6 +228,38 @@ Result: `burstlets_raw` = **Level 1**.
 
 ---
 
+## 6b. Burst typing (second-stage clustering) — `ml_burst_typing`
+
+The stage-4 HDBSCAN clusters *bins*. Stage 6b clusters the *detected bursts*
+themselves so each burst gets an integer **`burst_type`** label — because one
+well can hold qualitatively different bursts (e.g. short sharp vs long
+sustained). Runs **per well** on the post-gate `network_bursts`, controlled by
+`burst_typing_*` params. Disabled → no `burst_type` column.
+
+**Per-burst feature vector** (`build_burst_feature_matrix`):
+
+- Scalars: `duration_s`, `within_burst_fr` (= `total_spikes / duration_s`),
+  `participation`, `llr_aggregate`, `posterior_peak`, `posterior_mean`,
+  `ff_peak`, `n_distinct_clusters` (= `len(cluster_ids)`).
+- Composition: `cluster_ratio_<c>` for every bin-level HDBSCAN id `c` present in
+  the well = fraction of the burst's bins assigned to `c` (incl. `-1` noise).
+  Each burst's ratios sum to 1. This is "the cluster ids and their ratio in the
+  burst". Cluster ids are well-local, so typing is per-well by construction.
+
+**Clustering** (`cluster_bursts`): columns are z-normed (heterogeneous units),
+then **assign-all** clustering labels every burst — KMeans (k by max silhouette,
+default) or GMM (`covariance_type="diag"`, k by min BIC). `burst_typing_k > 0`
+fixes k; `0` auto-selects over `2..min(burst_typing_max_k, n_bursts-1)`.
+
+**Guards** (per-well N is small, ~10-135): `n_bursts < burst_typing_min_bursts`
+→ all bursts get type 0, `skipped_reason="too_few_bursts"`; identical rows / no
+valid k≥2 → `"degenerate"`. Seeded by `burst_typing_random_state` (42).
+
+Diagnostics carry a `burst_typing` block: `{method, k, score, per_type_counts,
+skipped_reason, feature_names}`.
+
+---
+
 ## 7. Hierarchy merge — network_bursts (L2) and superbursts (L3)
 
 Two further passes with increasing gap and stricter valley criteria. Both finalize
@@ -262,7 +294,7 @@ Written by `PickleBurstOutputWriter` to
 |------|----------|
 | `burstlets.pkl`, `network_bursts.pkl`, `superbursts.pkl` | The three DataFrames (schema above). |
 | `metrics.json` | Per-level `{n_events, total_duration, ...}`. |
-| `diagnostics.json` | `adaptive_bin_ms`, `biological_isi_s`, `cluster_decision`, `cluster_embedding_mode`, `cluster_n_clusters`, `cluster_burst_label(s)`, `cluster_ranking`, `merge_threshold`, `burstlet/network_merge_gap_s`, `ranking_feature`, `burst_modulation_index`, `feature_names`, … |
+| `diagnostics.json` | `adaptive_bin_ms`, `biological_isi_s`, `cluster_decision`, `cluster_embedding_mode`, `cluster_n_clusters`, `cluster_burst_label(s)`, `cluster_ranking`, `merge_threshold`, `burstlet/network_merge_gap_s`, `ranking_feature`, `burst_modulation_index`, `feature_names`, `burst_typing` (§6b), … |
 | `plot_signals.npy` | `t`, `participation_signal` (ws_sharp), `rate_signal` (ws_smooth), `ranking_signal`, `ff_signal`, `llr_signal`, `posterior_matrix_mean`, burst peak times/values, `merge_threshold`. |
 | `debug_trace.pkl` *(debug)* | `MLBurstTrace`: `feature_matrix`, `posterior_matrix`, `hdbscan_labels`, `hdbscan_probabilities`, `cluster_ranking`, `burst_labels`, `burst_mask_pre_merge`, `burst_mask_post_closing`, `candidates_pre_hierarchy`, scaler stats, etc. |
 
@@ -283,6 +315,10 @@ Written by `PickleBurstOutputWriter` to
 | `merge_floor_frac` | 0.70 | 5b | Relaxed valley floor for burstlet merge. |
 | `network_merge_gap_min_s` | 0.75 | 7b | Floor on superburst gap. |
 | `min_burst_modulation` | 0.1 | 6 | Soft LLR gate on burstlets. |
+| `burst_typing_enabled` | True | 6b | Add per-burst `burst_type` label. |
+| `burst_typing_method` | `kmeans` | 6b | `kmeans` (silhouette) or `gmm` (BIC). |
+| `burst_typing_max_k` / `_k` | 6 / 0 | 6b | k sweep upper bound / fixed k (0=auto). |
+| `burst_typing_min_bursts` | 8 | 6b | Skip typing below this many bursts. |
 
 ---
 

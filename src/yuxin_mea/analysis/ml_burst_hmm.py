@@ -322,6 +322,7 @@ def fit_unit_hmm(
         lam_bg_init, lam_burst_init = _quantile_init(counts)
 
     if lam_burst_init / max(lam_bg_init, 1e-6) < min_rate_ratio:
+        # TODO How many units are skipped by this? If many, consider a more robust init (e.g. k-means) or a more lenient min_rate_ratio.
         fit.skipped_reason = "low_rate_ratio"
         fit.lambda_bg = float(lam_bg_init) / max(bin_size, 1e-12)
         fit.lambda_burst = float(lam_burst_init) / max(bin_size, 1e-12)
@@ -332,6 +333,7 @@ def fit_unit_hmm(
             counts, lam_bg_init, lam_burst_init, max_iter, tol,
         )
     except (ValueError, FloatingPointError, np.linalg.LinAlgError):
+        # TODO make a debug dashboard to display all units count of each failure mode.
         fit.skipped_reason = "numerical_failure"
         return fit
 
@@ -352,6 +354,7 @@ def fit_unit_hmm(
     fit.n_iter = n_iter
     fit.loglik = loglik
 
+    # TODO repeated code.
     if fit.lambda_burst / max(fit.lambda_bg, 1e-6) < min_rate_ratio:
         fit.skipped_reason = "low_rate_ratio"
 

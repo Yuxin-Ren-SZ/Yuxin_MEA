@@ -83,6 +83,13 @@ class MLBurstDetectionTask(BaseAnalysisTask):
             "merge_floor_frac": 0.70,
             "network_merge_gap_min_s": 0.75,
             "min_burst_modulation": 0.1,
+            # ---- Burst typing (second-stage) ------------------------------
+            "burst_typing_enabled": True,
+            "burst_typing_method": "kmeans",
+            "burst_typing_max_k": 6,
+            "burst_typing_k": 0,
+            "burst_typing_min_bursts": 8,
+            "burst_typing_random_state": 42,
             # ---- Debug ----------------------------------------------------
             "debug": False,
         }
@@ -300,6 +307,40 @@ class MLBurstDetectionTask(BaseAnalysisTask):
                 "float", defaults["min_burst_modulation"],
                 "Minimum llr_aggregate required for a burstlet to survive. "
                 "≤ 0 disables the gate.",
+                min=0,
+            ),
+            "burst_typing_enabled": ParamSpec(
+                "bool", defaults["burst_typing_enabled"],
+                "Run the second-stage clustering over detected bursts, adding a "
+                "per-burst `burst_type` label. False omits the column.",
+            ),
+            "burst_typing_method": ParamSpec(
+                "str", defaults["burst_typing_method"],
+                "Clustering algorithm for burst typing. 'kmeans' picks k by max "
+                "silhouette; 'gmm' (diag covariance) picks k by min BIC.",
+                choices=["kmeans", "gmm"],
+            ),
+            "burst_typing_max_k": ParamSpec(
+                "int", defaults["burst_typing_max_k"],
+                "Upper bound on the number of burst types (k swept 2..max_k, "
+                "clamped to n_bursts-1).",
+                min=2,
+            ),
+            "burst_typing_k": ParamSpec(
+                "int", defaults["burst_typing_k"],
+                "Fixed number of burst types. 0 = auto-select k by the method's "
+                "criterion.",
+                min=0,
+            ),
+            "burst_typing_min_bursts": ParamSpec(
+                "int", defaults["burst_typing_min_bursts"],
+                "Skip typing (assign all bursts type 0) when a well has fewer "
+                "bursts than this — too few to cluster meaningfully.",
+                min=1,
+            ),
+            "burst_typing_random_state": ParamSpec(
+                "int", defaults["burst_typing_random_state"],
+                "Random seed for the burst-typing clusterer (KMeans/GMM init).",
                 min=0,
             ),
             "debug": ParamSpec(

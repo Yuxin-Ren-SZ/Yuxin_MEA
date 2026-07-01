@@ -44,6 +44,7 @@ from .ml_burst_cluster import (
 )
 from .ml_burst_features import build_feature_matrix
 from .ml_burst_hmm import UnitHMMFit, fit_all_units, fit_to_dict
+from .ml_burst_typing import build_burst_feature_matrix, cluster_bursts
 
 
 class MLBurstError(ValueError):
@@ -106,6 +107,14 @@ class MLBurstConfig:
     network_merge_gap_min_s: float = 0.75
     min_burst_modulation: float = 0.1
 
+    # ---- Burst typing (second-stage clustering over detected bursts) ------
+    burst_typing_enabled: bool = True
+    burst_typing_method: str = "kmeans"  # "kmeans" | "gmm"
+    burst_typing_max_k: int = 6
+    burst_typing_k: int = 0  # 0 = auto-select; >0 = fixed k
+    burst_typing_min_bursts: int = 8
+    burst_typing_random_state: int = 42
+
     @classmethod
     def from_task_params(cls, params: dict) -> "MLBurstConfig":
         """Build a config from a task-params dict (e.g. pipeline config).
@@ -167,6 +176,9 @@ class MLBurstTrace:
     gate_decision: Optional[dict] = None
     cluster_decision: Optional[str] = None
     fallback_threshold: Optional[float] = None
+    burst_feature_matrix: Optional[np.ndarray] = None
+    burst_feature_names: Optional[list] = None
+    burst_type_labels: Optional[list] = None
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +387,7 @@ def compute_ml_bursts(
             "synchrony_energy": float(ws_smooth[in_ev].sum() * bin_size),
             "participation": participating / max(1, n_units),
             "total_spikes": total_spikes,
+            "within_burst_fr": float(total_spikes) / float(duration_s),
             "burst_peak": float(pfr[in_ev].max()),
             "fragment_count": 1,
             "n_sub_events": 1,
@@ -383,6 +396,7 @@ def compute_ml_bursts(
             "posterior_mean": float(comp_vals.mean()),
             "ff_peak": float(ff1[in_ev].max()),
             "cluster_ids": cluster_ids,
+            "n_distinct_clusters": len(cluster_ids),
         }
         pre_gate_events.append(dict(event))
         burstlets_raw.append(event)
@@ -412,6 +426,35 @@ def compute_ml_bursts(
     # network→superburst clustered-merge tier is intentionally dropped too.
     # So the materialised events ARE the bursts.
     network_bursts = burstlets_raw
+
+    # ---- 6b. Second-stage burst typing -----------------------------------
+    # Cluster the detected bursts (per well) on post-detection features so each
+    # burst gets an integer `burst_type` label. See `ml_burst_typing`.
+    burst_typing_info: dict | None = None
+    if config.burst_typing_enabled and network_bursts:
+        burst_X, burst_feat_names, _ = build_burst_feature_matrix(
+            network_bursts, assignment.labels, t_centers
+        )
+        typing = cluster_bursts(
+            burst_X,
+            method=str(config.burst_typing_method),
+            max_k=int(config.burst_typing_max_k),
+            k=int(config.burst_typing_k),
+            min_bursts=int(config.burst_typing_min_bursts),
+            random_state=int(config.burst_typing_random_state),
+            feature_names=burst_feat_names,
+        )
+        for ev, lab in zip(network_bursts, typing.labels.tolist()):
+            ev["burst_type"] = int(lab)
+        burst_typing_info = {
+            "method": typing.method,
+            "k": int(typing.k),
+            # None (not NaN) when skipped, so diagnostics.json stays valid JSON.
+            "score": None if np.isnan(typing.score) else float(typing.score),
+            "per_type_counts": {int(k): int(v) for k, v in typing.per_type_counts.items()},
+            "skipped_reason": typing.skipped_reason,
+            "feature_names": list(typing.feature_names),
+        }
 
     # ---- 7. Build BurstResults --------------------------------------------
     def _to_df(evs: list[dict]) -> pd.DataFrame:
@@ -459,6 +502,8 @@ def compute_ml_bursts(
     }
     if gate_state is not None:
         diagnostics["bmi_gate"] = gate_state
+    if burst_typing_info is not None:
+        diagnostics["burst_typing"] = burst_typing_info
 
     plot_data = {
         "t": t_centers,
@@ -497,6 +542,10 @@ def compute_ml_bursts(
         trace.gate_decision = gate_state
         trace.cluster_decision = assignment.decision
         trace.fallback_threshold = assignment.fallback_threshold
+        if burst_typing_info is not None:
+            trace.burst_feature_matrix = burst_X.copy()
+            trace.burst_feature_names = list(burst_feat_names)
+            trace.burst_type_labels = [int(b.get("burst_type", 0)) for b in network_bursts]
 
     return BurstResults(
         burstlets=pd.DataFrame(),
