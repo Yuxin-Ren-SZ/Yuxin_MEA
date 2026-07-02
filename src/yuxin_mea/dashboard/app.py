@@ -8,6 +8,7 @@ from dash import Dash
 
 from yuxin_mea.config import ConfigManager
 
+from .cache import init_cache
 from .components.layout import build_layout
 from .theme import apply_default_theme
 
@@ -53,6 +54,7 @@ def build_app(config_path: Path) -> Dash:
     analysis_root = _resolve_optional_path(cm.get_global("analysis_root"))
     data_root = _resolve_optional_path(cm.get_global("data_root"))
     figure_root = _resolve_optional_path(cm.get_global("figure_root"))
+    cache_root = _resolve_cache_root(cm.get_global("cache_root"), analysis_root)
 
     apply_default_theme()
 
@@ -70,7 +72,10 @@ def build_app(config_path: Path) -> Dash:
         "analysis_root": analysis_root,
         "data_root": data_root,
         "figure_root": figure_root,
+        "cache_root": cache_root,
     }
+    # Tier 2: persistent FileSystemCache on local scratch (survives restarts).
+    init_cache(app.server, cache_root)
     app.layout = build_layout()
     return app
 
@@ -85,3 +90,23 @@ def _resolve_optional_path(value: object) -> Path | None:
     if not value:
         return None
     return Path(str(value))
+
+
+def _resolve_cache_root(value: object, analysis_root: Path | None) -> Path | None:
+    """Resolve the dashboard cache dir; default to a local sibling of analysis_root.
+
+    An explicit ``cache_root`` global wins. Otherwise, when ``analysis_root`` is
+    set, default to ``<analysis_root>/../dashboard_cache`` (local scratch, never
+    the NAS — the guide's Tier-2 discipline). Best-effort ``mkdir`` on startup so
+    the raster-PNG cache has somewhere to write; a failure here is non-fatal (the
+    page falls back to in-process rendering and surfaces the error on use).
+    """
+    cache_root = _resolve_optional_path(value)
+    if cache_root is None and analysis_root is not None:
+        cache_root = analysis_root.parent / "dashboard_cache"
+    if cache_root is not None:
+        try:
+            cache_root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+    return cache_root

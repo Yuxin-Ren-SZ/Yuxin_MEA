@@ -28,12 +28,34 @@ from yuxin_mea.analysis.burst_diagnostic import (
 )
 from yuxin_mea.analysis.ml_burst_detector import MLBurstConfig
 from yuxin_mea.config import ConfigManager
+from yuxin_mea.dashboard.cache import cache_get, cache_set, make_key
 
 
 dash.register_page(__name__, path="/burst-diagnostic", name="Burst diagnostic", order=4)
 
 
+# L1 in-process (fast, same-session) backed by the persistent flask-caching
+# layer (L2, survives restarts) — the "swap for a flask-caching Cache" the old
+# comment anticipated. BatchResults is assumed picklable (numpy + dataclasses);
+# if a pickle ever fails, cache_set swallows it and the page runs L1-only.
 _LOADED_BATCHES: dict[str, BatchResults] = {}
+
+
+def _store_batch(key: str, batch: BatchResults) -> None:
+    _LOADED_BATCHES[key] = batch
+    cache_set(make_key("burst_diag", key), batch)
+
+
+def _get_batch(key: str | None) -> BatchResults | None:
+    if not key:
+        return None
+    batch = _LOADED_BATCHES.get(key)
+    if batch is not None:
+        return batch
+    batch = cache_get(make_key("burst_diag", key))
+    if batch is not None:
+        _LOADED_BATCHES[key] = batch
+    return batch
 
 _EMPTY_FIGURE = go.Figure().update_layout(
     annotations=[{
@@ -213,7 +235,7 @@ def _load_or_recompute(_l: int, _r: int, root: str, method: str | None):
         return dash.no_update, f"error: {exc}"
 
     key = f"{cache_key(Path(root))}_{method}"
-    _LOADED_BATCHES[key] = batch
+    _store_batch(key, batch)
     if analysis_root is None:
         suffix = "(fresh run — no cache; analysis_root not set)"
     else:
@@ -231,6 +253,7 @@ def _load_or_recompute(_l: int, _r: int, root: str, method: str | None):
     Input("burst-diag-batch-key", "data"),
 )
 def _render_summary(batch_key: str | None):
-    if not batch_key or batch_key not in _LOADED_BATCHES:
+    batch = _get_batch(batch_key)
+    if batch is None:
         return _EMPTY_FIGURE
-    return fig_generic_summary(_LOADED_BATCHES[batch_key])
+    return fig_generic_summary(batch)

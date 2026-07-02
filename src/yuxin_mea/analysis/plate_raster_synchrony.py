@@ -421,109 +421,7 @@ def build_plate_figure(
             )
             continue
 
-        _add_event_zone_shapes(fig, row, col, wr.event_intervals)
-
-        # Raster traces (primary Y)
-        if wr.spike_times:
-            raster_traces, _ = _raster_payload_for_well(
-                wr.spike_times, config.max_raster_points_per_well
-            )
-            for trace_data in raster_traces:
-                fig.add_trace(
-                    go.Scattergl(
-                        x=trace_data["x"],
-                        y=trace_data["y"],
-                        mode="markers",
-                        marker=dict(
-                            size=config.marker_size,
-                            color="rgba(90, 90, 90, 0.75)",
-                            symbol="line-ns-open",
-                        ),
-                        hovertemplate=f"{trace_data['hover_label']}<br>t=%{{x:.3f}}s<extra></extra>",
-                        showlegend=False,
-                    ),
-                    row=row,
-                    col=col,
-                    secondary_y=False,
-                )
-
-        # Synchrony signals (secondary Y)
-        if wr.plot_signals:
-            sync_payload, _ = _synchrony_payload_for_well(
-                wr.plot_signals, config.max_synchrony_points
-            )
-
-            # Sharp synchrony (dark red)
-            if sync_payload["signal"]:
-                fig.add_trace(
-                    go.Scattergl(
-                        x=sync_payload["signal"]["x"],
-                        y=sync_payload["signal"]["y"],
-                        mode="lines",
-                        line=dict(color="#b22222", width=config.line_width),
-                        hovertemplate="Sharp sync: %{y:.3f}<br>t=%{x:.3f}s<extra></extra>",
-                        showlegend=False,
-                    ),
-                    row=row,
-                    col=col,
-                    secondary_y=True,
-                )
-
-            # Smooth participation synchrony (orange)
-            if sync_payload["smooth"]:
-                fig.add_trace(
-                    go.Scattergl(
-                        x=sync_payload["smooth"]["x"],
-                        y=sync_payload["smooth"]["y"],
-                        mode="lines",
-                        line=dict(color="rgba(255, 140, 0, 0.95)", width=config.line_width * 0.9),
-                        hovertemplate="Smooth participation: %{y:.3f}<br>t=%{x:.3f}s<extra></extra>",
-                        showlegend=False,
-                    ),
-                    row=row,
-                    col=col,
-                    secondary_y=True,
-                )
-
-            # Burst peaks (red dots)
-            if sync_payload["peaks"]:
-                fig.add_trace(
-                    go.Scattergl(
-                        x=sync_payload["peaks"]["x"],
-                        y=sync_payload["peaks"]["y"],
-                        mode="markers",
-                        marker=dict(size=4, color="red"),
-                        hovertemplate="Peak: %{y:.3f}<br>t=%{x:.3f}s<extra></extra>",
-                        showlegend=False,
-                    ),
-                    row=row,
-                    col=col,
-                    secondary_y=True,
-                )
-
-            # Baseline (dashed line)
-            if sync_payload["baseline"] is not None:
-                _add_secondary_hline(
-                    fig,
-                    row,
-                    col,
-                    sync_payload["baseline"],
-                    "rgba(255, 102, 0, 0.7)",
-                )
-
-            # Threshold (dashed line)
-            if sync_payload["threshold"] is not None:
-                _add_secondary_hline(
-                    fig,
-                    row,
-                    col,
-                    sync_payload["threshold"],
-                    "rgba(192, 57, 43, 0.8)",
-                )
-
-            y_range = _synchrony_y_range(sync_payload)
-            if y_range is not None:
-                fig.update_yaxes(range=y_range, row=row, col=col, secondary_y=True)
+        _add_well_traces(fig, wr, row, col, config)
 
     # Add group legend traces (invisible, only for legend)
     for group_name, color in group_colors.items():
@@ -554,6 +452,166 @@ def build_plate_figure(
         font=dict(size=10),
     )
 
+    return fig
+
+
+def _add_well_traces(
+    fig: go.Figure,
+    wr: WellRecord,
+    row: int,
+    col: int,
+    config: PlateViewerConfig,
+) -> None:
+    """Add one ``ok`` well's raster + synchrony traces to subplot (row, col).
+
+    Shared by :func:`build_plate_figure` (24 subplots) and
+    :func:`build_single_well_figure` (one subplot) so both render identically.
+    Read-only over ``wr``.
+    """
+    _add_event_zone_shapes(fig, row, col, wr.event_intervals)
+
+    # Raster traces (primary Y)
+    if wr.spike_times:
+        raster_traces, _ = _raster_payload_for_well(
+            wr.spike_times, config.max_raster_points_per_well
+        )
+        for trace_data in raster_traces:
+            fig.add_trace(
+                go.Scattergl(
+                    x=trace_data["x"],
+                    y=trace_data["y"],
+                    mode="markers",
+                    marker=dict(
+                        size=config.marker_size,
+                        color="rgba(90, 90, 90, 0.75)",
+                        symbol="line-ns-open",
+                    ),
+                    hovertemplate=f"{trace_data['hover_label']}<br>t=%{{x:.3f}}s<extra></extra>",
+                    showlegend=False,
+                ),
+                row=row,
+                col=col,
+                secondary_y=False,
+            )
+
+    # Synchrony signals (secondary Y)
+    if wr.plot_signals:
+        sync_payload, _ = _synchrony_payload_for_well(
+            wr.plot_signals, config.max_synchrony_points
+        )
+
+        # Sharp synchrony (dark red)
+        if sync_payload["signal"]:
+            fig.add_trace(
+                go.Scattergl(
+                    x=sync_payload["signal"]["x"],
+                    y=sync_payload["signal"]["y"],
+                    mode="lines",
+                    line=dict(color="#b22222", width=config.line_width),
+                    hovertemplate="Sharp sync: %{y:.3f}<br>t=%{x:.3f}s<extra></extra>",
+                    showlegend=False,
+                ),
+                row=row,
+                col=col,
+                secondary_y=True,
+            )
+
+        # Smooth participation synchrony (orange)
+        if sync_payload["smooth"]:
+            fig.add_trace(
+                go.Scattergl(
+                    x=sync_payload["smooth"]["x"],
+                    y=sync_payload["smooth"]["y"],
+                    mode="lines",
+                    line=dict(color="rgba(255, 140, 0, 0.95)", width=config.line_width * 0.9),
+                    hovertemplate="Smooth participation: %{y:.3f}<br>t=%{x:.3f}s<extra></extra>",
+                    showlegend=False,
+                ),
+                row=row,
+                col=col,
+                secondary_y=True,
+            )
+
+        # Burst peaks (red dots)
+        if sync_payload["peaks"]:
+            fig.add_trace(
+                go.Scattergl(
+                    x=sync_payload["peaks"]["x"],
+                    y=sync_payload["peaks"]["y"],
+                    mode="markers",
+                    marker=dict(size=4, color="red"),
+                    hovertemplate="Peak: %{y:.3f}<br>t=%{x:.3f}s<extra></extra>",
+                    showlegend=False,
+                ),
+                row=row,
+                col=col,
+                secondary_y=True,
+            )
+
+        # Baseline (dashed line)
+        if sync_payload["baseline"] is not None:
+            _add_secondary_hline(
+                fig,
+                row,
+                col,
+                sync_payload["baseline"],
+                "rgba(255, 102, 0, 0.7)",
+            )
+
+        # Threshold (dashed line)
+        if sync_payload["threshold"] is not None:
+            _add_secondary_hline(
+                fig,
+                row,
+                col,
+                sync_payload["threshold"],
+                "rgba(192, 57, 43, 0.8)",
+            )
+
+        y_range = _synchrony_y_range(sync_payload)
+        if y_range is not None:
+            fig.update_yaxes(range=y_range, row=row, col=col, secondary_y=True)
+
+
+def build_single_well_figure(
+    well_record: WellRecord,
+    config: PlateViewerConfig,
+) -> go.Figure:
+    """Build the interactive, full-resolution figure for a single drilled-in well.
+
+    The overview grid shows pre-rasterized PNGs; when the user opens one well we
+    render the real WebGL raster + synchrony here so pan/zoom/hover work on the
+    full data (Caching guide §2). Same trace logic as one cell of
+    :func:`build_plate_figure`.
+    """
+    title = f"{well_record.well_name} / {well_record.groupname}"
+    fig = make_subplots(
+        rows=1,
+        cols=1,
+        specs=[[{"secondary_y": True}]],
+        subplot_titles=[title],
+    )
+
+    if well_record.status != "ok":
+        status_text = well_record.status if well_record.status != "missing" else "N/A"
+        fig.add_annotation(
+            text=status_text, xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False, font=dict(size=14, color="grey"),
+        )
+    else:
+        _add_well_traces(fig, well_record, 1, 1, config)
+
+    fig.update_xaxes(title_text="Time (s)", row=1, col=1)
+    fig.update_yaxes(title_text="Unit", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="Sync", row=1, col=1, secondary_y=True)
+    fig.update_layout(
+        title=f"Well {well_record.well_name} — raster + synchrony",
+        height=max(560, int(config.width_px * 0.28)),
+        showlegend=False,
+        hovermode="closest",
+        template="plotly_white",
+        font=dict(size=11),
+    )
     return fig
 
 
@@ -704,6 +762,8 @@ def load_plate_data(
     rec_name: str = "auto",
     experiment_cache_path: Path | None = None,
     burst_terminal: str = "burst_detection",
+    burst_well_dirs: dict[str, Path] | None = None,
+    curation_well_dirs: dict[str, Path] | None = None,
 ) -> list[WellRecord]:
     """Assemble plate-level data for one recording from per-well outputs.
 
@@ -724,6 +784,13 @@ def load_plate_data(
             holding ``plot_signals.npy`` and the event tables. ``"burst_detection"``
             (default) reads the traditional detector; pass ``"ml_burst_detection"``
             to read the ML detector's outputs.
+        burst_well_dirs: optional ``{well_id: dir}`` manifest of exact per-well
+            burst output directories (from ``pipeline_cache.json``). When either
+            manifest is given, on-disk glob discovery is skipped entirely
+            (Caching guide Tier 0): the loader reads the resolved paths directly.
+            Wells absent from the manifest are treated as ``missing``.
+        curation_well_dirs: optional ``{well_id: dir}`` manifest of exact per-well
+            curation output directories.
 
     Returns:
         list[WellRecord]: 24 entries, one per well slot.
@@ -738,11 +805,15 @@ def load_plate_data(
             Path(experiment_cache_path), recording_key
         )
 
-    discovered = _discover_well_rec_names(
-        recording_key, burst_root, curation_root, burst_terminal=burst_terminal,
-    )
-    for well_id_str, discovered_rec_name in discovered.items():
-        well_rec_names.setdefault(well_id_str, discovered_rec_name)
+    # Manifest mode: exact output dirs came from the pipeline cache, so we never
+    # walk the NAS to discover rec names. Legacy mode: glob the output roots.
+    manifest_mode = burst_well_dirs is not None or curation_well_dirs is not None
+    if not manifest_mode:
+        discovered = _discover_well_rec_names(
+            recording_key, burst_root, curation_root, burst_terminal=burst_terminal,
+        )
+        for well_id_str, discovered_rec_name in discovered.items():
+            well_rec_names.setdefault(well_id_str, discovered_rec_name)
 
     return [
         _load_well_record(
@@ -754,6 +825,9 @@ def load_plate_data(
             well_metadata=well_metadata,
             well_rec_names=well_rec_names,
             burst_terminal=burst_terminal,
+            manifest_mode=manifest_mode,
+            burst_dir=(burst_well_dirs or {}).get(f"well{well_num:03d}"),
+            curation_dir=(curation_well_dirs or {}).get(f"well{well_num:03d}"),
         )
         for well_num in range(_PLATE_WELL_COUNT)
     ]
@@ -851,45 +925,73 @@ def _load_well_record(
     well_metadata: dict[str, dict[str, Any]],
     well_rec_names: dict[str, str] | None = None,
     burst_terminal: str = "burst_detection",
+    manifest_mode: bool = False,
+    burst_dir: Path | None = None,
+    curation_dir: Path | None = None,
 ) -> WellRecord:
-    """Load spike times + plot signals for one well; return a `WellRecord`."""
+    """Load spike times + plot signals for one well; return a `WellRecord`.
+
+    In ``manifest_mode`` the exact per-well output dirs (``burst_dir`` /
+    ``curation_dir``) come from the pipeline cache, so no rec-name inference or
+    globbing happens. Otherwise the legacy candidate resolution is used.
+    """
     meta = well_metadata.get(well_id_str, {})
     well_name = meta.get("well_name", "?")
     groupname = meta.get("groupname", "?")
-    rec_names = _rec_name_candidates(
-        well_id_str, rec_name, well_rec_names, burst_root, curation_root, recording_key,
-        burst_terminal=burst_terminal,
-    )
-    event_intervals = _load_event_intervals(
-        well_id_str, recording_key, rec_names, burst_root,
-        burst_terminal=burst_terminal,
-    )
 
-    plot_signals = None
-    for candidate in rec_names:
-        path = burst_root / recording_key / candidate / well_id_str / burst_terminal / "plot_signals.npy"
-        if path.exists():
-            try:
-                plot_signals = np.load(path, allow_pickle=True).item()
-            except Exception:  # noqa: BLE001
-                return _make_well_record(
-                    well_id=well_id_str, well_name=well_name,
-                    groupname=groupname, status="plot_signals error",
-                )
-            break
+    if manifest_mode:
+        event_intervals = _load_event_intervals_from_dir(burst_dir)
+        plot_signals, plot_err = _load_npy_dict(
+            burst_dir / "plot_signals.npy" if burst_dir is not None else None
+        )
+        if plot_err:
+            return _make_well_record(
+                well_id=well_id_str, well_name=well_name,
+                groupname=groupname, status="plot_signals error",
+            )
+        spike_times, spike_err = _load_npy_dict(
+            curation_dir / "curated_spike_times.npy" if curation_dir is not None else None
+        )
+        if spike_err:
+            return _make_well_record(
+                well_id=well_id_str, well_name=well_name,
+                groupname=groupname, status="spike_times error",
+            )
+    else:
+        rec_names = _rec_name_candidates(
+            well_id_str, rec_name, well_rec_names, burst_root, curation_root, recording_key,
+            burst_terminal=burst_terminal,
+        )
+        event_intervals = _load_event_intervals(
+            well_id_str, recording_key, rec_names, burst_root,
+            burst_terminal=burst_terminal,
+        )
 
-    spike_times = None
-    for candidate in rec_names:
-        path = curation_root / recording_key / candidate / well_id_str / "auto_curation" / "curated_spike_times.npy"
-        if path.exists():
-            try:
-                spike_times = np.load(path, allow_pickle=True).item()
-            except Exception:  # noqa: BLE001
-                return _make_well_record(
-                    well_id=well_id_str, well_name=well_name,
-                    groupname=groupname, status="spike_times error",
-                )
-            break
+        plot_signals = None
+        for candidate in rec_names:
+            path = burst_root / recording_key / candidate / well_id_str / burst_terminal / "plot_signals.npy"
+            if path.exists():
+                try:
+                    plot_signals = np.load(path, allow_pickle=True).item()
+                except Exception:  # noqa: BLE001
+                    return _make_well_record(
+                        well_id=well_id_str, well_name=well_name,
+                        groupname=groupname, status="plot_signals error",
+                    )
+                break
+
+        spike_times = None
+        for candidate in rec_names:
+            path = curation_root / recording_key / candidate / well_id_str / "auto_curation" / "curated_spike_times.npy"
+            if path.exists():
+                try:
+                    spike_times = np.load(path, allow_pickle=True).item()
+                except Exception:  # noqa: BLE001
+                    return _make_well_record(
+                        well_id=well_id_str, well_name=well_name,
+                        groupname=groupname, status="spike_times error",
+                    )
+                break
 
     if plot_signals is None and spike_times is None:
         return _make_well_record(
@@ -901,6 +1003,36 @@ def _load_well_record(
         plot_signals=plot_signals, spike_times=spike_times,
         event_intervals=event_intervals, status="ok",
     )
+
+
+def _load_npy_dict(path: Path | None) -> tuple[dict | None, bool]:
+    """Load a ``.npy`` pickled dict. Returns ``(data|None, error_flag)``.
+
+    ``(None, False)`` when the path is ``None`` or missing (well simply has no
+    such output); ``(None, True)`` when the file exists but fails to load.
+    """
+    if path is None or not Path(path).exists():
+        return None, False
+    try:
+        return np.load(path, allow_pickle=True).item(), False
+    except Exception:  # noqa: BLE001
+        return None, True
+
+
+def _load_event_intervals_from_dir(
+    burst_dir: Path | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Load per-event interval tables directly from a known burst output dir."""
+    event_intervals: dict[str, list[dict[str, Any]]] = {
+        key: [] for key in BURST_EVENT_TYPES
+    }
+    if burst_dir is None or not Path(burst_dir).exists():
+        return event_intervals
+    for event_key in event_intervals:
+        event_path = Path(burst_dir) / f"{event_key}.pkl"
+        if event_path.exists():
+            event_intervals[event_key] = _read_event_table(event_path)
+    return event_intervals
 
 
 def _make_well_record(**kwargs: Any) -> WellRecord:

@@ -47,6 +47,42 @@ METHOD_SUBDIRS: dict[str, str] = {
 }
 
 
+# Parsed-cache memo keyed by (path, mtime_ns, size). The dashboard reads
+# pipeline_cache.json several times per user action (burst root + burst manifest
+# + curation manifest, and again on every drill-down click); on a multi-MB cache
+# those repeated json.load calls dominate. Memoizing the parsed dict by file
+# identity makes repeat reads free while a pipeline re-run (new mtime) reparses.
+# Bounded to the current version only (single-user dashboard).
+_PIPELINE_CACHE_MEMO: dict[tuple, dict] = {}
+
+
+def _load_pipeline_cache(analysis_root: Path | str) -> dict:
+    """Return the parsed ``pipeline_cache.json`` (memoized by mtime+size).
+
+    Returns ``{}`` when the file is missing or unreadable.
+    """
+    pc_path = Path(analysis_root) / "pipeline_cache.json"
+    try:
+        st = pc_path.stat()
+    except OSError:
+        return {}
+    key = (str(pc_path), st.st_mtime_ns, st.st_size)
+    cached = _PIPELINE_CACHE_MEMO.get(key)
+    if cached is not None:
+        return cached
+    try:
+        with pc_path.open() as fh:
+            data = json.load(fh)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to read %s: %s", pc_path, exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    _PIPELINE_CACHE_MEMO.clear()  # keep only the latest cache version
+    _PIPELINE_CACHE_MEMO[key] = data
+    return data
+
+
 def output_root_from_cache(analysis_root: Path | str, method: str) -> Path | None:
     """Recover a method's burst output_root from ``pipeline_cache.json``.
 
@@ -65,16 +101,10 @@ def output_root_from_cache(analysis_root: Path | str, method: str) -> Path | Non
     terminal = METHOD_TERMINALS.get(method)
     if not task or not terminal:
         return None
-    pc_path = Path(analysis_root) / "pipeline_cache.json"
-    if not pc_path.exists():
-        return None
-    try:
-        with pc_path.open() as fh:
-            cache = json.load(fh)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to read %s: %s", pc_path, exc)
-        return None
+    cache = _load_pipeline_cache(analysis_root)
     for entry in cache.values():
+        if not isinstance(entry, dict):
+            continue
         t = (entry.get("tasks") or {}).get(task)
         if not t or t.get("status") != "complete":
             continue
@@ -95,6 +125,45 @@ def output_root_from_cache(analysis_root: Path | str, method: str) -> Path | Non
             root = root.parent
         return root
     return None
+
+
+def well_output_dirs_from_cache(
+    analysis_root: Path | str,
+    recording_key: str,
+    task_name: str,
+) -> dict[str, Path]:
+    """Return ``{well_id: per-well output dir}`` for one recording + task.
+
+    The pipeline cache records the exact ``output_path`` each task wrote to
+    (``…/<rec_name>/<well_id>/<terminal>`` — the directory that already holds
+    ``plot_signals.npy`` / event tables for a burst task, or
+    ``curated_spike_times.npy`` for ``auto_curation``). Reading those paths lets
+    the plate viewer skip directory globbing entirely (Caching guide Tier 0):
+    the "path manifest" the guide describes already exists in the cache.
+
+    Only ``complete`` entries with a stored path are returned; wells whose task
+    hasn't finished are simply absent and the caller treats them as missing.
+    Returns ``{}`` when the cache is missing or unreadable (callers fall back to
+    on-disk discovery). Reads ``pipeline_cache.json`` as plain data, so this
+    keeps the no-pipeline-package-import property of the analysis layer.
+    """
+    cache = _load_pipeline_cache(analysis_root)
+    dirs: dict[str, Path] = {}
+    for entry in cache.values():
+        if not isinstance(entry, dict) or entry.get("recording_key") != recording_key:
+            continue
+        compound = entry.get("well_id", "")
+        if "/" not in compound:
+            continue
+        _rec_name, well_id = compound.split("/", 1)
+        task = (entry.get("tasks") or {}).get(task_name)
+        if not task or task.get("status") != "complete":
+            continue
+        output_path = task.get("output_path")
+        if not output_path:
+            continue
+        dirs.setdefault(well_id, Path(output_path))
+    return dirs
 
 
 # ---------------------------------------------------------------------------

@@ -25,4 +25,10 @@ GLOBALS_SCHEMA: dict[str, ParamSpec] = {
         "path", "",
         "Where figure exports (HTML, PNG) are written.",
     ),
+    "cache_root": ParamSpec(
+        "path", "",
+        "Local (non-NAS) scratch dir for the dashboard's read cache and "
+        "pre-rendered raster PNGs. Leave blank to default to "
+        "<analysis_root>/../dashboard_cache.",
+    ),
 }
