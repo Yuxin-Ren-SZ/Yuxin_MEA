@@ -444,6 +444,179 @@ def _title(well_uid: str, method: str, recs: list[Recording], norm: str) -> str:
             f"{len(recs)} recordings · {nb} bins")
 
 
+def _build_single_animated(block: tuple[str, list["Recording"], dict], norm: str,
+                           palette: str = "dark24") -> go.Figure:
+    """Single-well figure with a time-lapse animation over recordings (DIV order).
+
+    Only used when exactly one well is rendered — each well is its own
+    coordinate space, so revealing "recordings ≤ k" is meaningful only within
+    one well. Three orthogonal control channels, so nothing collides:
+      • method (UMAP/PCA)     → x/y  (restyle: one trace set, swap coordinates)
+      • state (Both/Burst/Rest) → marker.opacity
+      • animation (time)      → visible ('legendonly' keeps the legend a stable
+                                 DIV timeline while a recording is hidden)
+    Two static frame groups: cum_k (leave previous) and cur_k (current only).
+    """
+    well_uid, recs, method_coords = block
+    methods = list(method_coords.keys())          # [--method first, then the other]
+    default_m = methods[0]
+    colors = _rec_colors(len(recs), palette)
+    sizes = [r.X_raw.shape[0] for r in recs]
+    offsets = np.cumsum([0] + sizes)
+    K = len(recs)
+
+    fig = go.Figure()
+    # per-trace coordinates for each projection (for the method x/y restyle)
+    px: dict[str, list] = {m: [] for m in methods}
+    py: dict[str, list] = {m: [] for m in methods}
+    trace_rank: list[int | None] = []     # recording rank per trace (None = dummy)
+    trace_is_burst: list[bool | None] = []
+
+    for ri, r in enumerate(recs):
+        for is_burst, tag in ((False, "rest"), (True, "burst")):
+            m = r.is_burst == is_burst
+            if not m.any():
+                continue
+            for name in methods:
+                xy = method_coords[name][0][int(offsets[ri]):int(offsets[ri + 1])][m]
+                px[name].append(xy[:, 0])
+                py[name].append(xy[:, 1])
+            xy0 = method_coords[default_m][0][int(offsets[ri]):int(offsets[ri + 1])][m]
+            hover = [
+                f"{r.label}<br>state={tag}<br>t={tc:.1f}s<br>cluster={cl}"
+                for tc, cl in zip(r.t_centers[m], r.labels[m])
+            ]
+            fig.add_trace(go.Scattergl(
+                x=xy0[:, 0], y=xy0[:, 1], mode="markers",
+                marker=_marker(is_burst, colors[ri]),
+                name=r.label, legendgroup=f"rec|{r.label}",
+                showlegend=(not is_burst),
+                hovertext=hover, hoverinfo="text", visible=True,
+            ))
+            trace_rank.append(ri)
+            trace_is_burst.append(is_burst)
+
+    for is_burst, nm in ((False, "○ rest"), (True, "✚ burst")):
+        fig.add_trace(go.Scattergl(
+            x=[None], y=[None], mode="markers", marker=_marker(is_burst, "#333"),
+            name=nm, legendgroup="_symbol", showlegend=True, hoverinfo="skip", visible=True,
+        ))
+        for name in methods:
+            px[name].append([None])
+            py[name].append([None])
+        trace_rank.append(None)
+        trace_is_burst.append(None)
+
+    n_traces = len(trace_rank)
+
+    # method: x/y restyle (+ axis titles) — frees `visible` for the animation
+    method_buttons = []
+    for name in methods:
+        _c, xl, yl = method_coords[name]
+        method_buttons.append(dict(
+            label=name.upper(), method="update",
+            args=[{"x": px[name], "y": py[name]},
+                  {"xaxis.title.text": xl, "yaxis.title.text": yl,
+                   "title.text": _title(well_uid, name, recs, norm)}],
+        ))
+
+    # state: marker.opacity restyle (per-trace list)
+    def _op(mode: str) -> list[float]:
+        out = []
+        for b in trace_is_burst:
+            if b is None:
+                out.append(1.0)
+            elif mode == "both":
+                out.append(MARKER_ALPHA)
+            elif mode == "burst":
+                out.append(MARKER_ALPHA if b else 0.0)
+            else:
+                out.append(MARKER_ALPHA if not b else 0.0)
+        return out
+
+    state_buttons = [
+        dict(label="Both", method="restyle", args=[{"marker.opacity": _op("both")}]),
+        dict(label="Burst only", method="restyle", args=[{"marker.opacity": _op("burst")}]),
+        dict(label="Rest only", method="restyle", args=[{"marker.opacity": _op("rest")}]),
+    ]
+
+    # animation: two static frame groups over `visible`
+    def _vis(k: int, cumulative: bool) -> list:
+        out = []
+        for rk in trace_rank:
+            if rk is None:
+                out.append(True)                                  # dummies always shown
+            elif (rk <= k) if cumulative else (rk == k):
+                out.append(True)
+            else:
+                out.append("legendonly")                          # hidden but keeps legend slot
+        return out
+
+    frames = []
+    for pref, cumulative in (("cum", True), ("cur", False)):
+        for k in range(K):
+            frames.append(go.Frame(
+                name=f"{pref}{k}",
+                data=[{"visible": v} for v in _vis(k, cumulative)],
+                traces=list(range(n_traces)),
+            ))
+    fig.frames = frames
+
+    def _seq(pref: str) -> list[str]:
+        return [f"{pref}{k}" for k in range(K)]
+
+    play_opts = {"frame": {"duration": 600, "redraw": True},
+                 "transition": {"duration": 0}, "mode": "immediate", "fromcurrent": True}
+    pause_opts = {"frame": {"duration": 0, "redraw": False},
+                  "transition": {"duration": 0}, "mode": "immediate"}
+    step_opts = {"frame": {"duration": 0, "redraw": True},
+                 "transition": {"duration": 0}, "mode": "immediate"}
+
+    anim_buttons = dict(
+        type="buttons", direction="right", x=0.0, xanchor="left", y=-0.03, yanchor="top",
+        pad=dict(t=6, r=8), showactive=False,
+        buttons=[
+            dict(label="▶ Leave previous", method="animate", args=[_seq("cum"), play_opts]),
+            dict(label="▶ Current only", method="animate", args=[_seq("cur"), play_opts]),
+            dict(label="⏸ Pause", method="animate", args=[[None], pause_opts]),
+        ],
+    )
+    slider = dict(
+        active=K - 1, x=0.06, len=0.9, y=-0.14, yanchor="top", pad=dict(t=8, b=8),
+        currentvalue=dict(prefix="cumulative up to: ", visible=True, xanchor="right"),
+        steps=[dict(method="animate", label=recs[k].label, args=[[f"cum{k}"], step_opts])
+               for k in range(K)],
+    )
+
+    _, xl0, yl0 = method_coords[default_m]
+    fig.update_layout(
+        title=dict(text=_title(well_uid, default_m, recs, norm),
+                   x=0.0, xanchor="left", y=0.985, yref="container", yanchor="top",
+                   font=dict(size=15)),
+        updatemenus=[
+            dict(type="buttons", active=0, buttons=method_buttons, x=0.0, xanchor="left",
+                 y=1.11, yanchor="top", direction="right", pad=dict(t=2, r=8), showactive=True),
+            dict(type="buttons", active=0, buttons=state_buttons, x=1.0, xanchor="right",
+                 y=1.11, yanchor="top", direction="right", pad=dict(t=2, l=8), showactive=True),
+            anim_buttons,
+        ],
+        sliders=[slider],
+        xaxis_title=xl0, yaxis_title=yl0,
+        legend=dict(title="recording", x=1.02, xanchor="left", y=1.0, yanchor="top",
+                    itemsizing="constant", itemclick="toggle", itemdoubleclick="toggleothers"),
+        template="plotly_white", height=860, width=1200,
+        margin=dict(l=70, r=220, t=150, b=200),
+    )
+    fig.add_annotation(
+        text=("time-lapse: <b>▶ Leave previous</b> = accumulate · <b>▶ Current only</b> = one at a time · "
+              "slider scrubs cumulative &nbsp;|&nbsp; UMAP/PCA (top-left) · Both/Burst/Rest (top-right) · "
+              "color = recording (date) · ○ rest / ✚ burst · PCA axes show loadings."),
+        xref="paper", yref="paper", x=0.0, xanchor="left", y=-0.30, yanchor="top",
+        showarrow=False, font=dict(size=11, color="#666"), align="left",
+    )
+    return fig
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -466,6 +639,10 @@ def main(argv=None) -> int:
     ap.add_argument("--n-neighbors", type=int, default=30)
     ap.add_argument("--min-dist", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--animate", dest="animate", action="store_true", default=True,
+                    help="single-well only: add a time-lapse over recordings (default on)")
+    ap.add_argument("--no-animate", dest="animate", action="store_false",
+                    help="static overlay (no time-lapse); the only mode for multi-well")
     ap.add_argument("--output", type=Path, default=None)
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args(argv)
@@ -493,7 +670,12 @@ def main(argv=None) -> int:
         logger.warning("%d total plotted points across %d wells — HTML will be large/heavy; "
                        "consider fewer wells or a smaller --max-bins-per-rec", grand_bins, len(blocks))
 
-    fig = _build_multi_figure(blocks, args.norm, args.palette)
+    if args.animate and len(blocks) == 1:
+        fig = _build_single_animated(blocks[0], args.norm, args.palette)
+    else:
+        if args.animate and len(blocks) > 1:
+            logger.info("animation is single-well only; rendering static overlay for %d wells", len(blocks))
+        fig = _build_multi_figure(blocks, args.norm, args.palette)
 
     if args.output:
         out = args.output
