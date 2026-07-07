@@ -69,7 +69,7 @@ def test_dry_run_on_empty_cache(tmp_path, capsys):
     rc = main(["--config", str(config), "--dry-run"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "0 task(s) eligible" in out
+    assert "0 per-well task(s) eligible" in out
 
 
 def test_unknown_task_filter_rejected(tmp_path, capsys):
@@ -108,7 +108,7 @@ def test_parallel_drain_empty_queue(tmp_path, capsys):
     rc = main(["--config", str(config), "--jobs", "2"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Ran 0 task(s)" in out
+    assert "Ran 0 per-well" in out
 
 
 # ---------------------------------------------------------------------------

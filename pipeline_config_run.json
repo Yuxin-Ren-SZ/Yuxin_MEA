@@ -111,6 +111,24 @@
       "network_merge_gap_min_s": 0.75,
       "min_burst_modulation": 0.1,
       "debug": true
+    },
+    "cluster_overlay_by_well": {
+      "norm": "shared",
+      "palette": "dark24",
+      "method": "umap",
+      "max_bins_per_rec": 1500,
+      "n_neighbors": 30,
+      "min_dist": 0.1,
+      "seed": 42
+    },
+    "cluster_overlay_by_recording": {
+      "norm": "shared",
+      "palette": "dark24",
+      "method": "umap",
+      "max_bins_per_rec": 1500,
+      "n_neighbors": 30,
+      "min_dist": 0.1,
+      "seed": 42
     }
   }
 }

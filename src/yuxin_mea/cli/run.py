@@ -20,11 +20,19 @@ import traceback
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from pathlib import Path
 
+import json
+
 from yuxin_mea.config import ConfigManager
 from yuxin_mea.dataset import DatasetManager
-from yuxin_mea.pipeline import PipelineManager, WorkItem
+from yuxin_mea.pipeline import (
+    AggregateScheduler,
+    JsonAggregateCacheStore,
+    PipelineManager,
+    WorkItem,
+)
+from yuxin_mea.pipeline import aggregate_scheduler as _agg
 from yuxin_mea.pipeline.task_record import TaskStatus
-from yuxin_mea.tasks import TASK_CLASSES
+from yuxin_mea.tasks import AGGREGATE_TASK_CLASSES, TASK_CLASSES
 
 
 logger = logging.getLogger("yuxin_mea.run")
@@ -86,6 +94,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Print the queue plan and exit without executing.",
+    )
+    p.add_argument(
+        "--aggregate",
+        dest="aggregate",
+        action="store_true",
+        default=True,
+        help="After the per-well drain, run scope-level aggregate tasks (default on).",
+    )
+    p.add_argument(
+        "--no-aggregate",
+        dest="aggregate",
+        action="store_false",
+        help="Skip the aggregate-task pass (per-well drain only).",
+    )
+    p.add_argument(
+        "--aggregate-only",
+        action="store_true",
+        help="Skip the per-well drain and run ONLY the aggregate-task pass "
+             "(useful for regenerating figures without recomputing wells).",
     )
     p.add_argument(
         "--log-level",
@@ -309,7 +336,10 @@ def main(argv: list[str] | None = None) -> int:
     rec_allow = _split_csv(args.recordings)
 
     if task_allow:
-        registered = {cls.task_name for cls in TASK_CLASSES}
+        registered = (
+            {cls.task_name for cls in TASK_CLASSES}
+            | {cls.task_name for cls in AGGREGATE_TASK_CLASSES}
+        )
         bad = [t for t in task_allow if t not in registered]
         if bad:
             print(
@@ -327,53 +357,147 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         # Dry-run is best-effort only — it can't simulate dependency unlocking
         # because nothing transitions to COMPLETE. It enumerates everything
-        # that's *currently* eligible (status NOT_RUN/FAILED with deps already
-        # complete) and lists it. Tasks that would only unlock after an earlier
-        # task ran are not shown.
-        eligible_now = pipeline_mgr.get_next_task(
-            n=10_000,
-            retry_failed=args.retry_failed,
-            recording_keys=rec_allow,
-            task_names=task_allow,
-        )
-        for w in eligible_now:
-            print(f"[dry-run] would run {w.task_name} on {w.recording_key}/{w.well_id}")
-        print(
-            f"Done. {len(eligible_now)} task(s) eligible right now "
-            "(dry-run; no state changes; downstream unlocks not modelled)."
-        )
+        # that's *currently* eligible and lists it.
+        if not args.aggregate_only:
+            eligible_now = pipeline_mgr.get_next_task(
+                n=10_000,
+                retry_failed=args.retry_failed,
+                recording_keys=rec_allow,
+                task_names=task_allow,
+            )
+            for w in eligible_now:
+                print(f"[dry-run] would run {w.task_name} on {w.recording_key}/{w.well_id}")
+            print(f"{len(eligible_now)} per-well task(s) eligible now.")
+        if args.aggregate or args.aggregate_only:
+            sched = _build_scheduler(cm, pipeline_mgr)
+            for pi in sched.plan(task_allow):
+                print(
+                    f"[dry-run agg] {pi.decision.upper():>10}  {pi.task.task_name}  "
+                    f"{pi.scope_key}  (complete {len(pi.members_complete)}/{pi.n_total})"
+                )
+        print("Done (dry-run; no state changes; downstream unlocks not modelled).")
         return 0
 
-    # Recover from any prior worker crash before executing. Dry-run intentionally
-    # skips this — previewing the queue must not mutate state.
-    n_recovered = pipeline_mgr.recover_from_crash()
-    if n_recovered:
+    n_ran = n_failed = 0
+    if not args.aggregate_only:
+        # Recover from any prior worker crash before executing.
+        n_recovered = pipeline_mgr.recover_from_crash()
+        if n_recovered:
+            logger.warning(
+                "Recovered %d task(s) left RUNNING/FAILED by a previous run.",
+                n_recovered,
+            )
+        if args.jobs is None or args.jobs <= 1:
+            n_ran, n_failed = _drain_serial(
+                cm, dataset_mgr, pipeline_mgr,
+                task_allow=task_allow,
+                rec_allow=rec_allow,
+                retry_failed=args.retry_failed,
+                max_tasks=args.max_tasks,
+            )
+        else:
+            n_ran, n_failed = _drain_parallel(
+                pipeline_mgr,
+                config_path=args.config,
+                jobs=args.jobs,
+                task_allow=task_allow,
+                rec_allow=rec_allow,
+                retry_failed=args.retry_failed,
+                max_tasks=args.max_tasks,
+            )
+
+    n_agg = n_agg_failed = 0
+    if args.aggregate or args.aggregate_only:
+        sched = _build_scheduler(cm, pipeline_mgr)
+        n_agg, n_agg_failed = _drain_aggregate(
+            sched, cm, task_allow=task_allow, max_tasks=args.max_tasks
+        )
+
+    print(
+        f"Done. Ran {n_ran} per-well + {n_agg} aggregate task(s); "
+        f"{n_failed + n_agg_failed} failed."
+    )
+    return 0 if (n_failed + n_agg_failed) == 0 else 1
+
+
+def _build_scheduler(cm: ConfigManager, pipeline_mgr: PipelineManager) -> AggregateScheduler:
+    analysis_root = Path(cm.get_global("analysis_root"))
+    exp_path = analysis_root / "experiment_cache.json"
+    try:
+        with exp_path.open() as fh:
+            experiment_cache = json.load(fh)
+    except Exception:  # noqa: BLE001
         logger.warning(
-            "Recovered %d task(s) left RUNNING/FAILED by a previous run.",
-            n_recovered,
+            "experiment_cache.json not readable at %s; groupname-scoped tasks bucket under '?'.",
+            exp_path,
         )
+        experiment_cache = {}
+    store = JsonAggregateCacheStore(analysis_root)
+    return AggregateScheduler(
+        pipeline_mgr, cm, experiment_cache, AGGREGATE_TASK_CLASSES, store
+    )
 
-    if args.jobs is None or args.jobs <= 1:
-        n_ran, n_failed = _drain_serial(
-            cm, dataset_mgr, pipeline_mgr,
-            task_allow=task_allow,
-            rec_allow=rec_allow,
-            retry_failed=args.retry_failed,
-            max_tasks=args.max_tasks,
-        )
-    else:
-        n_ran, n_failed = _drain_parallel(
-            pipeline_mgr,
-            config_path=args.config,
-            jobs=args.jobs,
-            task_allow=task_allow,
-            rec_allow=rec_allow,
-            retry_failed=args.retry_failed,
-            max_tasks=args.max_tasks,
-        )
 
-    print(f"Done. Ran {n_ran} task(s); {n_failed} failed.")
-    return 0 if n_failed == 0 else 1
+def _drain_aggregate(
+    sched: AggregateScheduler,
+    cm: ConfigManager,
+    *,
+    task_allow: list[str] | None,
+    max_tasks: int | None,
+) -> tuple[int, int]:
+    """Run ready aggregate instances (serial). Reads per-well statuses; owns only
+    the aggregate cache. The per-well drain functions are untouched."""
+    figure_root = cm.get_global("figure_root") or cm.get_global("analysis_root")
+    n_ran = 0
+    n_failed = 0
+    n_wait = n_uptodate = n_skip = 0
+    for pi in sched.plan(task_allow):
+        if max_tasks is not None and n_ran >= max_tasks:
+            logger.info("Reached --max-tasks=%d (aggregate), stopping.", max_tasks)
+            break
+        task = pi.task
+        if pi.decision == _agg.WAIT:
+            n_wait += 1
+            continue
+        if pi.decision == _agg.UPTODATE:
+            n_uptodate += 1
+            continue
+        if pi.decision == _agg.SKIP_EMPTY:
+            n_skip += 1
+            logger.info("Aggregate SKIP-empty %s %s (0 complete members).",
+                        task.task_name, pi.scope_key)
+            sched.mark_skipped_empty(task, pi.scope_key, pi.member_hash)
+            continue
+
+        params = dict(cm.get_task_params(task.task_name))
+        params.setdefault("output_root", figure_root)
+        sched.mark_running(task, pi.scope_key)
+        t0 = time.time()
+        try:
+            out = task.run(pi.scope_key, pi.members_complete, params)
+        except Exception:
+            tb = traceback.format_exc()
+            logger.error("Aggregate FAILED %s %s: %s",
+                         task.task_name, pi.scope_key, tb.strip().splitlines()[-1])
+            sched.mark_failed(task, pi.scope_key, tb, pi.member_hash,
+                              pi.n_total, len(pi.members_complete))
+            n_failed += 1
+            continue
+        sched.mark_complete(task, pi.scope_key, out, pi.member_hash,
+                            pi.n_total, len(pi.members_complete))
+        n_ran += 1
+        logger.info(
+            "Aggregate %s %s %s in %.1fs → %s (%d/%d members)",
+            pi.decision.upper(), task.task_name, pi.scope_key,
+            time.time() - t0, out, len(pi.members_complete), pi.n_total,
+        )
+    if n_wait or n_uptodate or n_skip:
+        logger.info(
+            "Aggregate pass: ran %d, failed %d · %d waiting (deps not attempted), "
+            "%d up-to-date, %d skipped-empty.",
+            n_ran, n_failed, n_wait, n_uptodate, n_skip,
+        )
+    return n_ran, n_failed
 
 
 def _drain_serial(
