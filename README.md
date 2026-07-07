@@ -39,7 +39,8 @@ config/                 example pipeline config JSON
 notebooks/v2/           canonical post-refactor pipeline notebooks
 notebooks/              original notebooks (kept for reference)
 tests/                  pytest suite (~200 tests)
-scripts/                helper scripts (e.g. strip_notebook_outputs.py)
+scripts/                helper + operator scripts (cache check/refresh,
+                        network pipeline runner, strip_notebook_outputs.py, …)
 doc/architecture.md     older architecture note (partly stale; AGENTS.md is authoritative)
 AGENTS.md               exhaustive module/symbol map — the canonical reference
 ```
@@ -58,7 +59,7 @@ The pinned torch wheels target **CUDA 12.8**. For CPU-only or different CUDA, ed
 
 ## Quickstart
 
-Three entry points, depending on who you are.
+Entry points, depending on who you are.
 
 ### 1. Dashboard (non-technical users)
 
@@ -99,6 +100,36 @@ from yuxin_mea.analysis.ml_burst_detector import compute_ml_bursts
 ```
 
 See `AGENTS.md` for the full public surface (module-by-module symbol map).
+
+### 4. Running new data (operator scripts)
+
+When raw recordings land under `data_root`, three scripts in `scripts/` take you
+from disk to analysis. `DatasetManager` and `PipelineManager` are independent, so
+touching the recording cache never reruns analysis — the pipeline only computes
+when you invoke the runner.
+
+```bash
+# 1. Is the cache in sync with disk? Read-only, no side effects.
+conda run -n yuxin_mea python scripts/check_cache.py --config pipeline_config.json --network-only
+
+# 2. Only if step 1 reports missing recordings: full rescan of the dataset
+#    cache. Reruns NO analysis. (Needed when recordings were added under a
+#    Date dir that was already cached — the auto incremental scan is
+#    date-granular and misses those.)
+conda run -n yuxin_mea python scripts/refresh_cache.py --config pipeline_config.json
+
+# 3. Run the full pipeline over every /Network/ recording, tee'd to a
+#    timestamped log. Cache skips finished tasks (complete + config unchanged);
+#    --recordings auto-queues any new wells first.
+bash scripts/run_pipeline_network.sh --dry-run   # preview the queue, no state change
+bash scripts/run_pipeline_network.sh             # run (JOBS=8 default)
+JOBS=1 bash scripts/run_pipeline_network.sh      # single-GPU sorting
+```
+
+Env overrides for the runner: `CONFIG`, `ENV` (conda env), `JOBS`. Any extra args
+(e.g. `--tasks preprocessing`, `--no-aggregate`) pass through to `yuxin-mea-run`.
+The runner is a thin wrapper over the `yuxin-mea-run` CLI — use that directly for
+finer control (single recordings, task waves, `--retry-failed`).
 
 ## Configuration
 
