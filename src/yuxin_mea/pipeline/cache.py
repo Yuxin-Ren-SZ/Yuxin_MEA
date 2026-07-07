@@ -42,6 +42,9 @@ def _decode(d: dict):
             last_updated=d["last_updated"],
             error=d["error"],
             config=d.get("config", {}),
+            member_hash=d.get("member_hash", ""),
+            n_members_total=d.get("n_members_total", 0),
+            n_members_complete=d.get("n_members_complete", 0),
         )
     if _ENTRY_KEYS <= d.keys():
         return PipelineEntry(
@@ -66,6 +69,9 @@ def _entry_to_dict(entry: PipelineEntry) -> dict:
                 "last_updated": t.last_updated,
                 "error":        t.error,
                 "config":       t.config,
+                "member_hash":        t.member_hash,
+                "n_members_total":    t.n_members_total,
+                "n_members_complete": t.n_members_complete,
             }
             for name, t in entry.tasks.items()
         },

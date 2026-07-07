@@ -187,3 +187,54 @@ def test_auto_queue_warns_unknown_recording(tmp_path, caplog):
         rc = main(["--config", str(config), "--recordings", "NO/SUCH/REC/Net/001"])
     assert rc == 0
     assert "not found in dataset cache" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Unified scheduler (S2) CLI wiring
+# ---------------------------------------------------------------------------
+
+def test_unified_dry_run_empty(tmp_path, capsys):
+    config, _analysis, _data = _make_config(tmp_path)
+    rc = main(["--config", str(config), "--scheduler", "unified", "--dry-run"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0 per-well task(s) eligible now [unified]" in out
+
+
+def test_unified_auto_queue_registers_finest_instances(tmp_path):
+    from yuxin_mea.pipeline import JsonInstanceStore
+    config, analysis, _data = _make_config(tmp_path)
+    rec_key = "S1/260101/P1/Network/000001"
+    _seed_dataset_cache(analysis, {
+        rec_key: {"h5_recordings": {"rec0000": ["well000", "well001"]}},
+    })
+    rc = main(["--config", str(config), "--scheduler", "unified",
+               "--recordings", rec_key, "--dry-run"])
+    assert rc == 0
+    instances = JsonInstanceStore(analysis).load()
+    assert len(instances) == 2
+    for inst in instances.values():
+        assert inst.scope_name == "well"
+        # every per-well task registered NOT_RUN
+        assert "preprocessing" in inst.tasks and "ml_burst_detection" in inst.tasks
+
+
+def test_unified_migrates_legacy_pipeline_cache(tmp_path, capsys):
+    """A pre-existing legacy pipeline_cache.json is migrated into the unified
+    store on first --scheduler=unified use, and its eligible work shows up."""
+    from yuxin_mea.pipeline import JsonInstanceStore, PipelineManager
+    from yuxin_mea.pipeline.work_item import WorkItem
+
+    config, analysis, _data = _make_config(tmp_path)
+    # seed a legacy per-well cache with one recording, preprocessing eligible
+    pm = PipelineManager(analysis)
+    pm.register_computation_task("preprocessing", [])
+    pm.add_well("S1/260101/P1/Network/000001", "rec0000/well000")
+
+    rc = main(["--config", str(config), "--scheduler", "unified", "--dry-run"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # the migrated well's preprocessing is eligible now
+    assert "would run preprocessing" in out
+    instances = JsonInstanceStore(analysis).load()
+    assert len(instances) == 1

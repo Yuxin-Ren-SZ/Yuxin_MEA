@@ -15,7 +15,9 @@ Both depend on the per-well ``ml_burst_detection`` task and read each member's
 
 from __future__ import annotations
 
+import html
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -25,7 +27,7 @@ from yuxin_mea.analysis.cluster_overlay import (
     pool_and_fit,
 )
 from yuxin_mea.pipeline.aggregate_task import BaseAggregateTask
-from yuxin_mea.pipeline.scope import SCOPE_RECORDING, SCOPE_WELL_UID
+from yuxin_mea.pipeline.scope import SCOPE_RECORDING, SCOPE_SAMPLE, SCOPE_WELL_UID
 from yuxin_mea.pipeline.well_dims import Member
 
 logger = logging.getLogger(__name__)
@@ -141,3 +143,60 @@ class ClusterOverlayByRecordingTask(BaseAggregateTask):
             sort_key=lambda m: (m.dims.date, m.dims.run_id, m.dims.rec_name),
             title_label=scope_key.get("well_uid", "well"),
         )
+
+
+class SampleOverlaySummaryTask(BaseAggregateTask):
+    """Per-sample landing page linking every longitudinal-well overlay of a sample.
+
+    The first aggregate→aggregate task: scope ``sample``, depends on the
+    ``longitudinal_well``-scoped :class:`ClusterOverlayByRecordingTask`. Its members
+    are the per-well OVERLAY instances (resolved by scope-containment on ``well_uid``
+    ⊂ ``sample_id``), not the per-well ml traces — this is what exercises the unified
+    scheduler's containment DAG. Output:
+    ``<output_root>/__agg__/sample_overlay_summary/<scope_key>/index.html``.
+    """
+
+    task_name = "sample_overlay_summary"
+    dependencies = ["cluster_overlay_by_recording"]
+    scope = SCOPE_SAMPLE
+
+    @classmethod
+    def default_params(cls) -> dict[str, Any]:
+        return {"output_root": None}
+
+    def run(self, scope_key, members, params) -> Path:
+        p = self.resolve_params(params)
+        output_root = p.get("output_root")
+        if not output_root:
+            raise ValueError(
+                f"{self.task_name}: no output_root in params (config or CLI must "
+                "set it / provide a figure_root global)."
+            )
+        out = self.build_output_path(output_root, self.task_name, scope_key) / "index.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        rows: list[str] = []
+        for m in sorted(members, key=lambda m: (m.scope_key or {}).get("well_uid", "")):
+            if m.upstream_output_path is None:
+                continue
+            wuid = (m.scope_key or {}).get("well_uid", "?")
+            href = os.path.relpath(str(m.upstream_output_path), start=str(out.parent))
+            rows.append(
+                f'<li><a href="{html.escape(href)}">{html.escape(str(wuid))}</a></li>'
+            )
+        if not rows:
+            raise RuntimeError(
+                f"{self.task_name}: no member overlays for scope {scope_key} "
+                f"(of {len(members)} complete members)."
+            )
+
+        sample = scope_key.get("sample_id", "sample")
+        doc = (
+            f"<!doctype html><meta charset='utf-8'>"
+            f"<title>{html.escape(sample)} — overlays</title>"
+            f"<h1>{html.escape(sample)}: {len(rows)} longitudinal-well overlays</h1>"
+            f"<ul>{''.join(rows)}</ul>"
+        )
+        out.write_text(doc, encoding="utf-8")
+        logger.info("%s: wrote %s (%d overlays)", self.task_name, out, len(rows))
+        return out

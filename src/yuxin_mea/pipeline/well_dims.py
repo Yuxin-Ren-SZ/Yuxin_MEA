@@ -65,12 +65,19 @@ class Member:
     ``upstream_output_path`` is the dependency task's ``TaskRecord.output_path``
     (e.g. the ``.../ml_burst_detection`` dir); the aggregate task reads whatever
     it needs from there (e.g. ``debug_trace.pkl``).
+
+    A member is usually a *well* (the finest scope). S2 also lets a member be an
+    upstream *aggregate instance* (an aggregate→aggregate dependency): then
+    ``scope_key``/``scope_name`` identify that instance and ``dims`` carries a
+    representative member well. For a well member both stay ``None``.
     """
 
     dims: WellDims
     upstream_status: str
     upstream_output_path: Path | None
     upstream_last_updated: float | None
+    scope_key: dict[str, str] | None = None   # set when the member is an aggregate instance
+    scope_name: str | None = None
 
     @property
     def recording_key(self) -> str:

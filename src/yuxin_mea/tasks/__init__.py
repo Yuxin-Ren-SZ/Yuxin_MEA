@@ -5,6 +5,7 @@ from .burst_detection import BurstDetectionTask
 from .cluster_overlay_tasks import (
     ClusterOverlayByRecordingTask,
     ClusterOverlayByWellTask,
+    SampleOverlaySummaryTask,
 )
 from .ml_burst_detection import MLBurstDetectionTask
 from .preprocessing import PreprocessingTask
@@ -25,9 +26,21 @@ TASK_CLASSES = (
 # Aggregate (scope-level) tasks run once per Scope instance, NOT per well — a
 # SEPARATE registry driven by AggregateScheduler, deliberately kept out of
 # TASK_CLASSES (and its registry test) so the per-well pipeline is untouched.
+#
+# NOTE: this S1 registry contains ONLY tasks that depend on per-well tasks. The
+# S1 AggregateScheduler raises on aggregate→aggregate deps, so the containment
+# task lives in UNIFIED_AGGREGATE_TASK_CLASSES below until S1 is retired (Phase 4).
 AGGREGATE_TASK_CLASSES = (
     ClusterOverlayByWellTask,
     ClusterOverlayByRecordingTask,
+)
+
+# The S2 unified scheduler's registry: the S1 tasks PLUS the aggregate→aggregate
+# tasks it alone can schedule. Order is topological (a task's aggregate
+# dependencies precede it) so the containment DAG resolves. In Phase 4 this
+# becomes the single registry and AGGREGATE_TASK_CLASSES is retired.
+UNIFIED_AGGREGATE_TASK_CLASSES = AGGREGATE_TASK_CLASSES + (
+    SampleOverlaySummaryTask,
 )
 
 __all__ = [
@@ -37,9 +50,11 @@ __all__ = [
     "BurstDetectionTask",
     "ClusterOverlayByRecordingTask",
     "ClusterOverlayByWellTask",
+    "SampleOverlaySummaryTask",
     "MLBurstDetectionTask",
     "PreprocessingTask",
     "SortingTask",
     "TASK_CLASSES",
     "AGGREGATE_TASK_CLASSES",
+    "UNIFIED_AGGREGATE_TASK_CLASSES",
 ]
