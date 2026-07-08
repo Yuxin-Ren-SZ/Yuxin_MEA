@@ -8,8 +8,9 @@ from .cache import BasePipelineCacheStore, JsonPipelineCacheStore
 from .well_metadata import BaseWellMetadataProvider, DummyWellMetadataProvider
 from .manager import PipelineManager
 
-# Aggregate (scope-level) task infrastructure — additive; the per-well pipeline
-# above is untouched. See aggregate_scheduler.AggregateScheduler.
+# Scope/aggregate-task abstractions. `aggregate_cache` is retained for the finest
+# layer's sibling format + one-time migration of any legacy aggregate_cache.json;
+# scheduling is the S2 UnifiedScheduler (S1's AggregateScheduler was removed).
 from .scope import Scope, DIMENSION_NAMES, ScopeRelation, FINEST_GROUP_BY
 from .well_dims import WellDims, Member
 from .aggregate_task import BaseAggregateTask
@@ -19,15 +20,16 @@ from .aggregate_cache import (
     JsonAggregateCacheStore,
     instance_key,
 )
-from .aggregate_scheduler import AggregateScheduler, PlannedInstance
 
-# S2 unified instance model + store (additive alongside the two legacy caches).
+# S2 unified instance model + store.
 from .scoped_instance import ScopedInstance, scoped_instance_key
 from .instance_store import (
     InstanceStore,
     JsonInstanceStore,
+    LayeredInstanceStore,
     load_legacy_wells,
     load_legacy_aggregates,
+    project_wells_to_entries,
 )
 from .unified_scheduler import (
     UnifiedScheduler,
@@ -62,15 +64,15 @@ __all__ = [
     "BaseAggregateCacheStore",
     "JsonAggregateCacheStore",
     "instance_key",
-    "AggregateScheduler",
-    "PlannedInstance",
     # S2 unified instance model + store
     "ScopedInstance",
     "scoped_instance_key",
     "InstanceStore",
     "JsonInstanceStore",
+    "LayeredInstanceStore",
     "load_legacy_wells",
     "load_legacy_aggregates",
+    "project_wells_to_entries",
     "UnifiedScheduler",
     "ScopeRegistry",
     "WorkUnit",

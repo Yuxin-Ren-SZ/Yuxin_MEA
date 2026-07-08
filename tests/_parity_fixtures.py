@@ -1,8 +1,9 @@
-"""Shared deterministic fixtures for parity-testing the S2 unified scheduler.
+"""Shared deterministic fixture for testing the S2 unified scheduler.
 
-Stages a ``pipeline_cache.json`` + ``aggregate_cache.json`` on disk via the LEGACY
-per-well ``PipelineManager`` and S1 ``AggregateScheduler``, and exposes freezes of
-the legacy decisions so the unified scheduler can be asserted equal to them.
+Stages a ``pipeline_cache.json`` (the finest layer) via ``PipelineManager`` and
+exposes the legacy finest-queue order so the unified scheduler can be asserted
+equal to it. The aggregate parity oracle is a static S1-authored golden in
+``test_unified_scheduler.py`` (S1 itself is gone).
 
 Not a test module itself (leading underscore); imported by
 ``test_instance_store.py`` and ``test_unified_scheduler.py``.
@@ -13,17 +14,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from yuxin_mea.pipeline import (
-    JsonInstanceStore,
+    LayeredInstanceStore,
     PipelineManager,
     UnifiedScheduler,
     WorkItem,
-    load_legacy_aggregates,
-    load_legacy_wells,
 )
-from yuxin_mea.pipeline.aggregate_cache import JsonAggregateCacheStore
-from yuxin_mea.pipeline.aggregate_scheduler import AggregateScheduler
 from yuxin_mea.pipeline.aggregate_task import BaseAggregateTask
-from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
 from yuxin_mea.pipeline.scope import SCOPE_RECORDING
 from yuxin_mea.pipeline.task_record import TaskStatus
 
@@ -89,27 +85,21 @@ def _seed(pm, analysis_dir):
         _set(pm, RK3, f"rec0000/well00{i}", "ml_burst_detection", TaskStatus.FAILED)
 
 
-def stage(analysis_dir) -> tuple[PipelineManager, AggregateScheduler]:
-    """Seed a legacy PipelineManager (persists pipeline_cache.json) and build the
-    S1 AggregateScheduler over it. Returns ``(pm, sched)``."""
+def stage(analysis_dir) -> PipelineManager:
+    """Seed a PipelineManager (persists the finest layer to pipeline_cache.json).
+    Returns the manager (for the live finest-queue oracle)."""
     pm = PipelineManager(Path(analysis_dir), config_provider=FakeCfg())
     pm.register_computation_task("curation", [])
     pm.register_computation_task("ml_burst_detection", ["curation"])
     _seed(pm, analysis_dir)
-    store = JsonAggregateCacheStore(Path(analysis_dir))
-    sched = AggregateScheduler(pm, FakeCfg(), {}, (DummyOverlay,), store)
-    return pm, sched
+    return pm
 
 
 def build_unified(analysis_dir, agg_task_classes=(DummyOverlay,)) -> UnifiedScheduler:
-    """Migrate the two legacy caches into a JsonInstanceStore and return a
-    UnifiedScheduler over it (same DummyOverlay task as the S1 fixture)."""
-    ad = Path(analysis_dir)
-    wells = load_legacy_wells(JsonPipelineCacheStore(ad).load())
-    aggs = load_legacy_aggregates(JsonAggregateCacheStore(ad).load())
-    merged = {**wells, **aggs}
-    store = JsonInstanceStore(ad)
-    store.save(merged)
+    """UnifiedScheduler over the LayeredInstanceStore: finest is read live from the
+    ``pipeline_cache.json`` that ``stage()``'s PipelineManager wrote; aggregate state
+    migrates from ``aggregate_cache.json`` on load (same DummyOverlay task as S1)."""
+    store = LayeredInstanceStore(Path(analysis_dir))
     return UnifiedScheduler(store, agg_task_classes, FakeCfg(), {})
 
 
@@ -130,14 +120,6 @@ def unified_finest_order(sched: UnifiedScheduler) -> list[tuple[str, str, str]]:
         compound = f"{wu.scope_key['rec_name']}/{wu.scope_key['well_id']}"
         out.append((rk, compound, wu.task_name))
     return out
-
-
-def freeze_plan(sched: AggregateScheduler) -> dict[str, tuple]:
-    """S1 plan() decisions keyed by ``task::encode(scope_key)`` (== pi.key)."""
-    return {
-        pi.key: (pi.decision, pi.n_total, len(pi.members_complete), pi.member_hash)
-        for pi in sched.plan()
-    }
 
 
 def unified_plan(sched: UnifiedScheduler) -> dict[str, tuple]:

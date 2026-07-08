@@ -5,7 +5,7 @@ real spike data)."""
 from pathlib import Path
 
 from yuxin_mea.cli.run import _drain_unified
-from yuxin_mea.pipeline import JsonInstanceStore, UnifiedScheduler
+from yuxin_mea.pipeline import LayeredInstanceStore, UnifiedScheduler
 from yuxin_mea.pipeline.aggregate_task import BaseAggregateTask
 from yuxin_mea.pipeline.scope import SCOPE_RECORDING, SCOPE_SAMPLE, Scope
 from yuxin_mea.pipeline.task_record import TaskStatus
@@ -88,7 +88,7 @@ class FakeSummary(BaseAggregateTask):
 
 def _build(base):
     base.mkdir(parents=True, exist_ok=True)
-    store = JsonInstanceStore(base)
+    store = LayeredInstanceStore(base)
     sched = UnifiedScheduler(store, (FakeOverlay, FakeSummary), FakeCM(base / "fig"), {})
     for w in ("well000", "well001"):
         sched.register_finest(RK, f"rec0000/{w}", [("curation", []), ("ml", ["curation"])])
@@ -132,7 +132,7 @@ def test_full_chain_completes(tmp_path):
     # 4 finest (2 wells × curation+ml) + 1 overlay + 1 summary
     assert n_ran == 6
 
-    reloaded = JsonInstanceStore(tmp_path).load()
+    reloaded = LayeredInstanceStore(tmp_path).load()
     # every finest task COMPLETE
     finest = [i for i in reloaded.values() if i.scope_name == "well"]
     assert len(finest) == 2
@@ -155,7 +155,7 @@ def test_rerun_is_idempotent(tmp_path):
     _store, sched = _build(tmp_path)
     _drive(tmp_path, sched)
     # a second drain over the completed store does nothing (all UPTODATE/COMPLETE)
-    store2 = JsonInstanceStore(tmp_path)
+    store2 = LayeredInstanceStore(tmp_path)
     sched2 = UnifiedScheduler(store2, (FakeOverlay, FakeSummary), FakeCM(tmp_path / "fig"), {})
     n_ran, n_failed = _drive(tmp_path, sched2)
     assert (n_ran, n_failed) == (0, 0)
@@ -168,8 +168,45 @@ def test_max_tasks_caps_drain(tmp_path):
     assert n_ran == 2
 
 
+def _fresh_sched(base):
+    return UnifiedScheduler(
+        LayeredInstanceStore(base), (FakeOverlay, FakeSummary), FakeCM(base / "fig"), {}
+    )
+
+
+def test_finest_completion_stamps_last_updated_and_retriggers_aggregate(tmp_path):
+    """Regression guard: the unified drain must stamp TaskRecord.last_updated on
+    finest completion (legacy did). It is load-bearing — the aggregate re-run
+    fingerprint hashes upstream last_updated, and per-well output paths are stable,
+    so without the stamp a re-run upstream never re-triggers its aggregate."""
+    _s, sched = _build(tmp_path)
+    _drive(tmp_path, sched)
+
+    loaded = LayeredInstanceStore(tmp_path).load()
+    fin = next(i for i in loaded.values() if i.scope_name == "well")
+    assert fin.tasks["ml"].last_updated is not None          # the fix
+    ov_hash_before = next(
+        i for i in loaded.values() if i.scope_name == "recording"
+    ).tasks["ov"].member_hash
+    assert ov_hash_before != ""
+
+    # reset one well's ml → NOT_RUN, then re-drive: ml re-runs (fresh last_updated,
+    # SAME output path), so the overlay's fingerprint changes → it RERUNs.
+    reset = _fresh_sched(tmp_path)
+    well = next(i for i in reset.instances.values() if i.scope_name == "well")
+    reset.update_status("well", well.scope_key, "ml", TaskStatus.NOT_RUN)
+
+    _drive(tmp_path, _fresh_sched(tmp_path))
+
+    after = LayeredInstanceStore(tmp_path).load()
+    ov_after = next(i for i in after.values() if i.scope_name == "recording").tasks["ov"]
+    assert ov_after.status == TaskStatus.COMPLETE
+    assert ov_after.member_hash != ov_hash_before            # re-triggered via last_updated
+    assert ov_after.last_updated is not None
+
+
 def _store_statuses(base):
-    insts = JsonInstanceStore(base).load()
+    insts = LayeredInstanceStore(base).load()
     return {
         (i.scope_name, i.instance_key.split("::", 1)[1], tn): t.status
         for i in insts.values() for tn, t in i.tasks.items()
@@ -189,7 +226,7 @@ def test_parallel_drain_matches_serial(tmp_path):
     assert _store_statuses(tmp_path / "serial") == _store_statuses(tmp_path / "par")
     # the aggregate→aggregate summary consumed the same member counts both ways
     for base in (tmp_path / "serial", tmp_path / "par"):
-        insts = JsonInstanceStore(base).load()
+        insts = LayeredInstanceStore(base).load()
         ov = next(i for i in insts.values() if i.scope_name == "recording")
         sm = next(i for i in insts.values() if i.scope_name == "sample")
         assert ov.tasks["ov"].n_members_complete == 2

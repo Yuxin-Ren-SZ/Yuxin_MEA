@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from yuxin_mea.pipeline import JsonInstanceStore, ScopedInstance, UnifiedScheduler
+from yuxin_mea.pipeline import LayeredInstanceStore, ScopedInstance, UnifiedScheduler
 from yuxin_mea.pipeline import unified_scheduler as us
 from yuxin_mea.pipeline.task_record import TaskRecord, TaskStatus
 from yuxin_mea.tasks.cluster_overlay_tasks import (
@@ -18,7 +18,6 @@ from tests._parity_fixtures import (
     FakeCfg,
     build_unified,
     freeze_get_next_order,
-    freeze_plan,
     stage,
     unified_finest_order,
     unified_plan,
@@ -30,7 +29,7 @@ from tests._parity_fixtures import (
 # --------------------------------------------------------------------------- #
 
 def test_finest_queue_parity(tmp_path):
-    pm, _sched = stage(tmp_path)
+    pm = stage(tmp_path)
     legacy = freeze_get_next_order(pm)
     unified = unified_finest_order(build_unified(tmp_path))
     assert unified == legacy
@@ -42,7 +41,7 @@ def test_finest_queue_never_returns_complete(tmp_path):
     """Finest semantics oracle (advisor pt #2): a COMPLETE per-well task is never
     returned by EITHER queue — config drift / a newer upstream cannot auto-rerun it
     (that path is an explicit refresh, unchanged by S2)."""
-    pm, _sched = stage(tmp_path)
+    pm = stage(tmp_path)
     legacy = set(freeze_get_next_order(pm))
     unified = set(unified_finest_order(build_unified(tmp_path)))
     # RK2 well000 ml_burst_detection is COMPLETE in the seed
@@ -53,26 +52,41 @@ def test_finest_queue_never_returns_complete(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Parity: aggregate decisions == S1 plan()
+# Parity: aggregate decisions == the S1-AUTHORED golden
+#
+# The golden below was generated from S1's AggregateScheduler.plan() on the shared
+# fixture (member_hash omitted — it hashes upstream timestamps and isn't static),
+# and confirmed live (`unified == S1` decisions + member_hash byte-equivalence) one
+# last time before S1 was deleted in Phase 4.3. It is S1-AUTHORED, not unified —
+# regenerating it from unified's own output would make the test prove nothing.
 # --------------------------------------------------------------------------- #
 
-def test_aggregate_plan_parity(tmp_path):
-    pm, sched = stage(tmp_path)
-    legacy = freeze_plan(sched)               # S1 AggregateScheduler.plan()
-    unified = unified_plan(build_unified(tmp_path))
-    assert unified == legacy
-    # the fixture exercises WAIT, RUN (2/3 with a hole) and SKIP_EMPTY
-    decisions = {v[0] for v in legacy.values()}
-    assert {"wait", "run", "skip_empty"} <= decisions
+GOLDEN_S1_AGG_PLAN = {
+    "dummy_overlay::recording_key=SAMP-260101-PLATE-Network-000001": ("wait", 6, 0),
+    "dummy_overlay::recording_key=SAMP-260102-PLATE-Network-000002": ("run", 3, 2),
+    "dummy_overlay::recording_key=SAMP-260103-PLATE-Network-000003": ("skip_empty", 2, 0),
+}
 
 
-def test_aggregate_member_hash_matches_s1(tmp_path):
-    pm, sched = stage(tmp_path)
-    legacy = freeze_plan(sched)
-    unified = unified_plan(build_unified(tmp_path))
-    # RK2 is the RUN case with 2 complete members — the fingerprint must be identical
-    key = next(k for k in legacy if RK2.replace("/", "-") in k and legacy[k][0] == "run")
-    assert unified[key][3] == legacy[key][3] != ""   # member_hash equal & non-empty
+def _decisions_only(plan: dict) -> dict:
+    return {k: (v[0], v[1], v[2]) for k, v in plan.items()}
+
+
+def test_aggregate_plan_matches_golden(tmp_path):
+    """Unified aggregate decisions reproduce the S1-authored golden."""
+    stage(tmp_path)   # writes pipeline_cache.json (finest layer)
+    unified = _decisions_only(unified_plan(build_unified(tmp_path)))
+    assert unified == GOLDEN_S1_AGG_PLAN
+
+
+def test_aggregate_member_hash_populated_and_recomputes(tmp_path):
+    """Unified RUN instances carry a non-empty member_hash equal to the fingerprint
+    of their complete members (the re-run trigger). No S1 dependency."""
+    stage(tmp_path)
+    sched = build_unified(tmp_path)
+    run = next(d for d in sched.aggregate_plan() if d.decision == us.RUN)
+    assert run.member_hash != ""
+    assert us._member_fingerprint(run.members_complete) == run.member_hash
 
 
 # --------------------------------------------------------------------------- #
@@ -101,7 +115,7 @@ def _make_sample_store(tmp_path, overlay_states):
             {"cluster_overlay_by_recording": TaskRecord(status, [], outp, 1.0, None)},
         )
         insts[inst.instance_key] = inst
-    store = JsonInstanceStore(tmp_path)
+    store = LayeredInstanceStore(tmp_path)
     store.save(insts)
     return UnifiedScheduler(
         store, (ClusterOverlayByRecordingTask, SampleOverlaySummaryTask), FakeCfg(), {}

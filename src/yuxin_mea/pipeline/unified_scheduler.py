@@ -22,6 +22,7 @@ pass that computes cross-scope "eligible-now" once, bottom-up.
 from __future__ import annotations
 
 import hashlib
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -459,7 +460,15 @@ class UnifiedScheduler:
         else:
             rec_name, well_id = "", compound_well_id
         scope_key = {"recording_key": recording_key, "rec_name": rec_name, "well_id": well_id}
-        inst = self._ensure_instance(self.finest_scope.name, scope_key)
+        key = scoped_instance_key(self.finest_scope.name, scope_key)
+        inst = self.instances.get(key)
+        if inst is None:
+            # stamp created_at so the pipeline_cache.json projection round-trips
+            # (matches legacy add_well, which sets created_at at queue time).
+            inst = ScopedInstance(
+                self.finest_scope.name, dict(scope_key), {}, created_at=time.time()
+            )
+            self.instances[key] = inst
         changed = False
         for task_name, deps in well_task_specs:
             if task_name not in inst.tasks:
@@ -487,6 +496,9 @@ class UnifiedScheduler:
             rec = TaskRecord(status, list(dependencies or []), None, None, None)
             inst.tasks[task_name] = rec
         rec.status = status
+        rec.last_updated = time.time()   # mirrors PipelineManager.update_status;
+        # load-bearing: the aggregate re-run fingerprint hashes upstream last_updated,
+        # and the dashboard inspector shows it. Leaving it None disables re-runs.
         rec.error = error if status == TaskStatus.FAILED else None
         if status == TaskStatus.COMPLETE and output_path is not None:
             rec.output_path = output_path

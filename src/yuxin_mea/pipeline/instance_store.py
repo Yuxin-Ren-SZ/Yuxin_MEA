@@ -1,13 +1,20 @@
-"""InstanceStore: the single unified store for S2 (one JSON, all scopes).
+"""InstanceStore: the S2 instance store (a ``{task_name: TaskRecord}`` dict per scope).
 
 Mirrors ``pipeline/cache.py``'s atomic-write + object_hook pattern, but persists
-:class:`ScopedInstance` records (a ``{task_name: TaskRecord}`` dict at any scope)
-instead of per-well ``PipelineEntry`` records.
+:class:`ScopedInstance` records instead of per-well ``PipelineEntry`` records.
 
-During migration the store also provides loaders that map the two legacy files —
-``pipeline_cache.json`` (per-well entries) and ``aggregate_cache.json`` (aggregate
-records) — into ``ScopedInstance``s, so the unified store can be built from
-existing on-disk state without a flag day.
+Two implementations:
+
+* :class:`JsonInstanceStore` — one JSON file, all scopes. Used for the aggregate
+  layer under :class:`LayeredInstanceStore`, and standalone in unit tests.
+* :class:`LayeredInstanceStore` — the production store: the FINEST layer lives in
+  the dashboard-native ``pipeline_cache.json`` (so the dashboard + scripts read/write
+  it unchanged), the aggregate layer in ``instance_store.json``. The unified scheduler
+  is oblivious — it still calls ``store.load()`` / ``store.save(instances)``.
+
+The migration loaders (``load_legacy_wells`` / ``load_legacy_aggregates``) and the
+projection (``project_wells_to_entries``) map between ``ScopedInstance``s and the
+legacy on-disk shapes.
 """
 
 from __future__ import annotations
@@ -18,11 +25,13 @@ import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from .aggregate_cache import AggregateInstanceRecord
-from .cache import _decode as _decode_task  # reuse TaskRecord decoding (incl. new fields)
+from .aggregate_cache import AggregateInstanceRecord, JsonAggregateCacheStore
+from .cache import JsonPipelineCacheStore, _decode as _decode_task  # reuse TaskRecord decoding
 from .pipeline_entry import PipelineEntry
 from .scoped_instance import ScopedInstance, scoped_instance_key
 from .task_record import TaskRecord
+
+FINEST_SCOPE_NAME = "well"
 
 INSTANCE_STORE_FILENAME = "instance_store.json"
 
@@ -175,3 +184,67 @@ def load_legacy_aggregates(
             n_members_complete=r.n_members_complete,
         )
     return out
+
+
+def project_wells_to_entries(
+    instances: dict[str, ScopedInstance],
+) -> dict[str, PipelineEntry]:
+    """Inverse of :func:`load_legacy_wells`: finest ``ScopedInstance``s → the
+    ``pipeline_cache.json`` shape. Only ``scope_name == "well"`` instances project;
+    others are ignored. ``TaskRecord``s (incl. the Phase-0 ``member_hash``/
+    ``n_members_*`` fields) pass through unchanged and round-trip via ``cache.py``.
+    """
+    out: dict[str, PipelineEntry] = {}
+    for inst in instances.values():
+        if inst.scope_name != FINEST_SCOPE_NAME:
+            continue
+        rec_name = inst.scope_key.get("rec_name", "")
+        well_id = inst.scope_key.get("well_id", "")
+        compound = f"{rec_name}/{well_id}" if rec_name else well_id
+        entry = PipelineEntry(
+            recording_key=inst.scope_key["recording_key"],
+            well_id=compound,
+            created_at=inst.created_at if inst.created_at is not None else 0.0,
+            tasks=inst.tasks,
+        )
+        out[entry.pipeline_key] = entry
+    return out
+
+
+class LayeredInstanceStore(InstanceStore):
+    """Production store: FINEST layer ↔ ``pipeline_cache.json`` (dashboard-native),
+    AGGREGATE layer ↔ ``instance_store.json``.
+
+    The scheduler is oblivious: ``load()`` merges both layers into one
+    ``{instance_key: ScopedInstance}`` dict; ``save()`` splits it back by scope. The
+    dashboard + scripts read/write ``pipeline_cache.json`` exactly as before, and the
+    unified scheduler sees their edits because it reloads that file each run.
+    """
+
+    def __init__(self, analysis_dir: Path) -> None:
+        self.dir = Path(analysis_dir)
+        self._pipe = JsonPipelineCacheStore(self.dir)
+        self._agg = JsonInstanceStore(self.dir)
+
+    def load(self) -> dict[str, ScopedInstance]:
+        finest = load_legacy_wells(self._pipe.load())
+        agg = {
+            k: i for k, i in self._agg.load().items()
+            if i.scope_name != FINEST_SCOPE_NAME
+        }
+        if not agg:
+            # first unified run: migrate S1 aggregate state (if any) once.
+            legacy = JsonAggregateCacheStore(self.dir).load()
+            if legacy:
+                agg = load_legacy_aggregates(legacy)
+        return {**finest, **agg}
+
+    def save(self, instances: dict[str, ScopedInstance]) -> None:
+        finest = {
+            k: i for k, i in instances.items() if i.scope_name == FINEST_SCOPE_NAME
+        }
+        agg = {
+            k: i for k, i in instances.items() if i.scope_name != FINEST_SCOPE_NAME
+        }
+        self._pipe.save(project_wells_to_entries(finest))
+        self._agg.save(agg)
