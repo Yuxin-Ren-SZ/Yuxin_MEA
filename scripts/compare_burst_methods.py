@@ -50,6 +50,7 @@ import base64
 import io
 import json
 import logging
+import pickle
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -219,6 +220,49 @@ def _read_event_table(pkl_path: Path) -> list[dict[str, Any]]:
             continue
         clean: dict[str, Any] = {}
         for k, v in r.items():
+            if isinstance(v, (np.generic,)):
+                v = v.item()
+            if isinstance(v, float) and not np.isfinite(v):
+                continue
+            if isinstance(v, (str, int, float, bool)):
+                clean[k] = v
+        clean["start"], clean["end"] = s, e
+        rows.append(clean)
+    return rows
+
+
+def _read_regated_ml_events(ml_dir: Path, threshold: float) -> list[dict[str, Any]] | None:
+    """ML event table re-gated on ``posterior_peak >= threshold`` from debug_trace.pkl.
+
+    Returns the pre-gate burstlets kept by the NEW gate (same event schema as
+    network_bursts.pkl), so the comparison can score the traditional detector
+    against the new-gate ML result WITHOUT re-running detection or touching the
+    shipped network_bursts.pkl. Returns ``None`` when the well has no
+    debug_trace.pkl (caller skips it).
+    """
+    pkl = ml_dir / "debug_trace.pkl"
+    if not pkl.exists():
+        return None
+    try:
+        with pkl.open("rb") as fh:
+            trace = pickle.load(fh)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to read %s: %s", pkl, exc)
+        return None
+    pre = getattr(trace, "burstlets_pre_gate", None) or []
+    rows: list[dict[str, Any]] = []
+    for ev in pre:
+        try:
+            if float(ev["posterior_peak"]) < threshold:
+                continue
+            s = float(ev["start"])
+            e = float(ev["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (np.isfinite(s) and np.isfinite(e)) or e <= s:
+            continue
+        clean: dict[str, Any] = {}
+        for k, v in ev.items():
             if isinstance(v, (np.generic,)):
                 v = v.item()
             if isinstance(v, float) and not np.isfinite(v):
@@ -438,12 +482,20 @@ def temporal_divergence(trad_ev: list[dict], ml_ev: list[dict],
 
 
 def build_per_well(refs: list[WellRef], threshold: float, min_bursts: int,
-                   dump_matched: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
+                   dump_matched: bool, ml_regate: float | None = None,
+                   ) -> tuple[pd.DataFrame, pd.DataFrame]:
     rows: list[dict[str, Any]] = []
     matched_rows: list[dict[str, Any]] = []
+    n_skipped_regate = 0
     for k, ref in enumerate(refs):
         trad_ev = _read_event_table(ref.trad_dir / "network_bursts.pkl")
-        ml_ev = _read_event_table(ref.ml_dir / "network_bursts.pkl")
+        if ml_regate is not None:
+            ml_ev = _read_regated_ml_events(ref.ml_dir, ml_regate)
+            if ml_ev is None:            # no debug_trace -> cannot re-gate; skip well
+                n_skipped_regate += 1
+                continue
+        else:
+            ml_ev = _read_event_table(ref.ml_dir / "network_bursts.pkl")
         total_dur = _recording_duration(trad_ev, ml_ev, ref.trad_dir, ref.ml_dir)
         t_sum = _method_summary(trad_ev, total_dur)
         m_sum = _method_summary(ml_ev, total_dur)
@@ -503,6 +555,9 @@ def build_per_well(refs: list[WellRef], threshold: float, min_bursts: int,
         rows.append(row)
         if (k + 1) % 200 == 0:
             logger.info("  processed %d/%d wells", k + 1, len(refs))
+    if ml_regate is not None:
+        logger.info("ML re-gated on posterior_peak >= %.3f; skipped %d wells lacking debug_trace.pkl",
+                    ml_regate, n_skipped_regate)
     return pd.DataFrame(rows), pd.DataFrame(matched_rows)
 
 
@@ -682,6 +737,9 @@ def build_figures(per_well: pd.DataFrame) -> dict[str, str]:
     # 4. paired strip of log2 ratios per metric
     ratio_cols = [f"log2ratio_{m}" for m in COMPARE_METRICS]
     present = [c for c in ratio_cols if c in per_well]
+    # keep only columns with >=2 finite values so violin_stats() doesn't choke
+    present = [c for c in present
+               if per_well[c].replace([np.inf, -np.inf], np.nan).dropna().size >= 2]
     if present:
         fig, ax = plt.subplots(figsize=(7, 4))
         data = [per_well[c].replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
@@ -838,6 +896,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="IoU cut for the strict 'same-burst' count (1.0 = literal exact).")
     p.add_argument("--min-bursts", type=int, default=1,
                    help="Skip temporal divergence when both methods have fewer events.")
+    p.add_argument("--ml-regate", type=float, default=None, metavar="POSTERIOR_THR",
+                   help="Score traditional against the NEW-gate ML result: rebuild each "
+                        "well's ML event table from debug_trace.pkl's burstlets_pre_gate, "
+                        "keeping posterior_peak >= this threshold (e.g. 0.4), instead of "
+                        "reading the shipped network_bursts.pkl. Wells without a debug_trace "
+                        "are skipped.")
     p.add_argument("--group-by", default=None, choices=[None, "groupname"],
                    help="Also emit aggregate stats split by this column.")
     p.add_argument("--limit", type=int, default=None, help="Cap #wells (dry run).")
@@ -872,7 +936,8 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("building per-well comparison over %d wells ...", len(refs))
     per_well, matched = build_per_well(
         refs, threshold=args.overlap_threshold,
-        min_bursts=args.min_bursts, dump_matched=args.dump_matched_events)
+        min_bursts=args.min_bursts, dump_matched=args.dump_matched_events,
+        ml_regate=args.ml_regate)
 
     out_dir = args.output_dir or (figure_root / "burst_method_comparison")
     out_dir.mkdir(parents=True, exist_ok=True)
