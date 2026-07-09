@@ -13,8 +13,9 @@ Wires together the four building blocks:
      ``superbursts`` are left empty); each burst row also carries
      ``cluster_ids`` — the HDBSCAN cluster id(s) spanning it.
 
-The output schema additions for the ML detector are the four per-event quality
-columns: ``posterior_peak``, ``posterior_mean``, ``llr_aggregate``, ``ff_peak``.
+The output schema additions for the ML detector are the per-event quality
+columns: ``posterior_peak``, ``posterior_mean``, ``llr_aggregate``, ``llr_peak``,
+``ff_peak``.
 
 This module owns ``MLBurstConfig`` (frozen dataclass with every tunable),
 ``MLBurstTrace`` (optional debug bundle), and ``MLBurstError``. It depends on
@@ -105,7 +106,20 @@ class MLBurstConfig:
     merge_mad_scale: float = 0.75
     merge_floor_frac: float = 0.70
     network_merge_gap_min_s: float = 0.75
+    # Deprecated: retained for back-compat with older task-params (parsed but no
+    # longer drives the gate). Use burst_gate_feature="llr_mean" +
+    # burst_gate_threshold to reproduce the former mean-LLR burst-modulation gate.
     min_burst_modulation: float = 0.1
+
+    # ---- Burst gate -------------------------------------------------------
+    # Keep only candidates whose gate feature clears the threshold. The gate
+    # separates real network bursts from single-unit / noise events.
+    # ``posterior_peak`` (peak fraction of the population co-bursting = network
+    # coherence) is the discriminator: a mean- or peak-LLR gate admits single-unit
+    # HMM-modulation blips that fire the LLR without any population co-activation.
+    # Set feature="llr_mean", threshold=0.1 to reproduce the former gate.
+    burst_gate_feature: str = "posterior_peak"  # "posterior_peak" | "llr_mean" | "llr_peak"
+    burst_gate_threshold: float = 0.4
 
     # ---- Burst typing (second-stage clustering over detected bursts) ------
     burst_typing_enabled: bool = True
@@ -392,6 +406,7 @@ def compute_ml_bursts(
             "fragment_count": 1,
             "n_sub_events": 1,
             "llr_aggregate": float(llr_signal[in_ev].mean()),
+            "llr_peak": float(llr_signal[in_ev].max()),
             "posterior_peak": float(comp_vals.max()),
             "posterior_mean": float(comp_vals.mean()),
             "ff_peak": float(ff1[in_ev].max()),
@@ -401,17 +416,33 @@ def compute_ml_bursts(
         pre_gate_events.append(dict(event))
         burstlets_raw.append(event)
 
-    # Soft burst-modulation gate on llr_aggregate (mirrors iterative detector)
+    # Burst gate: keep candidates whose gate feature clears the threshold.
+    # ``posterior_peak`` (peak fraction of the population co-bursting) discriminates
+    # real network bursts from single-unit HMM-modulation blips that a mean- or
+    # peak-LLR gate admits. Configurable via config.burst_gate_feature /
+    # burst_gate_threshold; see MLBurstConfig for the back-compat mapping.
+    _GATE_FEATURE_KEY = {
+        "posterior_peak": "posterior_peak",
+        "llr_mean": "llr_aggregate",
+        "llr_peak": "llr_peak",
+    }
+    gate_feature = str(config.burst_gate_feature)
+    gate_key = _GATE_FEATURE_KEY.get(gate_feature, "posterior_peak")
+    gate_threshold = float(config.burst_gate_threshold)
+    # Mean-LLR burst-modulation index, retained as a diagnostic regardless of which
+    # feature is gating.
     burst_modulation_scores = [float(ev["llr_aggregate"]) for ev in burstlets_raw]
     burst_modulation_index = max(burst_modulation_scores) if burst_modulation_scores else 0.0
     gate_state: dict | None = None
-    if config.min_burst_modulation > 0:
+    if gate_threshold > 0:
         kept = [
             ev for ev in burstlets_raw
-            if float(ev["llr_aggregate"]) >= config.min_burst_modulation
+            if float(ev[gate_key]) >= gate_threshold
         ]
         gate_state = {
-            "threshold": float(config.min_burst_modulation),
+            "feature": gate_feature,
+            "gate_key": gate_key,
+            "threshold": gate_threshold,
             "n_pre": len(burstlets_raw),
             "n_post": len(kept),
         }
@@ -501,7 +532,9 @@ def compute_ml_bursts(
         "feature_names": list(feature_names),
     }
     if gate_state is not None:
-        diagnostics["bmi_gate"] = gate_state
+        # Renamed from the former "bmi_gate": the gate no longer keys on the
+        # burst-modulation index (mean LLR); it thresholds config.burst_gate_feature.
+        diagnostics["burst_gate"] = gate_state
     if burst_typing_info is not None:
         diagnostics["burst_typing"] = burst_typing_info
 

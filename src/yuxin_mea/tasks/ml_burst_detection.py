@@ -83,6 +83,8 @@ class MLBurstDetectionTask(BaseAnalysisTask):
             "merge_floor_frac": 0.70,
             "network_merge_gap_min_s": 0.75,
             "min_burst_modulation": 0.1,
+            "burst_gate_feature": "posterior_peak",
+            "burst_gate_threshold": 0.4,
             # ---- Burst typing (second-stage) ------------------------------
             "burst_typing_enabled": True,
             "burst_typing_method": "kmeans",
@@ -305,7 +307,23 @@ class MLBurstDetectionTask(BaseAnalysisTask):
             ),
             "min_burst_modulation": ParamSpec(
                 "float", defaults["min_burst_modulation"],
-                "Minimum llr_aggregate required for a burstlet to survive. "
+                "Deprecated: superseded by burst_gate_feature/burst_gate_threshold "
+                "(parsed but no longer drives the gate). Former meaning: minimum "
+                "llr_aggregate required for a burstlet to survive.",
+                min=0,
+            ),
+            "burst_gate_feature": ParamSpec(
+                "str", defaults["burst_gate_feature"],
+                "Feature the burst gate thresholds on. 'posterior_peak' (peak "
+                "fraction of the population co-bursting) discriminates real network "
+                "bursts from single-unit HMM-modulation blips; 'llr_mean'/'llr_peak' "
+                "gate on the mean/peak HMM log-likelihood ratio. Use 'llr_mean' with "
+                "burst_gate_threshold=0.1 to reproduce the former gate.",
+                choices=["posterior_peak", "llr_mean", "llr_peak"],
+            ),
+            "burst_gate_threshold": ParamSpec(
+                "float", defaults["burst_gate_threshold"],
+                "Minimum burst_gate_feature value for a candidate to survive. "
                 "≤ 0 disables the gate.",
                 min=0,
             ),
