@@ -53,6 +53,7 @@ class MLBurstDetectionTask(BaseAnalysisTask):
             "hmm_min_rate_ratio": 1.5,
             "hmm_random_state": 42,
             "hmm_n_jobs": 1,
+            "min_fit_units": 15,
             # ---- Features -------------------------------------------------
             "ff_scale_multipliers": [0.5, 1.0, 2.0, 5.0],
             "posterior_quantile": 0.9,
@@ -161,6 +162,15 @@ class MLBurstDetectionTask(BaseAnalysisTask):
                 "int", defaults["hmm_n_jobs"],
                 "joblib parallelism across units. 1 = serial; -1 = all cores. "
                 "Use 1 inside the worker CLI (pipeline parallelism handles wells).",
+            ),
+            "min_fit_units": ParamSpec(
+                "int", defaults["min_fit_units"],
+                "Minimum HMM-fitted units for a well to be eligible for network "
+                "bursts. Below this the posterior co-bursting fraction is undefined "
+                "(a single unit saturates it), so the detector returns zero bursts "
+                "(COMPLETE, not FAILED), like the traditional detector on sparse "
+                "wells. 0 disables the floor.",
+                min=0,
             ),
             "ff_scale_multipliers": ParamSpec(
                 "list_float", defaults["ff_scale_multipliers"],

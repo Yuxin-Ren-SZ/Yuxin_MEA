@@ -73,6 +73,14 @@ class MLBurstConfig:
     hmm_random_state: int = 42
     hmm_n_jobs: int = 1
 
+    # ---- Population floor -------------------------------------------------
+    # A network burst needs a population. Below this many HMM-fitted units the
+    # posterior co-bursting FRACTION is undefined — a single bursting unit
+    # saturates it, producing spurious "network bursts". The detector then
+    # returns zero bursts (task COMPLETE, not FAILED), mirroring the traditional
+    # detector, which rarely fires on sparse wells. 0 disables the floor.
+    min_fit_units: int = 15
+
     # ---- Features ---------------------------------------------------------
     ff_scale_multipliers: tuple = (0.5, 1.0, 2.0, 5.0)
     posterior_quantile: float = 0.9
@@ -306,6 +314,48 @@ def compute_ml_bursts(
     participation_raw = active_unit_counts / max(1, n_units)
     ws_sharp = gaussian_filter1d(participation_raw, sigma_fast)
     ws_smooth = gaussian_filter1d(rate_per_unit, sigma_slow)
+
+    # ---- Population floor: too few modelled units => no network burst ------
+    # The posterior co-bursting fraction that the burst gate thresholds on is
+    # undefined over a handful of units (a single bursting unit gives fraction
+    # 1.0). Return an empty result — COMPLETE with zero bursts, mirroring the
+    # traditional detector — rather than raising (which would mark the well FAILED).
+    if config.min_fit_units > 0 and n_units_fit < int(config.min_fit_units):
+        empty_diag = {
+            "adaptive_bin_ms": float(bin_size * 1000.0),
+            "biological_isi_s": float(biological_isi_s),
+            "n_units": int(n_units),
+            "n_units_fit": int(n_units_fit),
+            "n_units_skipped": int(n_units - n_units_fit),
+            "min_fit_units": int(config.min_fit_units),
+            "skipped_reason": "too_few_units",
+            "burst_activity_detected": False,
+        }
+        empty_plot = {
+            "t": t_centers,
+            "participation_signal": ws_sharp,
+            "rate_signal": ws_smooth,
+            "posterior_matrix_mean": np.nan_to_num(np.nanmean(posteriors, axis=0), nan=0.0),
+            "burst_peak_times": np.array([]),
+            "burst_peak_values": np.array([]),
+        }
+        if trace is not None:
+            trace.t_centers = t_centers.copy()
+            trace.bin_size = float(bin_size)
+            trace.unit_ids = [str(u) for u in units]
+            trace.gate_decision = {
+                "skipped_reason": "too_few_units",
+                "n_units_fit": int(n_units_fit),
+                "min_fit_units": int(config.min_fit_units),
+            }
+        return BurstResults(
+            burstlets=pd.DataFrame(),
+            network_bursts=pd.DataFrame(),
+            superbursts=pd.DataFrame(),
+            metrics={"network_bursts": {}},
+            diagnostics=empty_diag,
+            plot_data=empty_plot,
+        )
 
     # ---- 3. Bin-level feature matrix --------------------------------------
     X, feature_names = build_feature_matrix(

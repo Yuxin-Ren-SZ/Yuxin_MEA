@@ -274,6 +274,17 @@ def _read_regated_ml_events(ml_dir: Path, threshold: float) -> list[dict[str, An
     return rows
 
 
+def _read_n_units_fit(ml_dir: Path) -> int | None:
+    """n_units_fit from the well's diagnostics.json (None if absent)."""
+    p = ml_dir / "diagnostics.json"
+    if not p.exists():
+        return None
+    try:
+        return int(json.loads(p.read_text()).get("n_units_fit"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # --------------------------------------------------------------------------- #
 # Discovery
 # --------------------------------------------------------------------------- #
@@ -483,10 +494,12 @@ def temporal_divergence(trad_ev: list[dict], ml_ev: list[dict],
 
 def build_per_well(refs: list[WellRef], threshold: float, min_bursts: int,
                    dump_matched: bool, ml_regate: float | None = None,
+                   ml_min_fit_units: int = 0,
                    ) -> tuple[pd.DataFrame, pd.DataFrame]:
     rows: list[dict[str, Any]] = []
     matched_rows: list[dict[str, Any]] = []
     n_skipped_regate = 0
+    n_floored = 0
     for k, ref in enumerate(refs):
         trad_ev = _read_event_table(ref.trad_dir / "network_bursts.pkl")
         if ml_regate is not None:
@@ -496,6 +509,13 @@ def build_per_well(refs: list[WellRef], threshold: float, min_bursts: int,
                 continue
         else:
             ml_ev = _read_event_table(ref.ml_dir / "network_bursts.pkl")
+        # Population floor: too few HMM-fitted units -> ML has no network bursts
+        # (mirrors the detector's min_fit_units guard, previewed without a re-run).
+        if ml_min_fit_units and ml_ev:
+            nf = _read_n_units_fit(ref.ml_dir)
+            if nf is not None and nf < ml_min_fit_units:
+                ml_ev = []
+                n_floored += 1
         total_dur = _recording_duration(trad_ev, ml_ev, ref.trad_dir, ref.ml_dir)
         t_sum = _method_summary(trad_ev, total_dur)
         m_sum = _method_summary(ml_ev, total_dur)
@@ -558,6 +578,9 @@ def build_per_well(refs: list[WellRef], threshold: float, min_bursts: int,
     if ml_regate is not None:
         logger.info("ML re-gated on posterior_peak >= %.3f; skipped %d wells lacking debug_trace.pkl",
                     ml_regate, n_skipped_regate)
+    if ml_min_fit_units:
+        logger.info("ML population floor n_units_fit >= %d; zeroed ML in %d wells",
+                    ml_min_fit_units, n_floored)
     return pd.DataFrame(rows), pd.DataFrame(matched_rows)
 
 
@@ -902,6 +925,10 @@ def main(argv: list[str] | None = None) -> int:
                         "keeping posterior_peak >= this threshold (e.g. 0.4), instead of "
                         "reading the shipped network_bursts.pkl. Wells without a debug_trace "
                         "are skipped.")
+    p.add_argument("--ml-min-fit-units", type=int, default=0, metavar="N",
+                   help="Population floor: zero the ML side when the well has fewer than N "
+                        "HMM-fitted units (diagnostics.json n_units_fit). Previews the "
+                        "detector's min_fit_units guard for sparse wells without a re-run.")
     p.add_argument("--group-by", default=None, choices=[None, "groupname"],
                    help="Also emit aggregate stats split by this column.")
     p.add_argument("--limit", type=int, default=None, help="Cap #wells (dry run).")
@@ -937,7 +964,7 @@ def main(argv: list[str] | None = None) -> int:
     per_well, matched = build_per_well(
         refs, threshold=args.overlap_threshold,
         min_bursts=args.min_bursts, dump_matched=args.dump_matched_events,
-        ml_regate=args.ml_regate)
+        ml_regate=args.ml_regate, ml_min_fit_units=args.ml_min_fit_units)
 
     out_dir = args.output_dir or (figure_root / "burst_method_comparison")
     out_dir.mkdir(parents=True, exist_ok=True)

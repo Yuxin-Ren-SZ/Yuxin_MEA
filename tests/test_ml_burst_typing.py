@@ -155,7 +155,11 @@ class TestDetectorIntegration(unittest.TestCase):
 
     def _run(self, **overrides):
         from yuxin_mea.analysis.ml_burst_detector import compute_ml_bursts
-        cfg = self.MLBurstConfig(burst_typing_min_bursts=2, **overrides)
+        # The synthetic fixture is intentionally tiny (6 units); disable the
+        # population floor so these tests exercise burst typing, not min_fit_units.
+        params = dict(burst_typing_min_bursts=2, min_fit_units=0)
+        params.update(overrides)
+        cfg = self.MLBurstConfig(**params)
         return compute_ml_bursts(self.spikes, config=cfg)
 
     def test_enabled_adds_column_and_diagnostics(self):
@@ -178,6 +182,26 @@ class TestDetectorIntegration(unittest.TestCase):
         self.assertFalse(nb.empty)
         self.assertNotIn("burst_type", nb.columns)
         self.assertNotIn("burst_typing", res.diagnostics)
+
+
+class TestMinFitUnitsFloor(unittest.TestCase):
+    """The population floor (min_fit_units) inside compute_ml_bursts."""
+
+    def test_sparse_well_returns_empty_not_raise(self):
+        from yuxin_mea.analysis.ml_burst_detector import MLBurstConfig, compute_ml_bursts
+        spikes = _bursty_well(n_units=6)  # < 15 fitted units
+        res = compute_ml_bursts(spikes, config=MLBurstConfig(min_fit_units=15))
+        self.assertTrue(res.network_bursts.empty)
+        self.assertEqual(res.diagnostics.get("skipped_reason"), "too_few_units")
+        self.assertIn("n_units_fit", res.diagnostics)
+        self.assertEqual(res.metrics.get("network_bursts"), {})
+
+    def test_floor_disabled_still_detects(self):
+        from yuxin_mea.analysis.ml_burst_detector import MLBurstConfig, compute_ml_bursts
+        spikes = _bursty_well(n_units=6)
+        res = compute_ml_bursts(
+            spikes, config=MLBurstConfig(min_fit_units=0, burst_typing_min_bursts=2))
+        self.assertFalse(res.network_bursts.empty)
 
 
 if __name__ == "__main__":
