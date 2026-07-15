@@ -26,17 +26,10 @@ import plotly.graph_objects as go
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html
 from flask import current_app
 
-from yuxin_mea.analysis.burst_inspector import (
-    output_root_from_cache,
-    well_output_dirs_from_cache,
-)
-from yuxin_mea.analysis.plate_raster_synchrony import (
-    PlateViewerConfig,
-    build_plate_figure,
-    build_single_well_figure,
-    write_plate_viewer_html,
-)
-from yuxin_mea.analysis.raster_image import png_to_data_uri, render_overview_pngs
+# NOTE: yuxin_mea.analysis.* pulls in torch/spikeinterface (heavy). Imported
+# lazily inside the callbacks/helpers below so the dashboard can start without
+# the ML stack. `PlateViewerConfig` appears only in an annotation, which stays a
+# lazy string thanks to `from __future__ import annotations`.
 from yuxin_mea.dashboard.components import no_config_banner
 from yuxin_mea.dashboard.data_cache import data_sig, load_plate_data_cached
 from yuxin_mea.dataset.cache import JsonCacheStore
@@ -270,6 +263,7 @@ def _resolve_burst_root(analysis_root: Path, source: str | None) -> Path:
     # Prefer the pipeline cache (source of truth for where the detector actually
     # wrote), so the viewer follows re-runs / changed output_root. Fall back to
     # the conventional subdir only when the cache has nothing for this method.
+    from yuxin_mea.analysis.burst_inspector import output_root_from_cache
     from_cache = output_root_from_cache(analysis_root, str(source or "traditional"))
     if from_cache is not None:
         return from_cache
@@ -285,6 +279,7 @@ def _build_config(
     display_mode: str, marker_size: float, line_width: float,
     width_px: int, max_raster: int, max_sync: int,
 ) -> PlateViewerConfig:
+    from yuxin_mea.analysis.plate_raster_synchrony import PlateViewerConfig
     return PlateViewerConfig(
         display_mode=str(display_mode),
         marker_size=float(marker_size),
@@ -306,6 +301,7 @@ def _load_records(
     output dirs, so the loader never globs the NAS. Empty → the loader falls
     back to legacy discovery. The burst task name equals its terminal dir.
     """
+    from yuxin_mea.analysis.burst_inspector import well_output_dirs_from_cache
     source_key = str(source or "traditional")
     burst_root = _resolve_burst_root(analysis_root, source)
     curation_root = _resolve_curation_root(analysis_root)
@@ -340,6 +336,7 @@ def _render_plate_figure(
     source: str | None,
 ) -> go.Figure:
     """Full interactive 24-well figure — used by Export HTML (payload unchanged)."""
+    from yuxin_mea.analysis.plate_raster_synchrony import build_plate_figure
     records, _bwd, _cwd = _load_records(analysis_root, recording_key, source)
     return build_plate_figure(records, _build_config(**settings))
 
@@ -384,6 +381,7 @@ _CAP_STYLE = {"fontSize": "11px", "marginTop": "2px",
 
 def _overview_grid(records, png_map: dict[str, Any]) -> html.Div:
     """4×6 grid of clickable raster PNGs; missing wells shown as greyed cells."""
+    from yuxin_mea.analysis.raster_image import png_to_data_uri
     cells = []
     for wr in sorted(records, key=lambda r: _well_sort_key(r.well_id)):
         caption = html.Div(wr.well_name, style=_CAP_STYLE)
@@ -437,6 +435,8 @@ def _on_load(_n_clicks, recording_key, source, display_mode, marker_size, line_w
     cache_root = ctx_app.get("cache_root")
     if analysis_root is None:
         return nu, nu, nu, nu, "analysis_root is not set in the config."
+    from yuxin_mea.analysis.plate_raster_synchrony import build_plate_figure
+    from yuxin_mea.analysis.raster_image import render_overview_pngs
     source_key = str(source or "traditional")
     settings = {
         "display_mode": display_mode, "marker_size": marker_size,
@@ -485,6 +485,7 @@ def _on_well_select(well_id, context):
     analysis_root = current_app.config.get("YUXIN_MEA", {}).get("analysis_root")
     if analysis_root is None:
         return _EMPTY_FIG
+    from yuxin_mea.analysis.plate_raster_synchrony import build_single_well_figure
     try:
         records, _bwd, _cwd = _load_records(
             analysis_root, context["recording_key"], context["source"]
@@ -547,6 +548,7 @@ def _on_export(_n_clicks, recording_key, source, display_mode, marker_size, line
         "max_raster": max_raster, "max_sync": max_sync,
     }
     source_key = str(source or "traditional")
+    from yuxin_mea.analysis.plate_raster_synchrony import write_plate_viewer_html
     try:
         fig = _render_plate_figure(analysis_root, recording_key, settings, source_key)
         output_path = Path(figure_root) / recording_key / f"plate_viewer_{source_key}.html"

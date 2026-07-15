@@ -21,17 +21,10 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback, ctx, dcc, html
 from flask import current_app
 
-from yuxin_mea.analysis.burst_inspector import (
-    METHOD_SUBDIRS,
-    METHOD_TASK_NAMES,
-    METHOD_TERMINALS,
-    InspectorBundle,
-    fig_composite_basic,
-    fig_raster_basic,
-    load_generic_bundle,
-    output_root_from_cache,
-    summary_card,
-)
+# NOTE: yuxin_mea.analysis.burst_inspector pulls in torch/spikeinterface (heavy).
+# Imported lazily inside the callbacks below so the dashboard can start without
+# the ML stack. `InspectorBundle` is used only in annotations, which stay lazy
+# strings thanks to `from __future__ import annotations`.
 from yuxin_mea.config import ConfigManager
 
 
@@ -237,6 +230,12 @@ def _prefill_root(method: str | None):
     if analysis_root is None:
         return "", "(analysis_root not set in config — set output_root manually.)"
 
+    from yuxin_mea.analysis.burst_inspector import (
+        METHOD_SUBDIRS,
+        METHOD_TASK_NAMES,
+        output_root_from_cache,
+    )
+
     task_name = METHOD_TASK_NAMES.get(method, "ml_burst_detection")
     subdir = METHOD_SUBDIRS.get(method, "ml_burst_data")
 
@@ -270,6 +269,7 @@ def _populate_recordings(root: str, _n: int, method: str | None):
         _BUNDLE_CACHE.clear()
     if not root:
         return [], None
+    from yuxin_mea.analysis.burst_inspector import METHOD_TERMINALS
     terminal = METHOD_TERMINALS.get(method or "ml", "ml_burst_detection")
     grouped = _discover_wells(Path(root), terminal=terminal)
     if not grouped:
@@ -289,6 +289,7 @@ def _populate_recordings(root: str, _n: int, method: str | None):
 def _populate_wells(rec_key: str | None, root: str | None, method: str | None):
     if not (rec_key and root):
         return [], None
+    from yuxin_mea.analysis.burst_inspector import METHOD_TERMINALS
     terminal = METHOD_TERMINALS.get(method or "ml", "ml_burst_detection")
     grouped = _discover_wells(Path(root), terminal=terminal)
     triples = grouped.get(rec_key, [])
@@ -329,6 +330,8 @@ def _load_bundle(
     method = method or "ml"
     rec_name, well_id = well_value.split("|", 1)
 
+    from yuxin_mea.analysis.burst_inspector import load_generic_bundle
+
     try:
         bundle = load_generic_bundle(
             Path(root), rec_key, rec_name, well_id, method=method,
@@ -352,6 +355,7 @@ def _load_bundle(
 
 def _render_summary(bundle: InspectorBundle) -> Any:
     """Render the summary_card() dict as a KV card."""
+    from yuxin_mea.analysis.burst_inspector import summary_card
     data = summary_card(bundle)
     rows = []
     for k, v in data.items():
@@ -390,6 +394,7 @@ def _render_tabs(bundle_key: str | None):
         return ("(no well selected)", empty, empty)
 
     bundle = _BUNDLE_CACHE[bundle_key]
+    from yuxin_mea.analysis.burst_inspector import fig_composite_basic, fig_raster_basic
     return (
         _render_summary(bundle),
         fig_composite_basic(bundle),

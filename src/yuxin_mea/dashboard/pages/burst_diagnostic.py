@@ -20,13 +20,11 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback, ctx, dcc, html
 from flask import current_app
 
-from yuxin_mea.analysis.burst_diagnostic import (
-    BatchResults,
-    cache_key,
-    fig_generic_summary,
-    load_or_run_batch,
-)
-from yuxin_mea.analysis.ml_burst_detector import MLBurstConfig
+# NOTE: yuxin_mea.analysis.* pulls in torch/spikeinterface (heavy, ~slow under
+# load). Imported lazily inside the callbacks below so the dashboard process can
+# start without the ML stack — only this page's data callbacks need it.
+# `BatchResults` appears only in annotations, which stay lazy strings thanks to
+# `from __future__ import annotations`.
 from yuxin_mea.config import ConfigManager
 from yuxin_mea.dashboard.cache import cache_get, cache_set, make_key
 
@@ -210,6 +208,10 @@ def _load_or_recompute(_l: int, _r: int, root: str, method: str | None):
     if not root:
         return dash.no_update, "Please set a spike-source root first."
 
+    # Lazy import (see module header): pulls in the torch/spikeinterface stack.
+    from yuxin_mea.analysis.burst_diagnostic import cache_key, load_or_run_batch
+    from yuxin_mea.analysis.ml_burst_detector import MLBurstConfig
+
     method = method or "ml"
     force = ctx.triggered_id == "burst-diag-recompute-btn"
     yuxin_ctx = current_app.config.get("YUXIN_MEA", {})
@@ -256,4 +258,5 @@ def _render_summary(batch_key: str | None):
     batch = _get_batch(batch_key)
     if batch is None:
         return _EMPTY_FIGURE
+    from yuxin_mea.analysis.burst_diagnostic import fig_generic_summary
     return fig_generic_summary(batch)
