@@ -30,7 +30,11 @@ def h5_match(a: dict | None, b: dict | None) -> bool | None:
     if not a or not b:
         return None
     if a.get("sha256") and b.get("sha256"):
-        return a.get("method") == b.get("method") and a["sha256"] == b["sha256"]
+        # Different fingerprint methods (e.g. sampled vs --full-hash) are not
+        # comparable → UNKNOWN, not a false RAW-CHANGED alarm.
+        if a.get("method") != b.get("method"):
+            return None
+        return a["sha256"] == b["sha256"]
     if a.get("file_size") is None or b.get("file_size") is None:
         return None
     return a.get("file_size") == b.get("file_size") and a.get("mtime_ns") == b.get("mtime_ns")
@@ -93,7 +97,7 @@ def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
     from yuxin_mea.dataset.cache import JsonCacheStore
     from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
     from .fingerprint import h5_fingerprint, params_hash
-    from .sidecar import read_sidecar
+    from .sidecar import read_sidecar, sidecar_dir
 
     recs = JsonCacheStore(analysis_root).load()
     pipe = JsonPipelineCacheStore(analysis_root).load()
@@ -123,7 +127,7 @@ def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
                 continue
             prov = rec_task.provenance
             if prov is None and rec_task.output_path:
-                prov = read_sidecar(Path(rec_task.output_path).parent)
+                prov = read_sidecar(sidecar_dir(rec_task.output_path))
             if tname not in cfg_cache:
                 cfg_cache[tname] = params_hash(cm.get_task_params(tname))
             issues = classify_task(prov, cur_h5, cur_meta, cfg_cache[tname])

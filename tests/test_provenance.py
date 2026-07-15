@@ -186,6 +186,9 @@ def test_match_helpers():
     s = {"file_size": 1, "mtime_ns": 2}
     assert h5_match(s, {"file_size": 1, "mtime_ns": 2}) is True
     assert h5_match(s, {"file_size": 9, "mtime_ns": 2}) is False
+    # Different fingerprint methods are incomparable → UNKNOWN, not RAW-CHANGED.
+    assert h5_match({"method": "h5struct-v1", "sha256": "x"},
+                    {"method": "h5full-v1", "sha256": "x"}) is None
     assert meta_match({"sha256": "m"}, {"sha256": "m"}) is True
     assert meta_match({"sha256": "m"}, {"sha256": "n"}) is False
 
@@ -278,3 +281,67 @@ def test_verify_end_to_end():
         _build_caches(tp, with_prov=False)
         r = verify_provenance(cm, tp, tp)
         assert r.counts["UNKNOWN"] == 1 and r.computational_drift == 0
+
+
+# ---------------------------------------------------------------------------
+# integration: the real _run_one completion path (stamp + sidecar placement)
+# ---------------------------------------------------------------------------
+
+class _StubCM:
+    def get_task_params(self, name):
+        return {"p": 1}
+    def get_config(self, task, rec, well):
+        return {"p": 1}
+
+
+def test_run_one_stamps_and_places_sidecar_in_well_dir():
+    """Drive the real completion path; sidecar must land in the well dir, not its
+    parent (directory-returning tasks would otherwise collide across wells)."""
+    from yuxin_mea.cli.run import _run_one
+    from yuxin_mea.dataset import DatasetManager
+    from yuxin_mea.pipeline import PipelineManager
+    from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
+
+    with TemporaryDirectory() as tmp:
+        t = Path(tmp)
+        data_root, analysis = t / "data", t / "analysis"
+        analysis.mkdir(parents=True)
+        run_dir = data_root / "S1" / "260101" / "P" / "Network" / "001"
+        run_dir.mkdir(parents=True)
+        _make_h5(run_dir / "data.raw.h5")
+        (run_dir / "mxassay.metadata").write_text("groupname=NPH\n")
+
+        dm = DatasetManager(data_root, analysis, fingerprint_mode="content")
+        rkey = dm.recordings[0].cache_key
+
+        well_dir = analysis / "out" / rkey / "rec0000" / "well000"
+
+        class _StubTask:
+            task_name = "stub"
+            dependencies: list[str] = []
+            def run(self, rk, wid, data_path, params):
+                well_dir.mkdir(parents=True, exist_ok=True)
+                (well_dir / "result.npy").write_bytes(b"x")
+                return well_dir  # a DIRECTORY (like burst_detection/auto_curation)
+
+        pm = PipelineManager(analysis, config_provider=_StubCM())
+        pm.register_computation_task("stub", [])
+        pm.add_well(rkey, "rec0000/well000")
+        wi = pm.get_next_task(n=1)[0]
+
+        _run_one(wi, _StubCM(), dm, pm, {"stub": _StubTask()}, Path("cfg.json"))
+
+        # cache copy
+        entry = JsonPipelineCacheStore(analysis).load()[f"{rkey}/rec0000/well000"]
+        tr = entry.tasks["stub"]
+        assert tr.status == "complete"
+        assert tr.provenance is not None
+        assert tr.provenance["h5"]["sha256"]        # content fingerprint carried
+        assert tr.provenance["metadata"]["sha256"]  # metadata fingerprint carried
+        assert tr.provenance["config_file"] == "cfg.json"
+
+        # durable sidecar: in the returned WELL dir, NOT the shared parent
+        assert (well_dir / "provenance.json").exists()
+        assert not (well_dir.parent / "provenance.json").exists()
+        back = read_sidecar(well_dir)
+        assert back["task"] == "stub" and back["well_id"] == "rec0000/well000"

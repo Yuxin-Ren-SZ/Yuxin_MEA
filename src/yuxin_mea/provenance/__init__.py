@@ -13,7 +13,7 @@ from .fingerprint import (
     raw_fingerprint,
     stat_sig,
 )
-from .sidecar import PROVENANCE_FILENAME, read_sidecar, write_sidecar
+from .sidecar import PROVENANCE_FILENAME, read_sidecar, sidecar_dir, write_sidecar
 from .verify import VerifyReport, classify_task, verify_provenance
 
 __all__ = [
@@ -24,6 +24,7 @@ __all__ = [
     "stat_sig",
     "PROVENANCE_FILENAME",
     "read_sidecar",
+    "sidecar_dir",
     "write_sidecar",
     "VerifyReport",
     "classify_task",

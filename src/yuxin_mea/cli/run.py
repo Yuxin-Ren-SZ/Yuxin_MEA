@@ -24,7 +24,7 @@ from yuxin_mea.config import ConfigManager
 from yuxin_mea.dataset import DatasetManager
 from yuxin_mea.pipeline import PipelineManager, WorkItem
 from yuxin_mea.pipeline.task_record import TaskStatus
-from yuxin_mea.provenance import params_hash, stat_sig, write_sidecar
+from yuxin_mea.provenance import params_hash, sidecar_dir, stat_sig, write_sidecar
 from yuxin_mea.tasks import TASK_CLASSES
 
 
@@ -87,7 +87,7 @@ def _write_stamp_sidecar(output_path, stamp: dict, work_item: WorkItem) -> None:
         return
     try:
         write_sidecar(
-            Path(output_path).parent,
+            sidecar_dir(output_path),
             {
                 "recording_key": work_item.recording_key,
                 "well_id": work_item.well_id,

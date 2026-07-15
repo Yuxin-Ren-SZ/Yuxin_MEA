@@ -19,6 +19,21 @@ from typing import Any
 PROVENANCE_FILENAME = "provenance.json"
 
 
+def sidecar_dir(output_path: Path | str) -> Path:
+    """Directory the sidecar belongs in for a task's returned ``output_path``.
+
+    Tasks return either a per-well **directory** (e.g. ``auto_curation`` /
+    ``burst_detection`` / ``ml_burst_detection`` / a ``.zarr`` store) or a
+    per-well **file** inside such a directory. The sidecar must live in the
+    per-well dir either way — using ``.parent`` unconditionally would, for
+    directory-returning tasks, place it in the *recording-level* dir shared by
+    all wells, so every well would clobber the same ``provenance.json``. Write
+    and verify both route through here so they always agree.
+    """
+    p = Path(output_path)
+    return p if p.is_dir() else p.parent
+
+
 def write_sidecar(output_dir: Path | str, stamp: dict[str, Any]) -> Path:
     """Atomically write ``<output_dir>/provenance.json`` (tmp + ``os.replace``).
 

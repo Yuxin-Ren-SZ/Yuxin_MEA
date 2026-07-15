@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -125,7 +126,7 @@ def _hash_dataset(h: "hashlib._Hash", dset: Any, *, threshold: int,
 
     shape = tuple(dset.shape)
     itemsize = dset.dtype.itemsize
-    nbytes = itemsize * int(np.prod(shape)) if shape else itemsize
+    nbytes = itemsize * math.prod(shape) if shape else itemsize
     _feed(h, dset.name, str(shape), str(dset.dtype), str(dset.chunks),
           str(dset.compression))
 
