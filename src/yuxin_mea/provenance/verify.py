@@ -69,15 +69,29 @@ def classify_task(prov: dict | None, cur_h5: dict | None, cur_meta: dict | None,
     return issues
 
 
+_SEVERITY = {"RAW-CHANGED": 4, "CONFIG-CHANGED": 3, "METADATA-CHANGED": 2,
+             "UNKNOWN": 1, "OK": 0}
+
+
 @dataclass
 class VerifyReport:
     counts: dict[str, int] = field(default_factory=lambda: {s: 0 for s in STATUSES})
     details: list[tuple[str, str]] = field(default_factory=list)  # (labels, "rkey/well/task")
+    # Computational drift (RAW/CONFIG) as structured items, for --mark-stale:
+    #   {"recording_key", "well_id", "task", "labels": [...]}
+    drifted: list[dict] = field(default_factory=list)
+    # Worst-case status per recording_key (for dashboard badges).
+    per_recording: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
     @property
     def computational_drift(self) -> int:
         return self.counts["RAW-CHANGED"] + self.counts["CONFIG-CHANGED"]
+
+    def _bump(self, recording_key: str, status: str) -> None:
+        cur = self.per_recording.get(recording_key, "OK")
+        if _SEVERITY.get(status, 0) > _SEVERITY.get(cur, 0):
+            self.per_recording[recording_key] = status
 
 
 def _well_of(pipeline_key: str) -> str:
@@ -133,12 +147,36 @@ def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
             issues = classify_task(prov, cur_h5, cur_meta, cfg_cache[tname])
             if not issues:
                 report.counts["OK"] += 1
+                report._bump(rkey, "OK")
                 continue
             for i in issues:
                 report.counts[i] += 1
+                report._bump(rkey, i)
+            # RAW/CONFIG are computational → actionable via --mark-stale.
+            comp = [i for i in issues if i in ("RAW-CHANGED", "CONFIG-CHANGED")]
+            if comp:
+                report.drifted.append({
+                    "recording_key": rkey, "well_id": rec_task_well_id(entry, pkey),
+                    "task": tname, "labels": comp,
+                })
             # UNKNOWN (stamp-less, pre-provenance) is counted but kept out of the
             # drift-detail list — it is not actionable drift and would otherwise
             # bury real findings on a cache full of old outputs.
             if issues != ["UNKNOWN"]:
                 report.details.append(("+".join(issues), f"{rkey}/{_well_of(pkey)}/{tname}"))
     return report
+
+
+def rec_task_well_id(entry, pipeline_key: str) -> str:
+    """Well id for refresh() — prefer the entry's own field, else parse the key."""
+    return getattr(entry, "well_id", None) or _well_of(pipeline_key)
+
+
+def status_by_recording(cm, analysis_root: Path) -> dict[str, str]:
+    """Cheap per-recording provenance status for dashboard badges.
+
+    Compares each COMPLETE task's stamp against the **cached** raw fingerprint +
+    current config (no NAS content re-hash). Returns ``{recording_key: status}``
+    (worst-case per recording). Read-only.
+    """
+    return verify_provenance(cm, analysis_root, analysis_root, full_hash=False).per_recording

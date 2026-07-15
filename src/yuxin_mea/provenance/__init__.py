@@ -14,7 +14,12 @@ from .fingerprint import (
     stat_sig,
 )
 from .sidecar import PROVENANCE_FILENAME, read_sidecar, sidecar_dir, write_sidecar
-from .verify import VerifyReport, classify_task, verify_provenance
+from .verify import (
+    VerifyReport,
+    classify_task,
+    status_by_recording,
+    verify_provenance,
+)
 
 __all__ = [
     "file_hash",
@@ -28,5 +33,6 @@ __all__ = [
     "write_sidecar",
     "VerifyReport",
     "classify_task",
+    "status_by_recording",
     "verify_provenance",
 ]

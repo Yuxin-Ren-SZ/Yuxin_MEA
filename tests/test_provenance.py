@@ -283,6 +283,57 @@ def test_verify_end_to_end():
         assert r.counts["UNKNOWN"] == 1 and r.computational_drift == 0
 
 
+def test_verify_drifted_structured_and_per_recording():
+    from yuxin_mea.provenance import params_hash
+    from yuxin_mea.provenance.verify import verify_provenance
+
+    cm = _FakeCM({"sorter": "kilosort4"})
+    cfg = params_hash({"sorter": "kilosort4"})
+    with TemporaryDirectory() as tmp:
+        tp = Path(tmp)
+        rkey = _build_caches(tp, prov_cfg=cfg, prov_h5_sha="H", cur_h5_sha="H2")  # RAW
+        r = verify_provenance(cm, tp, tp)
+        assert len(r.drifted) == 1
+        d = r.drifted[0]
+        assert d["recording_key"] == rkey and d["well_id"] == "rec0000/well000"
+        assert d["task"] == "preprocessing" and d["labels"] == ["RAW-CHANGED"]
+        assert r.per_recording[rkey] == "RAW-CHANGED"
+        # metadata-only drift is NOT in drifted (label-only, not computational)
+        _build_caches(tp, prov_cfg=cfg, prov_meta_sha="M", cur_meta_sha="M2")
+        r2 = verify_provenance(cm, tp, tp)
+        assert r2.drifted == [] and r2.per_recording[rkey] == "METADATA-CHANGED"
+
+
+def test_mark_stale_resets_drifted_task():
+    from yuxin_mea.pipeline import PipelineManager
+    from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
+    from yuxin_mea.provenance import params_hash
+    from yuxin_mea.provenance.verify import verify_provenance
+    from yuxin_mea.tasks import TASK_CLASSES
+
+    cm = _FakeCM({"sorter": "kilosort4"})
+    cfg = params_hash({"sorter": "kilosort4"})
+    with TemporaryDirectory() as tmp:
+        tp = Path(tmp)
+        rkey = _build_caches(tp, prov_cfg="STALE", cur_h5_sha="H", prov_h5_sha="H")  # CONFIG
+        rep = verify_provenance(cm, tp, tp)
+        assert rep.drifted and rep.drifted[0]["labels"] == ["CONFIG-CHANGED"]
+
+        pm = PipelineManager(tp, config_provider=cm)
+        for c in TASK_CLASSES:
+            try:
+                pm.register_task(c)
+            except ValueError:
+                pass
+        total = 0
+        for d in rep.drifted:
+            total += pm.refresh(d["task"], recording_key=d["recording_key"],
+                                well_ids=[d["well_id"]])
+        assert total >= 1
+        tr = JsonPipelineCacheStore(tp).load()[f"{rkey}/rec0000/well000"].tasks["preprocessing"]
+        assert tr.status == "not_run"
+
+
 # ---------------------------------------------------------------------------
 # integration: the real _run_one completion path (stamp + sidecar placement)
 # ---------------------------------------------------------------------------

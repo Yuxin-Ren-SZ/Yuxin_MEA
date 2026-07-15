@@ -61,8 +61,13 @@ def _disk_keys(data_root: Path) -> set[str]:
 
 
 def _print_verify(cm, data_root: Path, analysis_root: Path, *,
-                  full_hash: bool, network_only: bool) -> int:
-    """Run + print the provenance verification. Returns 1 on computational drift."""
+                  full_hash: bool, network_only: bool, mark_stale: bool) -> int:
+    """Run + print the provenance verification. Returns 1 on computational drift.
+
+    With ``mark_stale`` the RAW/CONFIG-drifted tasks are reset to NOT_RUN (and
+    their dependents cascaded) so the next run recomputes them — the only
+    mutating path here.
+    """
     from yuxin_mea.provenance.verify import verify_provenance
 
     print("\n== Provenance verification "
@@ -88,7 +93,36 @@ def _print_verify(cm, data_root: Path, analysis_root: Path, *,
             print(f"  … and {len(rep.details) - 200} more")
     print("\nProvenance: computational drift found." if rep.computational_drift
           else "\nProvenance: no computational drift.")
+
+    if mark_stale and rep.drifted:
+        n = _mark_stale(analysis_root, cm, rep.drifted)
+        print(f"\n--mark-stale: reset {n} task record(s) (incl. dependent cascade) "
+              "to NOT_RUN. Re-run yuxin-mea-run to recompute.")
+    elif mark_stale:
+        print("\n--mark-stale: nothing to reset.")
     return 1 if rep.computational_drift else 0
+
+
+def _mark_stale(analysis_root: Path, cm, drifted: list[dict]) -> int:
+    """Reset each RAW/CONFIG-drifted task (+ dependents) via PipelineManager."""
+    from yuxin_mea.pipeline import PipelineManager
+    from yuxin_mea.tasks import TASK_CLASSES
+
+    pm = PipelineManager(analysis_root, config_provider=cm)
+    for cls in TASK_CLASSES:
+        try:
+            pm.register_task(cls)
+        except ValueError:
+            pass
+    n = 0
+    for d in drifted:
+        try:
+            n += pm.refresh(d["task"], recording_key=d["recording_key"],
+                            well_ids=[d["well_id"]])
+        except ValueError:
+            # Unknown/unregistered task — skip (e.g. a renamed task in old cache).
+            pass
+    return n
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,6 +138,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="With --verify-provenance, re-fingerprint each h5 from disk "
                         "(content sha256) instead of comparing cached fingerprints. "
                         "NAS-costly.")
+    p.add_argument("--mark-stale", action="store_true",
+                   help="With --verify-provenance, reset RAW/CONFIG-drifted tasks "
+                        "(and their dependents) to NOT_RUN so the next run recomputes "
+                        "them. Mutates pipeline_cache.json. Metadata drift is left "
+                        "alone (labels only).")
     args = p.parse_args(argv)
 
     if not args.config.exists():
@@ -153,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         prov_rc = _print_verify(
             cm, data_root, analysis_root,
             full_hash=args.full_hash, network_only=args.network_only,
+            mark_stale=args.mark_stale,
         )
         return max(key_rc, prov_rc)
     return key_rc
