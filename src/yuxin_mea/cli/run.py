@@ -144,12 +144,22 @@ def build_parser() -> argparse.ArgumentParser:
              "(a rescan re-stats every recording and is NAS-costly).",
     )
     p.add_argument(
+        "--hash-raw",
+        choices=["stat", "struct", "content", "full"],
+        default="stat",
+        help="How much of each recording's raw h5 to fingerprint before draining, "
+             "so stamps carry more than size/mtime. "
+             "stat (default) = no hashing; "
+             "struct = hash the small analysis-critical datasets (gain/lsb/mapping/"
+             "settings) + raw shapes, no bulk reads; "
+             "content = + sample the raw array (scattered NAS reads — slow on a busy "
+             "NAS); full = + read the raw array entirely (very slow on 30-100 GB). "
+             "Hashes are reused when the h5 stat is unchanged.",
+    )
+    p.add_argument(
         "--full-hash",
         action="store_true",
-        help="Compute structure-aware content sha256 of each recording's raw h5 "
-             "before draining, so stamps carry a content fingerprint instead of "
-             "just size/mtime. NAS-costly (reads sampled data); reused when the "
-             "h5 stat is unchanged.",
+        help="Deprecated alias for --hash-raw full.",
     )
     p.add_argument(
         "--max-tasks",
@@ -402,19 +412,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: config file not found: {args.config}", file=sys.stderr)
         return 2
 
+    hash_mode = "full" if args.full_hash else args.hash_raw
     cm, dataset_mgr, pipeline_mgr = _setup_pipeline(
-        args.config, fingerprint_mode="full" if args.full_hash else "stat",
+        args.config, fingerprint_mode=hash_mode,
     )
 
-    # Provenance freshness: --rescan rebuilds the dataset cache (fresh stat/struct
-    # fingerprints); --full-hash (without --rescan) content-hashes in place. Both
-    # are opt-in — the default drain uses whatever the last scan recorded.
+    # Provenance freshness: --rescan rebuilds the dataset cache (fingerprinting at
+    # --hash-raw level); --hash-raw alone hashes in place. Both are opt-in — the
+    # default drain uses whatever the last scan recorded (stat only), because
+    # hashing a 30-100 GB h5 over the NAS is far too slow to do routinely.
     if args.rescan:
-        logger.info("Rescanning dataset before draining (--rescan)…")
+        logger.info("Rescanning dataset before draining (--rescan, hash=%s)…", hash_mode)
         dataset_mgr.refresh()
-    elif args.full_hash:
-        logger.info("Computing content fingerprints before draining (--full-hash)…")
-        dataset_mgr.compute_content_fingerprints(full=True)
+    elif hash_mode != "stat":
+        logger.info("Computing raw fingerprints before draining (--hash-raw %s)…",
+                    hash_mode)
+        dataset_mgr.compute_content_fingerprints(mode=hash_mode)
 
     task_allow = _split_csv(args.tasks)
     rec_allow = _split_csv(args.recordings)

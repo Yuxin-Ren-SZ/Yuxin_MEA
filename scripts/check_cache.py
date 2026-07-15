@@ -61,7 +61,7 @@ def _disk_keys(data_root: Path) -> set[str]:
 
 
 def _print_verify(cm, data_root: Path, analysis_root: Path, *,
-                  full_hash: bool, network_only: bool, mark_stale: bool) -> int:
+                  hash_mode: str | None, network_only: bool, mark_stale: bool) -> int:
     """Run + print the provenance verification. Returns 1 on computational drift.
 
     With ``mark_stale`` the RAW/CONFIG-drifted tasks are reset to NOT_RUN (and
@@ -71,10 +71,10 @@ def _print_verify(cm, data_root: Path, analysis_root: Path, *,
     from yuxin_mea.provenance.verify import verify_provenance
 
     print("\n== Provenance verification "
-          f"({'full content re-hash' if full_hash else 'against cached fingerprints'}) ==",
+          f"({'re-hash raw: ' + hash_mode if hash_mode else 'against cached fingerprints'}) ==",
           flush=True)
     rep = verify_provenance(cm, data_root, analysis_root,
-                            full_hash=full_hash, network_only=network_only)
+                            hash_mode=hash_mode, network_only=network_only)
     c = rep.counts
     print(f"OK              : {c['OK']}")
     print(f"RAW-CHANGED     : {c['RAW-CHANGED']}   (re-run analysis)")
@@ -134,10 +134,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--verify-provenance", action="store_true",
                    help="Also verify each COMPLETE task's provenance stamp against "
                         "the current raw fingerprint + config (reproducibility check).")
+    p.add_argument("--hash-raw", choices=["struct", "content", "full"], default=None,
+                   help="With --verify-provenance, re-fingerprint each h5 from disk at "
+                        "this level instead of trusting the cached fingerprint. "
+                        "struct = small analysis-critical datasets only (no bulk raw "
+                        "reads); content = + sampled raw; full = + entire raw. All are "
+                        "NAS-costly; omit to compare cached fingerprints (free).")
     p.add_argument("--full-hash", action="store_true",
-                   help="With --verify-provenance, re-fingerprint each h5 from disk "
-                        "(content sha256) instead of comparing cached fingerprints. "
-                        "NAS-costly.")
+                   help="Deprecated alias for --hash-raw full.")
     p.add_argument("--mark-stale", action="store_true",
                    help="With --verify-provenance, reset RAW/CONFIG-drifted tasks "
                         "(and their dependents) to NOT_RUN so the next run recomputes "
@@ -191,7 +195,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.verify_provenance:
         prov_rc = _print_verify(
             cm, data_root, analysis_root,
-            full_hash=args.full_hash, network_only=args.network_only,
+            hash_mode="full" if args.full_hash else args.hash_raw,
+            network_only=args.network_only,
             mark_stale=args.mark_stale,
         )
         return max(key_rc, prov_rc)

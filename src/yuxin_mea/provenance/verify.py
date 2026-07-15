@@ -100,14 +100,16 @@ def _well_of(pipeline_key: str) -> str:
 
 
 def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
-                      full_hash: bool = False, network_only: bool = False,
+                      full_hash: bool = False, hash_mode: str | None = None,
+                      network_only: bool = False,
                       use_sidecar: bool = True) -> VerifyReport:
     """Verify all COMPLETE tasks. ``cm`` is a loaded ConfigManager (current config).
 
-    Without ``full_hash`` the current raw fingerprint comes from
-    ``experiment_cache.json`` (cheap; reflects the last scan). With ``full_hash``
-    each recording's h5 is re-fingerprinted from disk (content sha256; NAS-costly)
-    and never persisted.
+    By default the current raw fingerprint comes from ``experiment_cache.json``
+    (cheap; reflects the last scan). ``hash_mode`` (``"struct"``/``"content"``/
+    ``"full"``) instead re-fingerprints each h5 from disk at that level, in memory
+    (never persisted) — costly on the NAS, so it is opt-in. ``full_hash=True`` is
+    the legacy alias for ``hash_mode="full"``.
 
     ``use_sidecar`` falls back to the on-disk ``yuxin_provenance.json`` when a
     task's cache stamp is missing. Set it ``False`` for the dashboard hot path —
@@ -116,8 +118,11 @@ def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
     """
     from yuxin_mea.dataset.cache import JsonCacheStore
     from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
-    from .fingerprint import h5_fingerprint, params_hash
+    from .fingerprint import h5_fingerprint, h5_kwargs_for, params_hash
     from .sidecar import read_sidecar, sidecar_dir
+
+    if full_hash and hash_mode is None:
+        hash_mode = "full"
 
     recs = JsonCacheStore(analysis_root).load()
     pipe = JsonPipelineCacheStore(analysis_root).load()
@@ -133,10 +138,11 @@ def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
         cur_rf = (rec.raw_fingerprint if rec else {}) or {}
         cur_meta = cur_rf.get("metadata")
         cur_h5 = cur_rf.get("h5")
-        if full_hash and rec is not None:
+        if hash_mode is not None and rec is not None:
             if rkey not in fresh_h5:
                 try:
-                    fresh_h5[rkey] = h5_fingerprint(data_root / rec.data_path, full=True)
+                    fresh_h5[rkey] = h5_fingerprint(data_root / rec.data_path,
+                                                    **h5_kwargs_for(hash_mode))
                 except Exception as exc:  # noqa: BLE001
                     fresh_h5[rkey] = {}
                     report.errors.append(f"{rkey}: {exc}")

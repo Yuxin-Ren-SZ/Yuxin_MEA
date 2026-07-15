@@ -59,12 +59,16 @@ class DatasetManager:
         self._store              = cache_store or JsonCacheStore(self._analysis_dir)
         self._metadata_extractor = metadata_extractor or MxassayMetadataExtractor()
         # Raw fingerprint level computed during a scan (see doc/caching.md):
-        #   "stat"    — cheap size/mtime only (default; content hashing a 30-100 GB
-        #               h5 over the NAS is too slow to run on every scan).
-        #   "content" — structure-aware sampled sha256 (opt-in, NAS-costly).
-        #   "full"    — full streaming sha256 of the large datasets too.
-        # The mxassay.metadata sidecar is always content-hashed (tiny). Content
-        # hashes are reused when the h5 stat is unchanged (stat-drift trigger).
+        #   "stat"    — cheap size/mtime only (DEFAULT; hashing a 30-100 GB h5 over
+        #               the NAS is far too slow to run on every scan).
+        #   "struct"  — hash the small analysis-critical datasets (gain/lsb/mapping/
+        #               settings/channels/spikes) + large-dataset shapes; NO bulk
+        #               reads of the raw array. Cheap-ish: walk + ~tens of MB.
+        #   "content" — + sample the large raw array (scattered chunk reads —
+        #               latency-heavy on a busy NAS).
+        #   "full"    — + read the large datasets in full.
+        # The mxassay.metadata sidecar is always content-hashed (tiny). h5 hashes
+        # are reused when the h5 stat is unchanged (stat-drift trigger).
         self._fingerprint_mode   = fingerprint_mode
         self._cache: dict[str, RecordingEntry] = {}
         # Snapshot of the pre-scan cache, so a rescan can reuse an unchanged
@@ -291,18 +295,24 @@ class DatasetManager:
         self._store.save(self._cache)
         logger.info("Refresh complete. %d recordings cached.", len(self._cache))
 
-    def compute_content_fingerprints(self, *, full: bool = False,
+    def compute_content_fingerprints(self, *, mode: str = "content",
                                      force: bool = False) -> int:
-        """Compute structure-aware content sha256 for cached recordings (opt-in).
+        """Hash cached recordings' raw h5 at ``mode`` (opt-in; the scan skips this).
 
-        This is the NAS-costly pass the cheap default scan skips. Reuses an
-        existing content hash when the h5 stat is unchanged (unless ``force``),
-        and refreshes the (cheap) metadata hash. Saves once. Returns the number
-        of recordings (re)hashed.
+        ``mode``: ``"struct"`` (small datasets only — no bulk reads of the raw
+        array, cheapest), ``"content"`` (+ sampled raw), ``"full"`` (+ full raw).
+        Reuses an existing hash when the h5 stat is unchanged (unless ``force``),
+        and refreshes the (cheap) metadata hash. Saves once. Returns the number of
+        recordings (re)hashed.
         """
         from ..provenance import file_hash, h5_fingerprint, stat_sig
+        from ..provenance.fingerprint import (
+            H5_HASH_MODES, h5_kwargs_for, h5_method_for,
+        )
 
-        want = "h5full-v1" if full else "h5struct-v1"
+        if mode not in H5_HASH_MODES:
+            raise ValueError(f"mode must be one of {H5_HASH_MODES}, got {mode!r}")
+        want = h5_method_for(mode)
         n = 0
         for entry in self._cache.values():
             data_file = self._data_root / entry.data_path
@@ -316,7 +326,8 @@ class DatasetManager:
             if fresh and not force:
                 continue
             try:
-                entry.raw_fingerprint["h5"] = h5_fingerprint(data_file, full=full)
+                entry.raw_fingerprint["h5"] = h5_fingerprint(
+                    data_file, **h5_kwargs_for(mode))
             except Exception as exc:  # noqa: BLE001 — one bad file must not abort the pass
                 logger.warning("Content fingerprint failed for %s: %s",
                                entry.cache_key, exc)
@@ -577,6 +588,9 @@ class DatasetManager:
         sha256 but reuse the prior cache's hash when the h5 stat is unchanged.
         """
         from ..provenance import file_hash, h5_fingerprint, stat_sig
+        from ..provenance.fingerprint import (
+            H5_HASH_MODES, h5_kwargs_for, h5_method_for,
+        )
 
         meta_path = run_dir / "mxassay.metadata"
         try:
@@ -589,11 +603,11 @@ class DatasetManager:
 
         cur = stat_sig(data_file)
         stat_fp = {"method": "stat", "file_size": cur["size"], "mtime_ns": cur["mtime_ns"]}
-        if self._fingerprint_mode not in ("content", "full"):
+        if self._fingerprint_mode not in H5_HASH_MODES:
             entry.raw_fingerprint["h5"] = stat_fp
             return
 
-        want = "h5full-v1" if self._fingerprint_mode == "full" else "h5struct-v1"
+        want = h5_method_for(self._fingerprint_mode)
         prior = self._prior_cache.get(entry.cache_key)
         if prior is not None:
             ph = (prior.raw_fingerprint or {}).get("h5") or {}
@@ -604,7 +618,7 @@ class DatasetManager:
                 return
         try:
             entry.raw_fingerprint["h5"] = h5_fingerprint(
-                data_file, full=self._fingerprint_mode == "full"
+                data_file, **h5_kwargs_for(self._fingerprint_mode)
             )
         except Exception as exc:  # noqa: BLE001 — fall back to stat, never abort scan
             logger.warning("h5 fingerprint failed for %s: %s", data_file, exc)

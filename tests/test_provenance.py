@@ -25,7 +25,7 @@ from yuxin_mea.provenance.verify import classify_task, h5_match, meta_match
 # ---------------------------------------------------------------------------
 
 def _make_h5(path: Path, *, gain: float = 512.0, nframes: int = 4000,
-             raw: np.ndarray | None = None) -> None:
+             raw: np.ndarray | None = None, compression: str | None = "gzip") -> None:
     import h5py
     with h5py.File(path, "w") as h:
         h.create_dataset("version", data=np.bytes_([b"20000"]))
@@ -33,7 +33,8 @@ def _make_h5(path: Path, *, gain: float = 512.0, nframes: int = 4000,
         w.create_dataset("settings/gain", data=np.array([gain]))
         w.create_dataset("settings/mapping", data=np.arange(20, dtype="i4"))
         arr = raw if raw is not None else np.arange(1008 * nframes, dtype="u2").reshape(1008, nframes)
-        w.create_dataset("groups/routed/raw", data=arr, chunks=(1008, 200), compression="gzip")
+        w.create_dataset("groups/routed/raw", data=arr, chunks=(1008, 200),
+                         compression=compression)
         w.attrs["note"] = "orig"
 
 
@@ -62,12 +63,73 @@ def test_h5_fingerprint_detects_changes():
         assert h5_fingerprint(t / "gain.h5")["sha256"] != base
 
         raw = np.arange(1008 * 4000, dtype="u2").reshape(1008, 4000)
-        raw[0, 0] += 1  # a sampled position in the large raw dataset
+        raw[0, 0] += 1  # a sampled position in the raw dataset
         _make_h5(t / "raw.h5", raw=raw)
         assert h5_fingerprint(t / "raw.h5")["sha256"] != base
 
         _make_h5(t / "shape.h5", nframes=5000)  # shape change
         assert h5_fingerprint(t / "shape.h5")["sha256"] != base
+
+        # Explicitly exercise the LARGE/sampled path: with the default 16MB
+        # threshold this 8MB raw is hashed as a *small* dataset, so force it large.
+        THR = 1 << 20
+        b2 = h5_fingerprint(t / "base.h5", size_threshold=THR)["sha256"]
+        assert h5_fingerprint(t / "raw.h5", size_threshold=THR)["sha256"] != b2
+        assert h5_fingerprint(t / "gain.h5", size_threshold=THR)["sha256"] != b2
+
+
+def test_h5_struct_mode_skips_large_reads_but_catches_settings_and_shape():
+    """sample_large=False: cheapest tier — no bulk raw reads, but still detects a
+    settings change and a re-acquisition (shape change)."""
+    with TemporaryDirectory() as tmp:
+        t = Path(tmp)
+        _make_h5(t / "base.h5")
+        base = h5_fingerprint(t / "base.h5", sample_large=False)
+        assert base["method"] == "h5meta-v1"
+        # deterministic
+        assert h5_fingerprint(t / "base.h5", sample_large=False)["sha256"] == base["sha256"]
+        # distinct from the sampled tier (different method → verify treats as UNKNOWN)
+        assert h5_fingerprint(t / "base.h5")["method"] == "h5struct-v1"
+
+        # settings change (small dataset, still fully hashed) → detected
+        _make_h5(t / "gain.h5", gain=2.0)
+        assert h5_fingerprint(t / "gain.h5", sample_large=False)["sha256"] != base["sha256"]
+
+        # shape change (re-acquisition) → detected via folded-in shape
+        _make_h5(t / "shape.h5", nframes=5000)
+        assert h5_fingerprint(t / "shape.h5", sample_large=False)["sha256"] != base["sha256"]
+
+        # The trade-off, isolated. Force raw into the LARGE tier (size_threshold
+        # below its 8MB) and use an UNCOMPRESSED raw so file size is identical:
+        # a same-shape raw-content change is then invisible to struct (it never
+        # reads the array) but IS caught by the sampled tier. (With gzip such a
+        # change usually also shifts the compressed file_size, which struct folds
+        # in — so in practice struct often catches it anyway.)
+        THR = 1 << 20  # 1MB → the 8MB raw counts as "large"
+        base_raw = np.arange(1008 * 4000, dtype="u2").reshape(1008, 4000)
+        edit_raw = base_raw.copy()
+        edit_raw[0, 0] += 1  # offset 0 → inside the first sampled window
+        _make_h5(t / "u_base.h5", raw=base_raw, compression=None)
+        _make_h5(t / "u_edit.h5", raw=edit_raw, compression=None)
+        assert (t / "u_base.h5").stat().st_size == (t / "u_edit.h5").stat().st_size
+        assert (h5_fingerprint(t / "u_base.h5", size_threshold=THR, sample_large=False)["sha256"]
+                == h5_fingerprint(t / "u_edit.h5", size_threshold=THR, sample_large=False)["sha256"]
+                )  # struct: raw never read → miss
+        assert (h5_fingerprint(t / "u_base.h5", size_threshold=THR)["sha256"]
+                != h5_fingerprint(t / "u_edit.h5", size_threshold=THR)["sha256"]
+                )  # sampled: window at offset 0 → catch
+
+
+def test_h5_mode_helpers():
+    from yuxin_mea.provenance.fingerprint import (
+        H5_HASH_MODES, h5_kwargs_for, h5_method_for,
+    )
+    assert H5_HASH_MODES == ("struct", "content", "full")
+    assert h5_method_for("struct") == "h5meta-v1"
+    assert h5_method_for("content") == "h5struct-v1"
+    assert h5_method_for("full") == "h5full-v1"
+    assert h5_kwargs_for("struct") == {"full": False, "sample_large": False}
+    assert h5_kwargs_for("full") == {"full": True, "sample_large": True}
 
 
 def test_h5_fingerprint_detects_attr_change():

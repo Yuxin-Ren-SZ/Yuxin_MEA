@@ -305,15 +305,31 @@ are on disk now?"** — so a result can always be trusted or flagged as stale. I
 
 ### Cost — why fingerprinting is tiered, not automatic
 
-Content-hashing a 30–100 GB h5 over the NAS is I/O-bound and can stall under contention (a test
-on a real 53 GB file did not complete within 10 min under load). So:
+Hashing a 30–100 GB h5 over the NAS is **I/O-latency bound**, not bandwidth bound, and stalls
+under contention: on a real 53 GB file the *sampled* fingerprint did not finish in ~16 min at
+loadavg ≈ 29 (process stuck in `D` state). Note the sampled tier reads only ~0.5 GB — the cost is
+the tree walk (~400–500 metadata round-trips) plus ~1,150 scattered gzip-chunk seeks, not volume.
 
-- The **scan default is `fingerprint_mode="stat"`** — cheap size/mtime only (the h5 stat is
-  already on the entry); `mxassay.metadata` is always content-hashed (tiny).
-- **Content hashing is opt-in**: `DatasetManager.compute_content_fingerprints()` /
-  `check_cache.py --verify-provenance --full-hash` / `yuxin-mea-run --full-hash`. Content hashes
-  are **reused when the h5 stat is unchanged** (stat-drift trigger), so they are computed at most
-  once per file. Run the content pass off-peak.
+So raw h5 hashing is **tiered and entirely opt-in**:
+
+| Mode | What it hashes | Cost |
+|---|---|---|
+| **`stat`** (default) | nothing — size/mtime only (already on the entry) | free |
+| **`struct`** | small analysis-critical datasets (gain/lsb/mapping/sampling/channels/spikes) + attrs + raw **shapes**; **no bulk reads** of the raw array | walk + ~tens of MB |
+| `content` | + **samples** the raw array (32 windows/well) | + ~0.5 GB, ~1,150 seeks |
+| `full` | + reads the raw array entirely | + 30–100 GB |
+
+`struct` is the pragmatic middle: it still catches any settings/gain/mapping change and a
+re-acquisition (shape change), and — because file size is folded in — usually a raw rewrite too;
+it only misses a raw edit that preserves the exact file size. `mxassay.metadata` is always
+content-hashed (tiny) in every mode.
+
+Hashes are **reused when the h5 stat is unchanged** (stat-drift trigger), so any tier is computed
+at most once per file. Run a content/full pass off-peak.
+
+Entry points: `DatasetManager(fingerprint_mode=…)` / `.compute_content_fingerprints(mode=…)`,
+`yuxin-mea-run --hash-raw {stat,struct,content,full}`,
+`check_cache.py --verify-provenance --hash-raw {struct,content,full}`.
 - At run time the stamp copies whatever fingerprint the entry has (content if a pass ran, else
   stat) and additionally re-`stat`s the file actually read; a drift from the scanned stat is
   flagged on the stamp (`drift_from_scan`) and logged (warn, non-blocking).
@@ -331,8 +347,9 @@ Compares every COMPLETE task's stamp against the current raw fingerprint + confi
 | `METADATA-CHANGED` | `mxassay.metadata` changed | labels only — `refresh_groupnames`, no re-run |
 | `UNKNOWN` | no stamp (output predates provenance) | unverifiable, **not** a mismatch |
 
-Exit `1` on any *computational* drift (RAW/CONFIG); `--full-hash` re-fingerprints from disk
-instead of trusting the cached fingerprint; `--mark-stale` resets the RAW/CONFIG-drifted tasks
+Exit `1` on any *computational* drift (RAW/CONFIG); `--hash-raw {struct,content,full}`
+re-fingerprints from disk at that tier instead of trusting the cached fingerprint (omit = free);
+`--mark-stale` resets the RAW/CONFIG-drifted tasks
 (and their dependents, via `PipelineManager.refresh`) to `NOT_RUN` so the next run recomputes them
 (metadata drift is left alone — labels only). Read-only unless `--mark-stale`. `params_hash` here
 is the first real caller of the previously-dead `is_task_complete` comparison.
@@ -345,8 +362,10 @@ Recordings detail card and the plate-viewer modal, via `dashboard.data.recording
 
 - `--rescan` — force a full dataset rescan (fresh fingerprints) before draining. Off by default
   (NAS-costly).
-- `--full-hash` — content-hash each recording's raw h5 before draining so stamps carry a content
-  fingerprint instead of just stat. Off by default; reused when the h5 stat is unchanged.
+- `--hash-raw {stat,struct,content,full}` — how much of the raw h5 to fingerprint before draining,
+  so stamps carry more than size/mtime (see the tier table above). Default `stat` (no hashing);
+  `struct` is the cheap useful tier. Reused when the h5 stat is unchanged. (`--full-hash` is a
+  deprecated alias for `--hash-raw full`.)
 
 ---
 

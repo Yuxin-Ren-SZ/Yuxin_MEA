@@ -43,8 +43,9 @@ _READ_BLOCK = 8 << 20  # 8 MiB stream block
 _H5_SMALL_THRESHOLD = 16 << 20  # datasets <= 16 MiB are hashed in full
 _H5_WINDOWS = 32  # sample windows for large datasets
 _H5_WINDOW_LEN = 256  # elements per window along the sampled axis
-_METHOD_SAMPLED = "h5struct-v1"
-_METHOD_FULL = "h5full-v1"
+_METHOD_META = "h5meta-v1"      # small datasets hashed; large ones metadata-only
+_METHOD_SAMPLED = "h5struct-v1"  # + large datasets sampled
+_METHOD_FULL = "h5full-v1"       # + large datasets read in full
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +122,8 @@ def _window_offsets(length: int, window: int, n_windows: int) -> list[int]:
 
 
 def _hash_dataset(h: "hashlib._Hash", dset: Any, *, threshold: int,
-                  windows: int, window_len: int, full: bool) -> None:
+                  windows: int, window_len: int, full: bool,
+                  sample_large: bool = True) -> None:
     import numpy as np  # local — numpy is a heavy import, keep it lazy
 
     shape = tuple(dset.shape)
@@ -132,6 +134,14 @@ def _hash_dataset(h: "hashlib._Hash", dset: Any, *, threshold: int,
 
     if not shape:  # scalar
         _feed(h, b"S", _array_bytes(dset[()]))
+        return
+
+    if not full and nbytes > threshold and not sample_large:
+        # Large dataset, sampling disabled → metadata only (already fed above).
+        # Keeps the analysis-critical small datasets fully covered while avoiding
+        # the scattered chunk reads that dominate cost on a busy NAS. Still
+        # detects re-acquisition (shape/dtype/chunking change).
+        _feed(h, b"M")
         return
 
     if full or nbytes <= threshold:
@@ -160,17 +170,29 @@ def h5_fingerprint(
     windows: int = _H5_WINDOWS,
     window_len: int = _H5_WINDOW_LEN,
     full: bool = False,
+    sample_large: bool = True,
 ) -> dict[str, Any]:
     """Structure-aware sha256 of a MaxWell ``data.raw.h5``.
 
-    Small datasets + all attrs are hashed in full; large datasets are sampled
-    (unless ``full``). Deterministic: objects are visited in sorted name order.
-    Returns ``{"method", "file_size", "mtime_ns", "sha256",
-    "size_threshold", "windows", "window_len"}``.
+    Small datasets + all attrs are always hashed in full — that is the
+    analysis-critical part (gain/lsb/mapping/sampling/channels/spikes).
+
+    Large datasets (the raw voltage array) are, in increasing cost:
+
+    - ``sample_large=False``          → **metadata only** (``h5meta-v1``): shape/
+      dtype/chunking folded in, no bulk reads. Cheapest; still catches a
+      re-acquisition that changes length/electrode count, and any settings change.
+    - ``sample_large=True`` (default) → sampled windows (``h5struct-v1``).
+    - ``full=True``                   → read in full (``h5full-v1``).
+
+    Sampling/full are I/O-latency heavy on a busy NAS (scattered chunk reads), so
+    callers make them opt-in. Deterministic: objects visited in sorted name order.
     """
     import h5py
 
-    method = _METHOD_FULL if full else _METHOD_SAMPLED
+    method = _METHOD_FULL if full else (
+        _METHOD_SAMPLED if sample_large else _METHOD_META
+    )
     h = hashlib.sha256()
     sig = stat_sig(path)
     _feed(h, method, str(sig["size"]))
@@ -187,7 +209,8 @@ def h5_fingerprint(
                 _feed(h, "attr", name, k, repr(obj.attrs[k]))
             if isinstance(obj, h5py.Dataset):
                 _hash_dataset(h, obj, threshold=size_threshold,
-                              windows=windows, window_len=window_len, full=full)
+                              windows=windows, window_len=window_len, full=full,
+                              sample_large=sample_large)
 
     return {
         "method": method,
@@ -198,6 +221,27 @@ def h5_fingerprint(
         "windows": windows,
         "window_len": window_len,
     }
+
+
+# Fingerprint modes that actually hash the h5 (anything else = cheap stat only).
+# Ordered cheapest → costliest. See h5_fingerprint for what each covers.
+H5_HASH_MODES = ("struct", "content", "full")
+_MODE_METHOD = {"struct": _METHOD_META, "content": _METHOD_SAMPLED, "full": _METHOD_FULL}
+_MODE_KWARGS = {
+    "struct":  {"full": False, "sample_large": False},
+    "content": {"full": False, "sample_large": True},
+    "full":    {"full": True,  "sample_large": True},
+}
+
+
+def h5_method_for(mode: str) -> str:
+    """Method id a given fingerprint mode produces (for stat-drift reuse checks)."""
+    return _MODE_METHOD[mode]
+
+
+def h5_kwargs_for(mode: str) -> dict[str, bool]:
+    """``h5_fingerprint`` kwargs for a given fingerprint mode."""
+    return dict(_MODE_KWARGS[mode])
 
 
 def raw_fingerprint(
