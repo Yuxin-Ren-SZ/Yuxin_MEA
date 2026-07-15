@@ -207,6 +207,41 @@ class DatasetManager:
         self._store.save(self._cache)
         logger.debug("Updated metadata for well %s/%s.", recording_key, well_id)
 
+    def refresh_groupnames(self) -> int:
+        """Re-read per-well ``groupname`` from raw metadata for cached recordings.
+
+        Unlike :meth:`refresh` (a full disk rescan), this only re-invokes the
+        metadata extractor on each cached recording's ``mxassay.metadata``
+        sidecar and overwrites ``well.metadata["groupname"]`` with the fresh
+        value. Recordings whose sidecar is missing or unreadable are left
+        untouched (their existing cached groupname stands). The cache is saved
+        once at the end if anything changed.
+
+        Returns:
+            Number of wells whose groupname was written.
+        """
+        updated = 0
+        for recording_key, entry in self._cache.items():
+            metadata_path = (self._data_root / entry.data_path).parent / "mxassay.metadata"
+            try:
+                rec_meta = self._metadata_extractor.get(metadata_path)
+            except Exception as exc:  # noqa: BLE001 — one bad sidecar must not abort the sweep
+                logger.warning(
+                    "Groupname refresh skipped for %s: %s", recording_key, exc
+                )
+                continue
+            for wm in rec_meta.wells:
+                group = wm.fields.get("groupname")
+                if group is None or wm.well_id not in entry.wells:
+                    continue
+                if entry.wells[wm.well_id].metadata.get("groupname") != group:
+                    entry.wells[wm.well_id].metadata["groupname"] = group
+                    updated += 1
+        if updated:
+            self._store.save(self._cache)
+        logger.info("Groupname refresh complete. %d well(s) updated.", updated)
+        return updated
+
     def _matches_recording_filters(
         self,
         entry: RecordingEntry,

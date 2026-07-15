@@ -17,7 +17,17 @@ import dash
 from dash import ALL, Input, Output, State, callback, dcc, html
 from flask import current_app
 
-from yuxin_mea.dashboard.components import no_config_banner
+from yuxin_mea.dashboard.components import (
+    build_filter_bar,
+    filter_id,
+    filter_kwargs,
+    iso_to_yymmdd,
+    no_config_banner,
+    page_bounds,
+    pager_bar,
+    pager_state,
+    yymmdd_to_iso,
+)
 from yuxin_mea.dashboard.context import load_dataset_mgr, load_pipeline_mgr
 from yuxin_mea.dashboard.data import filter_recordings, load_recordings_detail
 from yuxin_mea.tasks import TASK_CLASSES
@@ -30,6 +40,53 @@ _STATUS_OK = "complete"
 _STATUS_RUN = "running"
 _STATUS_FAIL = "failed"
 
+# Component ids that reset pagination when changed. The date range picker is a
+# single component ("…-filter-date") whose start_date/end_date both report that
+# id via triggered_id.
+_FILTER_FIELDS = ("sample", "scan-type", "date", "group", "status")
+_FILTER_IDS = [filter_id("recordings", f) for f in _FILTER_FIELDS]
+
+# States re-read by the selection callbacks. Date splits into start_date/end_date
+# so the 6-arg callback signatures still line up.
+_FILTER_STATES = [
+    State(filter_id("recordings", "sample"), "value"),
+    State(filter_id("recordings", "scan-type"), "value"),
+    State(filter_id("recordings", "date"), "start_date"),
+    State(filter_id("recordings", "date"), "end_date"),
+    State(filter_id("recordings", "group"), "value"),
+    State(filter_id("recordings", "status"), "value"),
+]
+
+
+def _filter_values(sample, scan_type, date_from, date_to, group, status) -> dict:
+    """Bundle the six raw filter inputs into filter-function kwargs.
+
+    `date_from`/`date_to` arrive as ISO strings from the DatePickerRange and are
+    converted to the cache's ``"YYMMDD"`` form for the pure filter functions.
+    """
+    return filter_kwargs(
+        {
+            "sample": sample,
+            "scan-type": scan_type,
+            "date-from": iso_to_yymmdd(date_from),
+            "date-to": iso_to_yymmdd(date_to),
+            "group": group,
+            "status": status,
+        }
+    )
+
+
+def _render_list(filtered, wps, selected, checked, page):
+    """Slice `filtered` to `page` (50/page) and build list children.
+
+    Returns ``(children, clamped_page, n_pages)`` — the caller derives the
+    pager label/disabled state via :func:`pager_state`.
+    """
+    start, end, n_pages, page = page_bounds(len(filtered), page)
+    page_recs = filtered[start:end]
+    children = _build_rec_list(page_recs, wps, selected, checked)
+    return children, page, n_pages
+
 
 # ---------------------------------------------------------------------------
 # Static layout shell — data injected by callbacks
@@ -40,6 +97,7 @@ layout = html.Div(
         dcc.Store(id="recordings-selected-key", data=""),
         dcc.Store(id="recordings-checked-keys", data=[]),
         dcc.Store(id="recordings-data-store", data={}),
+        dcc.Store(id="recordings-page", data=0),
 
         # ── view-head ────────────────────────────────────────────────────
         html.Div(
@@ -68,6 +126,13 @@ layout = html.Div(
                             title="Walk data_root and rebuild experiment_cache.json",
                         ),
                         html.Button(
+                            [html.Span("↻", className="glyph"), "Refresh groups"],
+                            id="recordings-refresh-groups",
+                            n_clicks=0,
+                            className="btn",
+                            title="Re-read per-well groupname from raw mxassay.metadata for cached recordings",
+                        ),
+                        html.Button(
                             [html.Span("▸", className="glyph"), "Queue selected"],
                             id="recordings-queue-btn",
                             n_clicks=0,
@@ -89,86 +154,8 @@ layout = html.Div(
 
         html.Div(id="recordings-banner-slot"),
 
-        # ── filter bar ──────────────────────────────────────────────────
-        html.Div(
-            [
-                html.Div(
-                    [html.Span("filters", className="h-title")],
-                    className="card-head",
-                ),
-                html.Div(
-                    html.Div(
-                        [
-                            html.Div(
-                                [
-                                    html.Label("Scan type", style={
-                                        "fontFamily": "var(--font-mono)",
-                                        "fontSize": "10px",
-                                        "color": "var(--ink-3)",
-                                        "marginBottom": "4px",
-                                    }),
-                                    dcc.Dropdown(
-                                        id="recordings-filter-scan-type",
-                                        options=[],
-                                        value=[],
-                                        multi=True,
-                                        placeholder="any",
-                                    ),
-                                ],
-                                style={"flex": "1 1 160px"},
-                            ),
-                            html.Div(
-                                [
-                                    html.Label("Date", style={
-                                        "fontFamily": "var(--font-mono)",
-                                        "fontSize": "10px",
-                                        "color": "var(--ink-3)",
-                                        "marginBottom": "4px",
-                                    }),
-                                    dcc.Dropdown(
-                                        id="recordings-filter-date",
-                                        options=[],
-                                        value=[],
-                                        multi=True,
-                                        placeholder="any",
-                                    ),
-                                ],
-                                style={"flex": "1 1 160px"},
-                            ),
-                            html.Div(
-                                [
-                                    html.Label("Queue status", style={
-                                        "fontFamily": "var(--font-mono)",
-                                        "fontSize": "10px",
-                                        "color": "var(--ink-3)",
-                                        "marginBottom": "4px",
-                                    }),
-                                    dcc.Dropdown(
-                                        id="recordings-filter-queue-status",
-                                        options=[
-                                            {"label": "all", "value": "all"},
-                                            {"label": "queued", "value": "queued"},
-                                            {"label": "not queued", "value": "not_queued"},
-                                        ],
-                                        value="all",
-                                        clearable=False,
-                                    ),
-                                ],
-                                style={"flex": "1 1 130px"},
-                            ),
-                        ],
-                        style={
-                            "display": "flex",
-                            "gap": "16px",
-                            "alignItems": "flex-start",
-                            "flexWrap": "wrap",
-                        },
-                    ),
-                    className="card-body",
-                ),
-            ],
-            className="card",
-        ),
+        # ── filter bar (shared component) ────────────────────────────────
+        build_filter_bar("recordings"),
 
         # ── status strip ─────────────────────────────────────────────────
         html.Div(
@@ -202,6 +189,7 @@ layout = html.Div(
                             className="card-body flush",
                             style={"padding": "0"},
                         ),
+                        pager_bar("recordings"),
                     ],
                     className="card",
                     style={"width": "340px", "flexShrink": "0"},
@@ -558,24 +546,45 @@ def _build_wells_table(rec: dict, well_pipeline_status: dict) -> html.Div:
     Output("recordings-data-store", "data"),
     Output("recordings-selected-key", "data"),
     Output("recordings-status", "children"),
-    Output("recordings-filter-scan-type", "options"),
-    Output("recordings-filter-date", "options"),
+    Output("recordings-page-label", "children"),
+    Output("recordings-page-prev", "disabled"),
+    Output("recordings-page-next", "disabled"),
+    Output("recordings-page", "data"),
+    Output(filter_id("recordings", "sample"), "options"),
+    Output(filter_id("recordings", "scan-type"), "options"),
+    Output(filter_id("recordings", "date"), "min_date_allowed"),
+    Output(filter_id("recordings", "date"), "max_date_allowed"),
+    Output(filter_id("recordings", "group"), "options"),
     Input("recordings-refresh", "n_clicks"),
     Input("recordings-scan", "n_clicks"),
-    Input("recordings-filter-scan-type", "value"),
-    Input("recordings-filter-date", "value"),
-    Input("recordings-filter-queue-status", "value"),
+    Input("recordings-refresh-groups", "n_clicks"),
+    Input(filter_id("recordings", "sample"), "value"),
+    Input(filter_id("recordings", "scan-type"), "value"),
+    Input(filter_id("recordings", "date"), "start_date"),
+    Input(filter_id("recordings", "date"), "end_date"),
+    Input(filter_id("recordings", "group"), "value"),
+    Input(filter_id("recordings", "status"), "value"),
+    Input("recordings-page-prev", "n_clicks"),
+    Input("recordings-page-next", "n_clicks"),
     State("recordings-selected-key", "data"),
     State("recordings-checked-keys", "data"),
+    State("recordings-page", "data"),
 )
 def _populate(
     _r: int,
     _s: int,
-    filter_scan_type: list[str],
-    filter_date: list[str],
-    filter_queue_status: str,
+    _rg: int,
+    f_sample: list[str],
+    f_scan_type: list[str],
+    f_date_from: str,
+    f_date_to: str,
+    f_group: list[str],
+    f_status: list[str],
+    _prev: int,
+    _next: int,
     current_key: str,
     checked_keys: list[str],
+    page: int,
 ):
     ctx_app = current_app.config["YUXIN_MEA"]
     banner = None if ctx_app.get("config_exists") else no_config_banner()
@@ -586,29 +595,37 @@ def _populate(
     if analysis_root is None:
         return (
             banner, "analysis_root not set", "0", [], {}, "",
-            "analysis_root not configured.", empty_opts, empty_opts,
+            "analysis_root not configured.", "", True, True, 0,
+            empty_opts, empty_opts, None, None, empty_opts,
         )
 
     triggered = dash.ctx.triggered_id
-    if isinstance(triggered, str) and triggered == "recordings-scan":
+    if triggered == "recordings-scan":
         mgr = load_dataset_mgr()
         if mgr:
             before = len(mgr.recordings)
             mgr.refresh()
             after = len(mgr.recordings)
             status_msg = f"Scanned disk: {after} recording(s) ({after - before:+d})"
+    elif triggered == "recordings-refresh-groups":
+        mgr = load_dataset_mgr()
+        if mgr:
+            n = mgr.refresh_groupnames()
+            status_msg = f"Refreshed groups: {n} well(s) updated from raw metadata."
 
     recordings, well_pipeline_status = load_recordings_detail(Path(analysis_root))
 
+    sample_options = sorted({r["sample_id"] for r in recordings})
     scan_type_options = sorted({r["scan_type"] for r in recordings})
     date_options = sorted({r["date"] for r in recordings})
+    date_min = yymmdd_to_iso(date_options[0]) if date_options else None
+    date_max = yymmdd_to_iso(date_options[-1]) if date_options else None
+    group_options = sorted({g for r in recordings for g in r.get("groups", [])})
 
-    filtered = filter_recordings(
-        recordings, well_pipeline_status,
-        scan_types=filter_scan_type or None,
-        dates=filter_date or None,
-        queue_status=filter_queue_status or "all",
+    kwargs = _filter_values(
+        f_sample, f_scan_type, f_date_from, f_date_to, f_group, f_status
     )
+    filtered = filter_recordings(recordings, well_pipeline_status, **kwargs)
 
     subtitle = f"{len(filtered)} of {len(recordings)} recordings · root {analysis_root}"
 
@@ -622,9 +639,17 @@ def _populate(
         "well_pipeline_status": well_pipeline_status,
     }
 
-    list_children = _build_rec_list(
-        filtered, well_pipeline_status, selected, checked_keys or [],
+    # Page index: prev/next step it; any filter/scan/refresh resets to 0.
+    if triggered == "recordings-page-prev":
+        page = (page or 0) - 1
+    elif triggered == "recordings-page-next":
+        page = (page or 0) + 1
+    elif triggered != "recordings-refresh":
+        page = 0
+    list_children, page, n_pages = _render_list(
+        filtered, well_pipeline_status, selected, checked_keys or [], page or 0,
     )
+    label, prev_dis, next_dis = pager_state(page, n_pages, len(filtered))
 
     return (
         banner,
@@ -634,8 +659,15 @@ def _populate(
         store_data,
         selected,
         status_msg,
+        label,
+        prev_dis,
+        next_dis,
+        page,
+        [{"label": s, "value": s} for s in sample_options],
         [{"label": s, "value": s} for s in scan_type_options],
-        [{"label": d, "value": d} for d in date_options],
+        date_min,
+        date_max,
+        [{"label": g, "value": g} for g in group_options],
     )
 
 
@@ -646,9 +678,8 @@ def _populate(
     State("recordings-data-store", "data"),
     State("recordings-selected-key", "data"),
     State("recordings-checked-keys", "data"),
-    State("recordings-filter-scan-type", "value"),
-    State("recordings-filter-date", "value"),
-    State("recordings-filter-queue-status", "value"),
+    *_FILTER_STATES,
+    State("recordings-page", "data"),
     prevent_initial_call=True,
 )
 def _select_recording(
@@ -656,27 +687,34 @@ def _select_recording(
     store_data,
     current_key,
     checked_keys,
-    filter_scan_type,
-    filter_date,
-    filter_queue_status,
+    f_sample,
+    f_scan_type,
+    f_date_from,
+    f_date_to,
+    f_group,
+    f_status,
+    page,
 ):
     triggered = dash.ctx.triggered_id
     if not triggered or not isinstance(triggered, dict):
+        return dash.no_update, dash.no_update
+    # Pattern-matching callbacks also fire when the rendered card set changes
+    # (e.g. on page flip). Only act on a genuine click (n_clicks > 0).
+    trig = dash.ctx.triggered
+    if not trig or not trig[0].get("value"):
         return dash.no_update, dash.no_update
 
     new_key = triggered.get("rec-card", current_key)
     recordings = store_data.get("recordings", [])
     well_pipeline_status = store_data.get("well_pipeline_status", {})
 
-    filtered = filter_recordings(
-        recordings, well_pipeline_status,
-        scan_types=filter_scan_type or None,
-        dates=filter_date or None,
-        queue_status=filter_queue_status or "all",
+    kwargs = _filter_values(
+        f_sample, f_scan_type, f_date_from, f_date_to, f_group, f_status
     )
+    filtered = filter_recordings(recordings, well_pipeline_status, **kwargs)
 
-    list_children = _build_rec_list(
-        filtered, well_pipeline_status, new_key, checked_keys or [],
+    list_children, _page, _n_pages = _render_list(
+        filtered, well_pipeline_status, new_key, checked_keys or [], page or 0,
     )
     return new_key, list_children
 
@@ -684,10 +722,16 @@ def _select_recording(
 @callback(
     Output("recordings-checked-keys", "data"),
     Input({"rec-check": ALL}, "value"),
+    State({"rec-check": ALL}, "id"),
+    State("recordings-checked-keys", "data"),
     prevent_initial_call=True,
 )
-def _update_checked(all_values):
-    checked: set[str] = set()
+def _update_checked(all_values, all_ids, prev):
+    # Merge, don't rebuild: only the current page's checkboxes are rendered, so
+    # start from the prior set minus the visible keys, then re-add the visible
+    # keys that are currently checked. This preserves selections on other pages.
+    visible = {i["rec-check"] for i in (all_ids or [])}
+    checked: set[str] = set(prev or []) - visible
     for vals in all_values:
         if vals:
             checked.update(vals)
@@ -701,9 +745,8 @@ def _update_checked(all_values):
     State("recordings-data-store", "data"),
     State("recordings-checked-keys", "data"),
     State("recordings-selected-key", "data"),
-    State("recordings-filter-scan-type", "value"),
-    State("recordings-filter-date", "value"),
-    State("recordings-filter-queue-status", "value"),
+    *_FILTER_STATES,
+    State("recordings-page", "data"),
     prevent_initial_call=True,
 )
 def _select_all_in_group(
@@ -711,12 +754,20 @@ def _select_all_in_group(
     store_data,
     checked_keys,
     selected_key,
-    filter_scan_type,
-    filter_date,
-    filter_queue_status,
+    f_sample,
+    f_scan_type,
+    f_date_from,
+    f_date_to,
+    f_group,
+    f_status,
+    page,
 ):
     triggered = dash.ctx.triggered_id
     if not triggered or not isinstance(triggered, dict):
+        return dash.no_update, dash.no_update
+    # Ignore spurious fires from the rendered button set changing on page flip.
+    trig = dash.ctx.triggered
+    if not trig or not trig[0].get("value"):
         return dash.no_update, dash.no_update
 
     sample_id = triggered.get("rec-group-select")
@@ -726,12 +777,10 @@ def _select_all_in_group(
     recordings = store_data.get("recordings", [])
     well_pipeline_status = store_data.get("well_pipeline_status", {})
 
-    filtered = filter_recordings(
-        recordings, well_pipeline_status,
-        scan_types=filter_scan_type or None,
-        dates=filter_date or None,
-        queue_status=filter_queue_status or "all",
+    kwargs = _filter_values(
+        f_sample, f_scan_type, f_date_from, f_date_to, f_group, f_status
     )
+    filtered = filter_recordings(recordings, well_pipeline_status, **kwargs)
 
     group_keys = {r["cache_key"] for r in filtered if r["sample_id"] == sample_id}
     checked = set(checked_keys or [])
@@ -742,8 +791,8 @@ def _select_all_in_group(
         checked |= group_keys
 
     new_checked = sorted(checked)
-    list_children = _build_rec_list(
-        filtered, well_pipeline_status, selected_key or "", new_checked,
+    list_children, _page, _n_pages = _render_list(
+        filtered, well_pipeline_status, selected_key or "", new_checked, page or 0,
     )
     return new_checked, list_children
 
