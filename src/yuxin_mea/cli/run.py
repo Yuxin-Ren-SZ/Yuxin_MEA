@@ -24,10 +24,80 @@ from yuxin_mea.config import ConfigManager
 from yuxin_mea.dataset import DatasetManager
 from yuxin_mea.pipeline import PipelineManager, WorkItem
 from yuxin_mea.pipeline.task_record import TaskStatus
+from yuxin_mea.provenance import params_hash, sidecar_dir, stat_sig, write_sidecar
 from yuxin_mea.tasks import TASK_CLASSES
 
 
 logger = logging.getLogger("yuxin_mea.run")
+
+
+def _build_stamp(
+    dataset_mgr: DatasetManager,
+    work_item: WorkItem,
+    params: dict,
+    config_path: Path,
+    data_path: Path,
+) -> dict:
+    """Assemble the reproducibility stamp for a completed task.
+
+    Copies the recording's raw fingerprint (h5 + metadata) from the dataset
+    cache and adds the config-params hash. Also re-``stat``s the file actually
+    read; if it drifted from the scanned fingerprint the raw changed since the
+    last scan, so we stamp the run-time stat and flag it (warn, per "warn +
+    surface"). Best-effort — a stamping hiccup must never sink a completed task.
+    """
+    try:
+        matches = dataset_mgr.get_recording_by(
+            [("cache_key", "==", work_item.recording_key)]
+        )
+        rf = (matches[0].raw_fingerprint if matches else {}) or {}
+    except Exception:  # noqa: BLE001
+        rf = {}
+
+    h5 = dict(rf.get("h5") or {})
+    cur = stat_sig(data_path)
+    scanned_size, scanned_mtime = h5.get("file_size"), h5.get("mtime_ns")
+    drift = (
+        (scanned_size is not None and scanned_size != cur["size"])
+        or (scanned_mtime is not None and scanned_mtime != cur["mtime_ns"])
+    )
+    if drift or not h5:
+        if drift:
+            logger.warning(
+                "Raw drift at run for %s: on-disk (%s,%s) != scanned (%s,%s); "
+                "stamping run-time stat.",
+                data_path, cur["size"], cur["mtime_ns"], scanned_size, scanned_mtime,
+            )
+        h5 = {"method": "stat", "file_size": cur["size"], "mtime_ns": cur["mtime_ns"]}
+        if drift:
+            h5["drift_from_scan"] = True
+
+    return {
+        "h5": h5,
+        "metadata": rf.get("metadata"),
+        "config_hash": params_hash(params),
+        "config_file": Path(config_path).name,
+        "stamped_at": time.time(),
+    }
+
+
+def _write_stamp_sidecar(output_path, stamp: dict, work_item: WorkItem) -> None:
+    """Write the durable provenance.json next to the task output (best-effort)."""
+    if not output_path:
+        return
+    try:
+        write_sidecar(
+            sidecar_dir(output_path),
+            {
+                "recording_key": work_item.recording_key,
+                "well_id": work_item.well_id,
+                "task": work_item.task_name,
+                "output_path": str(output_path),
+                **stamp,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — never fail a completed task on the sidecar
+        logger.warning("Could not write provenance sidecar for %s: %s", output_path, exc)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +137,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also re-run tasks currently in FAILED state.",
     )
     p.add_argument(
+        "--rescan",
+        action="store_true",
+        help="Force a full dataset rescan (experiment_cache.json) before draining, "
+             "so provenance stamps use fresh raw fingerprints. Off by default "
+             "(a rescan re-stats every recording and is NAS-costly).",
+    )
+    p.add_argument(
+        "--hash-raw",
+        choices=["stat", "struct", "content", "full"],
+        default=None,
+        help="How much of each recording's raw h5 to fingerprint before draining, "
+             "so stamps carry more than size/mtime. Overrides the config's "
+             "global.fingerprint_mode (which defaults to stat). "
+             "stat = no hashing; "
+             "struct = hash the small analysis-critical datasets (gain/lsb/mapping/"
+             "settings) + raw shapes, no bulk reads; "
+             "content = + sample the raw array (scattered NAS reads — slow on a busy "
+             "NAS); full = + read the raw array entirely (very slow on 30-100 GB). "
+             "Hashes are reused when the h5 stat is unchanged.",
+    )
+    p.add_argument(
+        "--full-hash",
+        action="store_true",
+        help="Deprecated alias for --hash-raw full.",
+    )
+    p.add_argument(
         "--max-tasks",
         type=int,
         default=None,
@@ -103,7 +199,9 @@ def _split_csv(value: str | None) -> list[str] | None:
     return items or None
 
 
-def _setup_pipeline(config_path: Path) -> tuple[ConfigManager, DatasetManager, PipelineManager]:
+def _setup_pipeline(
+    config_path: Path, fingerprint_override: str | None = None,
+) -> tuple[ConfigManager, DatasetManager, PipelineManager]:
     cm = ConfigManager()
     for cls in TASK_CLASSES:
         cm.register_task(cls)
@@ -117,7 +215,11 @@ def _setup_pipeline(config_path: Path) -> tuple[ConfigManager, DatasetManager, P
             "`yuxin-mea-dashboard --config ...` Settings page to edit)."
         )
 
-    dataset_mgr = DatasetManager(Path(data_root), Path(analysis_root))
+    # CLI flag wins; otherwise the config's global.fingerprint_mode; else "stat".
+    mode = fingerprint_override or str(cm.get_global("fingerprint_mode") or "stat")
+    dataset_mgr = DatasetManager(
+        Path(data_root), Path(analysis_root), fingerprint_mode=mode
+    )
     pipeline_mgr = PipelineManager(Path(analysis_root), config_provider=cm)
     for cls in TASK_CLASSES:
         try:
@@ -183,6 +285,7 @@ def _run_one(
     dataset_mgr: DatasetManager,
     pipeline_mgr: PipelineManager,
     task_instances: dict[str, object],
+    config_path: Path,
 ) -> None:
     task = task_instances[work_item.task_name]
     params = cm.get_task_params(work_item.task_name)
@@ -211,10 +314,13 @@ def _run_one(
         return
 
     elapsed = time.time() - t0
+    stamp = _build_stamp(dataset_mgr, work_item, params, config_path, data_path)
+    _write_stamp_sidecar(output_path, stamp, work_item)
     pipeline_mgr.update_status(
         work_item,
         TaskStatus.COMPLETE,
         output_path=output_path,
+        provenance=stamp,
     )
     logger.info(
         "Task COMPLETE %s/%s/%s in %.1fs → %s",
@@ -283,12 +389,18 @@ def _run_one_worker(work_item: WorkItem, config_path: Path) -> dict:
             "output_path": None,
             "error": traceback.format_exc(),
             "elapsed": time.time() - t0,
+            "provenance": None,
         }
+    # Build + write the provenance stamp in the worker (it has the dataset entry
+    # + params + the file it actually read); the parent stores the cache copy.
+    stamp = _build_stamp(dataset_mgr, work_item, params, config_path, data_path)
+    _write_stamp_sidecar(output_path, stamp, work_item)
     return {
         "status": TaskStatus.COMPLETE,
         "output_path": output_path,
         "error": None,
         "elapsed": time.time() - t0,
+        "provenance": stamp,
     }
 
 
@@ -303,7 +415,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: config file not found: {args.config}", file=sys.stderr)
         return 2
 
-    cm, dataset_mgr, pipeline_mgr = _setup_pipeline(args.config)
+    cm, dataset_mgr, pipeline_mgr = _setup_pipeline(
+        args.config,
+        fingerprint_override="full" if args.full_hash else args.hash_raw,
+    )
+    hash_mode = dataset_mgr.fingerprint_mode  # CLI flag > config global > "stat"
+
+    # Provenance freshness: --rescan rebuilds the dataset cache (fingerprinting at
+    # --hash-raw level); --hash-raw alone hashes in place. Both are opt-in — the
+    # default drain uses whatever the last scan recorded (stat only), because
+    # hashing a 30-100 GB h5 over the NAS is far too slow to do routinely.
+    if args.rescan:
+        logger.info("Rescanning dataset before draining (--rescan, hash=%s)…", hash_mode)
+        dataset_mgr.refresh()
+    elif hash_mode != "stat":
+        logger.info("Computing raw fingerprints before draining (--hash-raw %s)…",
+                    hash_mode)
+        dataset_mgr.compute_content_fingerprints(mode=hash_mode)
 
     task_allow = _split_csv(args.tasks)
     rec_allow = _split_csv(args.recordings)
@@ -356,6 +484,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.jobs is None or args.jobs <= 1:
         n_ran, n_failed = _drain_serial(
             cm, dataset_mgr, pipeline_mgr,
+            config_path=args.config,
             task_allow=task_allow,
             rec_allow=rec_allow,
             retry_failed=args.retry_failed,
@@ -381,6 +510,7 @@ def _drain_serial(
     dataset_mgr: DatasetManager,
     pipeline_mgr: PipelineManager,
     *,
+    config_path: Path,
     task_allow: list[str] | None,
     rec_allow: list[str] | None,
     retry_failed: bool,
@@ -418,7 +548,7 @@ def _drain_serial(
             break
 
         attempted.add((work_item.recording_key, work_item.well_id, work_item.task_name))
-        _run_one(work_item, cm, dataset_mgr, pipeline_mgr, task_instances)
+        _run_one(work_item, cm, dataset_mgr, pipeline_mgr, task_instances, config_path)
         n_ran += 1
         record = pipeline_mgr.get_entry(
             work_item.recording_key, work_item.well_id
@@ -506,7 +636,8 @@ def _drain_parallel(
                     }
                 if result["status"] == TaskStatus.COMPLETE:
                     pipeline_mgr.update_status(
-                        w, TaskStatus.COMPLETE, output_path=result["output_path"]
+                        w, TaskStatus.COMPLETE, output_path=result["output_path"],
+                        provenance=result.get("provenance"),
                     )
                     logger.info(
                         "Task COMPLETE %s/%s/%s in %.1fs → %s",

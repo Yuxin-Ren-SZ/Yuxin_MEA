@@ -51,13 +51,29 @@ class DatasetManager:
         max_workers:        int | None = None,
         cache_store:        BaseCacheStore | None = None,
         metadata_extractor: BaseMetadataExtractor | None = None,
+        fingerprint_mode:   str = "stat",
     ) -> None:
         self._data_root          = Path(data_root)
         self._analysis_dir       = Path(analysis_dir)
         self._max_workers        = max_workers
         self._store              = cache_store or JsonCacheStore(self._analysis_dir)
         self._metadata_extractor = metadata_extractor or MxassayMetadataExtractor()
+        # Raw fingerprint level computed during a scan (see doc/caching.md):
+        #   "stat"    — cheap size/mtime only (DEFAULT; hashing a 30-100 GB h5 over
+        #               the NAS is far too slow to run on every scan).
+        #   "struct"  — hash the small analysis-critical datasets (gain/lsb/mapping/
+        #               settings/channels/spikes) + large-dataset shapes; NO bulk
+        #               reads of the raw array. Cheap-ish: walk + ~tens of MB.
+        #   "content" — + sample the large raw array (scattered chunk reads —
+        #               latency-heavy on a busy NAS).
+        #   "full"    — + read the large datasets in full.
+        # The mxassay.metadata sidecar is always content-hashed (tiny). h5 hashes
+        # are reused when the h5 stat is unchanged (stat-drift trigger).
+        self._fingerprint_mode   = fingerprint_mode
         self._cache: dict[str, RecordingEntry] = {}
+        # Snapshot of the pre-scan cache, so a rescan can reuse an unchanged
+        # recording's already-computed content fingerprint instead of re-hashing.
+        self._prior_cache: dict[str, RecordingEntry] = {}
 
         self._initialise()
 
@@ -68,6 +84,11 @@ class DatasetManager:
     @property
     def recordings(self) -> list[RecordingEntry]:
         return list(self._cache.values())
+
+    @property
+    def fingerprint_mode(self) -> str:
+        """Raw-fingerprint level this manager scans at (see __init__)."""
+        return self._fingerprint_mode
 
     def get_recording_by(
         self,
@@ -272,10 +293,62 @@ class DatasetManager:
     def refresh(self) -> None:
         """Clear the cache and re-scan all directories from scratch."""
         logger.info("Refreshing cache — full rescan of %s", self._data_root)
+        # Keep the old entries so unchanged recordings reuse their content hash.
+        self._prior_cache = dict(self._cache)
         self._cache.clear()
         self._scan_all()
         self._store.save(self._cache)
         logger.info("Refresh complete. %d recordings cached.", len(self._cache))
+
+    def compute_content_fingerprints(self, *, mode: str = "content",
+                                     force: bool = False) -> int:
+        """Hash cached recordings' raw h5 at ``mode`` (opt-in; the scan skips this).
+
+        ``mode``: ``"struct"`` (small datasets only — no bulk reads of the raw
+        array, cheapest), ``"content"`` (+ sampled raw), ``"full"`` (+ full raw).
+        Reuses an existing hash when the h5 stat is unchanged (unless ``force``),
+        and refreshes the (cheap) metadata hash. Saves once. Returns the number of
+        recordings (re)hashed.
+        """
+        from ..provenance import file_hash, h5_fingerprint, stat_sig
+        from ..provenance.fingerprint import (
+            H5_HASH_MODES, h5_kwargs_for, h5_method_for,
+        )
+
+        if mode not in H5_HASH_MODES:
+            raise ValueError(f"mode must be one of {H5_HASH_MODES}, got {mode!r}")
+        want = h5_method_for(mode)
+        n = 0
+        for entry in self._cache.values():
+            data_file = self._data_root / entry.data_path
+            cur = stat_sig(data_file)
+            h5 = (entry.raw_fingerprint or {}).get("h5") or {}
+            fresh = (
+                h5.get("method") == want
+                and h5.get("file_size") == cur["size"]
+                and h5.get("mtime_ns") == cur["mtime_ns"]
+            )
+            if fresh and not force:
+                continue
+            try:
+                entry.raw_fingerprint["h5"] = h5_fingerprint(
+                    data_file, **h5_kwargs_for(mode))
+            except Exception as exc:  # noqa: BLE001 — one bad file must not abort the pass
+                logger.warning("Content fingerprint failed for %s: %s",
+                               entry.cache_key, exc)
+                continue
+            meta = data_file.parent / "mxassay.metadata"
+            try:
+                entry.raw_fingerprint["metadata"] = (
+                    file_hash(meta) if meta.is_file() else None
+                )
+            except OSError:
+                entry.raw_fingerprint["metadata"] = None
+            n += 1
+        if n:
+            self._store.save(self._cache)
+        logger.info("Content fingerprint pass: %d recording(s) (re)hashed.", n)
+        return n
 
     # ------------------------------------------------------------------
     # Internal initialisation
@@ -283,6 +356,8 @@ class DatasetManager:
 
     def _initialise(self) -> None:
         self._cache = self._store.load()
+        # Reuse existing content fingerprints for unchanged recordings on rescan.
+        self._prior_cache = dict(self._cache)
         logger.info(
             "Loaded %d entries from cache. Checking for new Date directories...",
             len(self._cache),
@@ -437,6 +512,7 @@ class DatasetManager:
                         )
                         self._populate_h5_structure(entry, data_file)
                         self._populate_metadata(entry, run_dir)
+                        self._populate_fingerprint(entry, data_file, run_dir)
                         entries.append(entry)
                     except (ValueError, OSError) as exc:
                         logger.warning(
@@ -506,6 +582,52 @@ class DatasetManager:
                 entry.wells[wm.well_id].metadata.update(wm.fields)
             else:
                 entry.wells[wm.well_id] = WellEntry(well_id=wm.well_id, metadata=dict(wm.fields))
+
+    def _populate_fingerprint(
+        self, entry: RecordingEntry, data_file: Path, run_dir: Path
+    ) -> None:
+        """Populate ``entry.raw_fingerprint`` per the manager's fingerprint mode.
+
+        Metadata (tiny) is always content-hashed. The h5 fingerprint is cheap
+        ``stat`` by default; ``content``/``full`` compute the structure-aware
+        sha256 but reuse the prior cache's hash when the h5 stat is unchanged.
+        """
+        from ..provenance import file_hash, h5_fingerprint, stat_sig
+        from ..provenance.fingerprint import (
+            H5_HASH_MODES, h5_kwargs_for, h5_method_for,
+        )
+
+        meta_path = run_dir / "mxassay.metadata"
+        try:
+            entry.raw_fingerprint["metadata"] = (
+                file_hash(meta_path) if meta_path.is_file() else None
+            )
+        except OSError as exc:
+            logger.warning("Metadata fingerprint failed for %s: %s", meta_path, exc)
+            entry.raw_fingerprint["metadata"] = None
+
+        cur = stat_sig(data_file)
+        stat_fp = {"method": "stat", "file_size": cur["size"], "mtime_ns": cur["mtime_ns"]}
+        if self._fingerprint_mode not in H5_HASH_MODES:
+            entry.raw_fingerprint["h5"] = stat_fp
+            return
+
+        want = h5_method_for(self._fingerprint_mode)
+        prior = self._prior_cache.get(entry.cache_key)
+        if prior is not None:
+            ph = (prior.raw_fingerprint or {}).get("h5") or {}
+            if (ph.get("method") == want
+                    and ph.get("file_size") == cur["size"]
+                    and ph.get("mtime_ns") == cur["mtime_ns"]):
+                entry.raw_fingerprint["h5"] = ph  # stat unchanged → reuse content hash
+                return
+        try:
+            entry.raw_fingerprint["h5"] = h5_fingerprint(
+                data_file, **h5_kwargs_for(self._fingerprint_mode)
+            )
+        except Exception as exc:  # noqa: BLE001 — fall back to stat, never abort scan
+            logger.warning("h5 fingerprint failed for %s: %s", data_file, exc)
+            entry.raw_fingerprint["h5"] = stat_fp
 
     @staticmethod
     def _iter_dirs(parent: Path):

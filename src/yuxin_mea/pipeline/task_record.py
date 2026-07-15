@@ -28,3 +28,9 @@ class TaskRecord:
     last_updated: float | None  # POSIX timestamp of last status change
     error:        str | None    # error message when status == FAILED
     config:       dict          = field(default_factory=dict)  # config snapshot at RUNNING
+    # Reproducibility stamp captured at COMPLETE — the fingerprint of the raw
+    # inputs + config this output was produced from. None on older records /
+    # tasks that predate provenance (verification treats that as UNKNOWN):
+    #   {"h5": {...}, "metadata": {...}|None, "config_hash", "config_file",
+    #    "stamped_at"}
+    provenance:   dict | None   = None

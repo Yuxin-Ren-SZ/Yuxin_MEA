@@ -36,9 +36,14 @@ from yuxin_mea.dashboard.components import (
     filter_kwargs,
     iso_to_yymmdd,
     no_config_banner,
+    provenance_badge,
     yymmdd_to_iso,
 )
-from yuxin_mea.dashboard.data import filter_recordings, load_recordings_detail
+from yuxin_mea.dashboard.data import (
+    filter_recordings,
+    load_recordings_detail,
+    recording_provenance,
+)
 from yuxin_mea.dashboard.data_cache import data_sig, load_plate_data_cached
 
 
@@ -566,9 +571,13 @@ def _render_overview_outputs(analysis_root, cache_root, recording_key, source_ke
 
     ok_wells = [wr.well_id for wr in sorted(records, key=lambda r: _well_sort_key(r.well_id))
                 if wr.status == "ok"]
+    # Provenance status for this recording (computed once per Load, shown in the
+    # single-well modal). Advisory — never blocks the view.
+    config_path = current_app.config.get("YUXIN_MEA", {}).get("config_path")
+    prov_status = recording_provenance(Path(analysis_root), config_path).get(recording_key)
     context = {
         "recording_key": recording_key, "source": source_key,
-        "settings": settings, "ok_wells": ok_wells,
+        "settings": settings, "ok_wells": ok_wells, "provenance": prov_status,
     }
     status = f"✓ {recording_key} ({source_key}) — {len(ok_wells)}/24 wells"
     return overview, context, status
@@ -668,11 +677,13 @@ def _on_plate_nav(_p, _n, current, options, source, display_mode, marker_size,
     return new_key, overview, context, status, _MODAL_HIDDEN, None
 
 
-def _well_meta_row(recording_key: str, groupname: str | None) -> html.Div:
+def _well_meta_row(recording_key: str, groupname: str | None,
+                   prov_status: str | None = None) -> html.Div:
     """Pill row of recording metadata shown atop the single-well modal.
 
     Recording-level fields come from splitting ``recording_key``
     (``sample_id/date/plate_id/scan_type/run_id``); ``groupname`` is per-well.
+    A provenance badge is appended when the recording has a verified task.
     """
     parts = str(recording_key).split("/")
     keys = ("sample_id", "date", "plate_id", "scan_type", "run_id")
@@ -699,6 +710,9 @@ def _well_meta_row(recording_key: str, groupname: str | None) -> html.Div:
         )
         for label, val in fields
     ]
+    badge = provenance_badge(prov_status)
+    if badge is not None:
+        pills.append(badge)
     return html.Div(pills, style={"display": "flex", "gap": "6px",
                                   "flexWrap": "wrap", "marginBottom": "10px"})
 
@@ -758,7 +772,10 @@ def _open_well(_cell_clicks, _prev, _next, active_well, context):
 
     graph = dcc.Graph(figure=fig, style={"height": "72vh"}, config={"responsive": True})
     groupname = getattr(wr, "groupname", None)
-    body = html.Div([_well_meta_row(context["recording_key"], groupname), graph])
+    body = html.Div([
+        _well_meta_row(context["recording_key"], groupname, context.get("provenance")),
+        graph,
+    ])
     return body, _MODAL_SHOWN, f"{wr.well_name} ({wr.well_id})", target
 
 
