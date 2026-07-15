@@ -110,6 +110,10 @@ def load_recordings_detail(
                 "n_wells": len(wells),
                 "wells": wells,
                 "groups": groups,
+                # Raw-input fingerprint recorded at scan/backfill time (provenance).
+                # {"h5": {method, sha256, ...}, "metadata": {sha256, ...}|None} — {}
+                # when never fingerprinted. See doc/caching.md.
+                "raw_fingerprint": e.raw_fingerprint or {},
             }
         )
     recordings.sort(key=lambda r: (r["sample_id"], r["date"], r["run_id"]))

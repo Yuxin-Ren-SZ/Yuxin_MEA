@@ -394,6 +394,35 @@ def _build_rec_list(
     return children
 
 
+_H5_TIER_LABEL = {
+    "h5meta-v1": "struct",
+    "h5struct-v1": "content",
+    "h5full-v1": "full",
+    "stat": "stat only",
+}
+
+
+def _fmt_raw_fingerprint(rf: dict) -> tuple[str, str]:
+    """Human-readable (h5, metadata) fingerprint summary for the detail card.
+
+    Answers "has this recording's raw been fingerprinted, and at what tier?" —
+    distinct from the provenance *badge*, which verifies task stamps.
+    """
+    h5 = (rf or {}).get("h5") or {}
+    method = h5.get("method")
+    if not method:
+        h5_txt = "not fingerprinted"
+    elif method == "stat":
+        h5_txt = "stat only (size/mtime — no content hash)"
+    else:
+        tier = _H5_TIER_LABEL.get(method, method)
+        h5_txt = f"{tier} · {str(h5.get('sha256', ''))[:12]} ({method})"
+
+    md = (rf or {}).get("metadata")
+    md_txt = f"sha {str(md.get('sha256', ''))[:12]}" if md else "—  (no mxassay.metadata)"
+    return h5_txt, md_txt
+
+
 def _build_meta_card(rec: dict, prov_status: str | None = None) -> html.Div:
     def kv(label: str, value: str, path: bool = False) -> list:
         return [
@@ -402,6 +431,7 @@ def _build_meta_card(rec: dict, prov_status: str | None = None) -> html.Div:
         ]
 
     badge = provenance_badge(prov_status)  # None when no verified task / OK-hidden not set
+    raw_h5, raw_md = _fmt_raw_fingerprint(rec.get("raw_fingerprint", {}))
     return html.Div(
         [
             html.Div(
@@ -429,7 +459,9 @@ def _build_meta_card(rec: dict, prov_status: str | None = None) -> html.Div:
                             ),
                             html.Dl(
                                 kv("file_size", f"{rec['file_size_mb']} MB")
-                                + kv("n_wells", str(rec["n_wells"])),
+                                + kv("n_wells", str(rec["n_wells"]))
+                                + kv("raw h5 fp", raw_h5)
+                                + kv("raw meta fp", raw_md),
                                 className="kv",
                             ),
                         ],
