@@ -588,9 +588,17 @@ class DatasetManager:
     ) -> None:
         """Populate ``entry.raw_fingerprint`` per the manager's fingerprint mode.
 
-        Metadata (tiny) is always content-hashed. The h5 fingerprint is cheap
-        ``stat`` by default; ``content``/``full`` compute the structure-aware
-        sha256 but reuse the prior cache's hash when the h5 stat is unchanged.
+        Metadata (tiny) is always content-hashed, in every mode — so a rewritten
+        ``mxassay.metadata`` is always detected at zero meaningful cost.
+
+        The h5 fingerprint is cheap ``stat`` by default; ``struct``/``content``/
+        ``full`` compute the structure-aware sha256 but reuse the prior cache's
+        hash when the h5 stat is unchanged.
+
+        Crucially, a cheap ``stat``-mode rescan **preserves** an existing content
+        fingerprint whose stat still matches: "Scan disk" does a full ``refresh()``
+        (clear + rebuild), so downgrading here would silently destroy an expensive
+        backfill (see scripts/backfill_fingerprints.py) on the next scan.
         """
         from ..provenance import file_hash, h5_fingerprint, stat_sig
         from ..provenance.fingerprint import (
@@ -608,19 +616,24 @@ class DatasetManager:
 
         cur = stat_sig(data_file)
         stat_fp = {"method": "stat", "file_size": cur["size"], "mtime_ns": cur["mtime_ns"]}
+        prior = self._prior_cache.get(entry.cache_key)
+        ph = ((prior.raw_fingerprint or {}).get("h5") or {}) if prior is not None else {}
+        # Is the prior fingerprint still valid for the file on disk right now?
+        prior_current = (
+            ph.get("file_size") == cur["size"] and ph.get("mtime_ns") == cur["mtime_ns"]
+        )
+
         if self._fingerprint_mode not in H5_HASH_MODES:
-            entry.raw_fingerprint["h5"] = stat_fp
+            # stat mode: never downgrade a still-valid content fingerprint — a cheap
+            # rescan must not throw away an expensive backfill.
+            keep = prior_current and str(ph.get("method", "")).startswith("h5")
+            entry.raw_fingerprint["h5"] = dict(ph) if keep else stat_fp
             return
 
         want = h5_method_for(self._fingerprint_mode)
-        prior = self._prior_cache.get(entry.cache_key)
-        if prior is not None:
-            ph = (prior.raw_fingerprint or {}).get("h5") or {}
-            if (ph.get("method") == want
-                    and ph.get("file_size") == cur["size"]
-                    and ph.get("mtime_ns") == cur["mtime_ns"]):
-                entry.raw_fingerprint["h5"] = ph  # stat unchanged → reuse content hash
-                return
+        if prior_current and ph.get("method") == want:
+            entry.raw_fingerprint["h5"] = dict(ph)  # stat unchanged → reuse content hash
+            return
         try:
             entry.raw_fingerprint["h5"] = h5_fingerprint(
                 data_file, **h5_kwargs_for(self._fingerprint_mode)

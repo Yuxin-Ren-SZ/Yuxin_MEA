@@ -321,11 +321,22 @@ So raw h5 hashing is **tiered and entirely opt-in**:
 
 `struct` is the pragmatic middle: it still catches any settings/gain/mapping change and a
 re-acquisition (shape change), and — because file size is folded in — usually a raw rewrite too;
-it only misses a raw edit that preserves the exact file size. `mxassay.metadata` is always
-content-hashed (tiny) in every mode.
+it only misses a raw edit that preserves the exact file size.
+
+**`mxassay.metadata` is always fully content-hashed (sha256) in every mode, including `stat`** —
+it's tiny, so a rewritten metadata sidecar is always detected at no meaningful cost. The tier
+above only concerns the raw `data.raw.h5`.
 
 Hashes are **reused when the h5 stat is unchanged** (stat-drift trigger), so any tier is computed
 at most once per file. Run a content/full pass off-peak.
+
+**A cheap `stat` scan never downgrades a richer fingerprint.** "Scan disk" does a full
+`refresh()` (clear + rebuild), so if `stat` overwrote the h5 entry it would silently destroy a
+`struct`/`content` backfill on the next scan. Instead `stat` **preserves** an existing content
+fingerprint whose size+mtime still match, and only falls back to bare stat when the file actually
+changed (at which point the old hash is genuinely invalid). This is what makes
+"default `stat` + a one-off `struct` backfill" a stable combination — see
+`scripts/backfill_fingerprints.py`.
 
 **Configured in the config file** — `global.fingerprint_mode` (default `"stat"`), editable from
 the dashboard **Settings → global** page (renders as a dropdown from `GLOBALS_SCHEMA`). It drives
