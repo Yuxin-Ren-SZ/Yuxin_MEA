@@ -42,6 +42,41 @@ def _all_form_ids() -> list[str]:
     return ["globals", *(f"task-{name}" for name in _TASK_BY_NAME)]
 
 
+# Config-switch modal (sibling-backdrop + z-index; same trick as the plate
+# viewer): the backdrop is a sibling of the content, so a click on the content
+# never bumps the backdrop's n_clicks — backdrop n_clicks == "clicked outside".
+_MODAL_HIDDEN = {"display": "none"}
+_MODAL_SHOWN = {
+    "display": "flex", "position": "fixed", "inset": 0, "zIndex": 1000,
+    "alignItems": "center", "justifyContent": "center",
+}
+
+
+def _list_config_entries(dir_path: str) -> list[dict]:
+    """List a directory for the config browser: ``..`` + subdirs + ``*.json``.
+
+    Pure. Dirs first (name-sorted), then ``.json`` files. Each entry is
+    ``{"name", "path", "kind"}`` with ``kind`` in ``{"dir", "file"}``. Bounded
+    to what a config picker needs — no other file types, no recursion.
+    """
+    p = Path(dir_path)
+    entries: list[dict] = []
+    if p.parent != p:  # not filesystem root
+        entries.append({"name": "../", "path": str(p.parent), "kind": "dir"})
+    try:
+        children = list(p.iterdir())
+    except OSError:
+        return entries
+    for d in sorted((c for c in children if c.is_dir()), key=lambda c: c.name.lower()):
+        entries.append({"name": d.name + "/", "path": str(d), "kind": "dir"})
+    for f in sorted(
+        (c for c in children if c.is_file() and c.suffix == ".json"),
+        key=lambda c: c.name.lower(),
+    ):
+        entries.append({"name": f.name, "path": str(f), "kind": "file"})
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
@@ -64,6 +99,8 @@ def _tree_node(section_id: str, label: str, badge: str | None, leaf: bool = True
 layout = html.Div(
     [
         dcc.Store(id="settings-section-store", data="globals"),
+        dcc.Store(id="settings-browse-dir"),
+        dcc.Store(id="settings-config-store"),
 
         # ── view-head ────────────────────────────────────────────────────
         html.Div(
@@ -84,6 +121,13 @@ layout = html.Div(
                 ),
                 html.Div(
                     [
+                        html.Button(
+                            [html.Span("⇋", className="glyph"), "Switch config"],
+                            id="settings-switch-config-btn",
+                            n_clicks=0,
+                            className="btn",
+                            title="Browse the server filesystem for a different config file",
+                        ),
                         html.Button(
                             [html.Span("↻", className="glyph"), "load()"],
                             id="settings-load-btn",
@@ -212,6 +256,71 @@ layout = html.Div(
             ],
             style={"display": "flex", "gap": "20px", "alignItems": "flex-start"},
         ),
+
+        # ── config-switch file browser modal ─────────────────────────────
+        html.Div(
+            [
+                html.Div(
+                    id="settings-config-backdrop",
+                    n_clicks=0,
+                    style={"position": "absolute", "inset": 0,
+                           "background": "rgba(0,0,0,0.55)"},
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Span("Switch config file",
+                                          style={"fontFamily": "var(--font-mono)",
+                                                 "fontSize": "13px", "fontWeight": "600",
+                                                 "color": "var(--ink)"}),
+                                html.Button("✕", id="settings-config-close",
+                                            n_clicks=0, className="btn",
+                                            style={"marginLeft": "auto"},
+                                            title="Close (or click outside)"),
+                            ],
+                            style={"display": "flex", "alignItems": "center",
+                                   "gap": "8px", "marginBottom": "10px"},
+                        ),
+                        html.Div(
+                            [
+                                dcc.Input(
+                                    id="settings-browse-input", type="text",
+                                    placeholder="/path/to/config/dir",
+                                    debounce=True,
+                                    style={"flex": "1", "fontFamily": "var(--font-mono)",
+                                           "fontSize": "12px", "padding": "4px 10px",
+                                           "background": "var(--bg)", "color": "var(--ink)",
+                                           "border": "1px solid var(--line)",
+                                           "borderRadius": "4px"},
+                                ),
+                                html.Button("Go", id="settings-browse-go",
+                                            n_clicks=0, className="btn",
+                                            title="Browse this directory"),
+                            ],
+                            style={"display": "flex", "gap": "6px", "marginBottom": "10px"},
+                        ),
+                        html.Div(
+                            id="settings-config-listing",
+                            style={"maxHeight": "50vh", "overflow": "auto",
+                                   "border": "1px solid var(--line)",
+                                   "borderRadius": "6px"},
+                        ),
+                        html.Div(id="settings-config-error",
+                                 style={"marginTop": "8px", "color": "var(--fail)",
+                                        "fontFamily": "var(--font-mono)",
+                                        "fontSize": "11px"}),
+                    ],
+                    style={"position": "relative", "zIndex": 1,
+                           "background": "var(--bg)", "border": "1px solid var(--line)",
+                           "borderRadius": "10px", "padding": "16px", "width": "560px",
+                           "maxWidth": "92vw", "maxHeight": "88vh", "overflow": "auto",
+                           "boxShadow": "0 12px 40px rgba(0,0,0,0.4)"},
+                ),
+            ],
+            id="settings-config-modal",
+            style=_MODAL_HIDDEN,
+        ),
     ],
     className="page",
 )
@@ -285,8 +394,9 @@ def _select_section(_clicks, current_section: str):
     Output("settings-json-pill", "children"),
     Input("settings-section-store", "data"),
     Input("settings-load-btn", "n_clicks"),
+    Input("settings-config-store", "data"),
 )
-def _populate_section(section: str, _load: int):
+def _populate_section(section: str, _load: int, _cfg: str):
     section = section or "globals"
     yuxin_ctx = current_app.config.get("YUXIN_MEA", {})
     config_path = yuxin_ctx.get("config_path")
@@ -498,3 +608,133 @@ def _save_any_form(_save_clicks, field_values, field_ids, active_section):
 def _id_match_for_save(output_spec, target_form_id: str) -> bool:
     id_ = output_spec.get("id", {})
     return isinstance(id_, dict) and id_.get("form") == target_form_id
+
+
+# ---------------------------------------------------------------------------
+# 6) Config-switch file browser
+# ---------------------------------------------------------------------------
+
+
+def _entry_row(entry: dict) -> html.Button:
+    is_dir = entry["kind"] == "dir"
+    glyph = "▸" if is_dir else "≡"
+    return html.Button(
+        [
+            html.Span(glyph, className="glyph",
+                      style={"marginRight": "8px",
+                             "color": "var(--ink-3)" if is_dir else "var(--ok)"}),
+            html.Span(entry["name"]),
+        ],
+        id={"type": "cfg-entry", "path": entry["path"], "kind": entry["kind"]},
+        n_clicks=0,
+        style={"display": "flex", "alignItems": "center", "width": "100%",
+               "textAlign": "left", "padding": "6px 12px", "border": "none",
+               "borderBottom": "1px solid var(--line-soft)", "background": "none",
+               "cursor": "pointer", "fontFamily": "var(--font-mono)",
+               "fontSize": "12px",
+               "color": "var(--ink-2)" if is_dir else "var(--ink)"},
+        title=entry["path"],
+    )
+
+
+@callback(
+    Output("settings-config-modal", "style"),
+    Output("settings-browse-dir", "data"),
+    Input("settings-switch-config-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _open_config_modal(_n):
+    """Open the browser, seeded at the current config file's directory."""
+    yuxin_ctx = current_app.config.get("YUXIN_MEA", {})
+    cp = yuxin_ctx.get("config_path")
+    start = str(Path(cp).parent) if cp else str(Path.cwd())
+    return _MODAL_SHOWN, start
+
+
+@callback(
+    Output("settings-config-listing", "children"),
+    Output("settings-browse-input", "value"),
+    Input("settings-browse-dir", "data"),
+    prevent_initial_call=True,
+)
+def _render_config_listing(dir_path: str):
+    if not dir_path:
+        return dash.no_update, dash.no_update
+    entries = _list_config_entries(dir_path)
+    rows = [_entry_row(e) for e in entries] or [
+        html.Div("(no sub-directories or .json files here)",
+                 style={"padding": "16px", "color": "var(--ink-3)",
+                        "fontFamily": "var(--font-mono)", "fontSize": "12px"})
+    ]
+    return rows, dir_path
+
+
+@callback(
+    Output("settings-browse-dir", "data", allow_duplicate=True),
+    Input("settings-browse-go", "n_clicks"),
+    State("settings-browse-input", "value"),
+    prevent_initial_call=True,
+)
+def _browse_go(_n, typed: str):
+    """Manual path box: jump to the typed directory (or a file's parent)."""
+    if not typed:
+        return dash.no_update
+    p = Path(typed)
+    return str(p if p.is_dir() else p.parent)
+
+
+@callback(
+    Output("settings-browse-dir", "data", allow_duplicate=True),
+    Output("settings-config-store", "data"),
+    Output("settings-config-modal", "style", allow_duplicate=True),
+    Output("settings-config-error", "children"),
+    Input({"type": "cfg-entry", "path": ALL, "kind": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def _on_config_entry(_clicks):
+    """A listing entry was clicked: a dir navigates, a .json file switches config.
+
+    Switching is compute-then-swap: build the whole new context first, and only
+    on success atomically reassign ``current_app.config["YUXIN_MEA"]`` (dict-key
+    assignment is atomic in CPython). A malformed/unreadable file leaves the old
+    context fully intact and surfaces the error in the modal — no half-swap.
+    """
+    nu = dash.no_update
+    trig = ctx.triggered[0] if ctx.triggered else None
+    tid = ctx.triggered_id
+    # Ignore the all-zero fire when the listing is (re)rendered.
+    if not trig or not trig.get("value") or not isinstance(tid, dict):
+        return nu, nu, nu, nu
+
+    if tid["kind"] == "dir":
+        return tid["path"], nu, nu, ""  # navigate into the directory
+
+    # A config file was chosen → switch.
+    from yuxin_mea.dashboard.app import resolve_context
+    from yuxin_mea.dashboard.cache import init_cache
+    path = Path(tid["path"])
+    try:
+        new_ctx = resolve_context(path)
+    except Exception as exc:  # noqa: BLE001 — surface to the user, don't swap
+        return nu, nu, nu, f"❌ Cannot load {path.name}: {exc}"
+
+    current_app.config["YUXIN_MEA"] = new_ctx  # atomic swap
+    try:  # repoint the Tier-2 cache at the new config's cache_root (best-effort)
+        init_cache(current_app._get_current_object(), new_ctx["cache_root"])
+    except Exception:  # noqa: BLE001 — a cache hiccup must not sink the switch
+        pass
+    return nu, str(path), _MODAL_HIDDEN, ""
+
+
+@callback(
+    Output("settings-config-modal", "style", allow_duplicate=True),
+    Input("settings-config-backdrop", "n_clicks"),
+    Input("settings-config-close", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _close_config_modal(_backdrop, _close):
+    """Close on an outside (backdrop) click or the ✕ button."""
+    trig = ctx.triggered[0] if ctx.triggered else None
+    if not trig or not trig.get("value"):
+        return dash.no_update
+    return _MODAL_HIDDEN

@@ -322,6 +322,58 @@ def test_filter_combines_facets():
 # ---------------------------------------------------------------------------
 
 
+def test_resolve_context_existing_and_missing():
+    from yuxin_mea.dashboard.app import resolve_context
+
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        cfg = tmp_path / "pipeline_config.json"
+        _write_minimal_config(cfg, tmp_path)
+
+        ctx = resolve_context(cfg)
+        assert ctx["config_exists"] is True
+        assert ctx["analysis_root"] == tmp_path
+        assert ctx["data_root"] == tmp_path / "raw"
+        # cache_root defaults to a local sibling of analysis_root.
+        assert ctx["cache_root"] == tmp_path.parent / "dashboard_cache"
+
+        missing = resolve_context(tmp_path / "nope.json")
+        assert missing["config_exists"] is False
+        assert missing["analysis_root"] is None
+        assert missing["data_root"] is None
+
+
+def test_resolve_context_raises_on_malformed():
+    from yuxin_mea.dashboard.app import resolve_context
+
+    with TemporaryDirectory() as tmp:
+        bad = Path(tmp) / "bad.json"
+        bad.write_text("{ this is not json ")
+        with pytest.raises(Exception):
+            resolve_context(bad)
+
+
+def test_list_config_entries_dirs_first_json_only():
+    from yuxin_mea.dashboard.pages.settings import _list_config_entries
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "sub_b").mkdir()
+        (root / "sub_a").mkdir()
+        (root / "a.json").write_text("{}")
+        (root / "b.json").write_text("{}")
+        (root / "notes.txt").write_text("ignore me")  # non-json excluded
+
+        entries = _list_config_entries(str(root))
+        names = [e["name"] for e in entries]
+        # ".." first, then dirs (name-sorted), then .json files (name-sorted).
+        assert names[0] == "../"
+        assert names[1:] == ["sub_a/", "sub_b/", "a.json", "b.json"]
+        assert "notes.txt" not in names
+        kinds = {e["name"]: e["kind"] for e in entries}
+        assert kinds["sub_a/"] == "dir" and kinds["a.json"] == "file"
+
+
 def test_plate_viewer_sort_groups_sample_then_run_id():
     from yuxin_mea.dashboard.pages.plate_viewer import _sort_recordings
 

@@ -46,15 +46,7 @@ def build_app(config_path: Path) -> Dash:
     `config_exists` on the stash distinguishes the two states so data
     pages can render a "no config yet" banner.
     """
-    config_path = Path(config_path)
-    cm = ConfigManager()
-    config_exists = config_path.exists()
-    if config_exists:
-        cm.load(config_path)
-    analysis_root = _resolve_optional_path(cm.get_global("analysis_root"))
-    data_root = _resolve_optional_path(cm.get_global("data_root"))
-    figure_root = _resolve_optional_path(cm.get_global("figure_root"))
-    cache_root = _resolve_cache_root(cm.get_global("cache_root"), analysis_root)
+    context = resolve_context(config_path)
 
     apply_default_theme()
 
@@ -66,7 +58,32 @@ def build_app(config_path: Path) -> Dash:
         suppress_callback_exceptions=True,
         index_string=_INDEX_STRING,
     )
-    app.server.config["YUXIN_MEA"] = {
+    app.server.config["YUXIN_MEA"] = context
+    # Tier 2: persistent FileSystemCache on local scratch (survives restarts).
+    init_cache(app.server, context["cache_root"])
+    app.layout = build_layout()
+    return app
+
+
+def resolve_context(config_path: Path) -> dict:
+    """Compute the ``YUXIN_MEA`` server-context dict for a config file.
+
+    Single source of truth for how a config path maps to resolved globals —
+    used both at boot (:func:`build_app`) and when the Settings page switches
+    to a different config file. Raises whatever ``ConfigManager.load`` raises
+    on a malformed/unreadable existing file, so the caller can catch it and
+    refuse the switch rather than swap in a half-built context.
+    """
+    config_path = Path(config_path)
+    cm = ConfigManager()
+    config_exists = config_path.exists()
+    if config_exists:
+        cm.load(config_path)
+    analysis_root = _resolve_optional_path(cm.get_global("analysis_root"))
+    data_root = _resolve_optional_path(cm.get_global("data_root"))
+    figure_root = _resolve_optional_path(cm.get_global("figure_root"))
+    cache_root = _resolve_cache_root(cm.get_global("cache_root"), analysis_root)
+    return {
         "config_path": config_path,
         "config_exists": config_exists,
         "analysis_root": analysis_root,
@@ -74,10 +91,6 @@ def build_app(config_path: Path) -> Dash:
         "figure_root": figure_root,
         "cache_root": cache_root,
     }
-    # Tier 2: persistent FileSystemCache on local scratch (survives restarts).
-    init_cache(app.server, cache_root)
-    app.layout = build_layout()
-    return app
 
 
 def _resolve_optional_path(value: object) -> Path | None:
