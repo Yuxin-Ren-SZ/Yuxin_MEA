@@ -318,6 +318,29 @@ def test_filter_combines_facets():
 
 
 # ---------------------------------------------------------------------------
+# Plate viewer: same-sample-together, run_id-ordered recording sort
+# ---------------------------------------------------------------------------
+
+
+def test_plate_viewer_sort_groups_sample_then_run_id():
+    from yuxin_mea.dashboard.pages.plate_viewer import _sort_recordings
+
+    # Deliberately scrambled input across samples, run_ids, and dates.
+    recs = [
+        {"sample_id": "S2", "run_id": "002", "date": "260105", "cache_key": "S2b"},
+        {"sample_id": "S1", "run_id": "010", "date": "260101", "cache_key": "S1-r10"},
+        {"sample_id": "S1", "run_id": "002", "date": "260109", "cache_key": "S1-r02"},
+        {"sample_id": "S2", "run_id": "001", "date": "260103", "cache_key": "S2a"},
+        # Same sample+run across two dates → date is the tiebreak.
+        {"sample_id": "S1", "run_id": "002", "date": "260101", "cache_key": "S1-r02-early"},
+    ]
+    order = [r["cache_key"] for r in _sort_recordings(recs)]
+    # S1 before S2; within S1 run_id 002 before 010 (leading-zero lexical); within
+    # the two run_id=002 rows the earlier date wins.
+    assert order == ["S1-r02-early", "S1-r02", "S1-r10", "S2a", "S2b"]
+
+
+# ---------------------------------------------------------------------------
 # filter_pipeline_df
 # ---------------------------------------------------------------------------
 
