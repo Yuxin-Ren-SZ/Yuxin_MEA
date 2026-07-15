@@ -293,6 +293,49 @@ class TestExperimentManager:
         assert entry.wells["well000"].metadata["groupname"] == "control"
         assert entry.wells["well001"].metadata["density"] == 15000.0
 
+    class MutableGroupExtractor:
+        """Extractor whose per-well groupname can be flipped between calls."""
+
+        def __init__(self, group: str):
+            self.group = group
+
+        def get(self, metadata_path: Path) -> RecordingMetadata:
+            return RecordingMetadata(
+                fields={},
+                wells=[
+                    WellMetadata(well_id="well000", fields={"groupname": self.group}),
+                    WellMetadata(well_id="well001", fields={"groupname": self.group}),
+                ],
+            )
+
+    def test_refresh_groupnames_rereads_and_is_idempotent(
+        self, temp_data_root, temp_analysis_dir
+    ):
+        """refresh_groupnames() overwrites cached groupname from raw metadata,
+        returns the count changed, and converges to 0 on a second pass."""
+        data_dir = (
+            temp_data_root / "SampleA" / "240415" / "PlateX" / "ScanType1" / "001"
+        )
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "data.raw.h5").write_bytes(b"test_data")
+
+        extractor = self.MutableGroupExtractor("control")
+        manager = DatasetManager(
+            temp_data_root, temp_analysis_dir, metadata_extractor=extractor,
+        )
+        key = manager.recordings[0].cache_key
+        assert manager.get_wells(key)["well000"].metadata["groupname"] == "control"
+
+        # Simulate the raw metadata changing on disk, then refresh.
+        extractor.group = "treatment"
+        n = manager.refresh_groupnames()
+        assert n == 2  # both wells updated
+        assert manager.get_wells(key)["well000"].metadata["groupname"] == "treatment"
+        assert manager.get_wells(key)["well001"].metadata["groupname"] == "treatment"
+
+        # Second pass is a no-op — cache already matches raw.
+        assert manager.refresh_groupnames() == 0
+
     def test_get_recording_by_equals(self, temp_data_root, temp_analysis_dir):
         """Test filtering recordings with == operator."""
         # Create multiple recordings

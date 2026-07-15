@@ -16,9 +16,23 @@ import dash
 from dash import ALL, Input, Output, State, callback, clientside_callback, dcc, html
 from flask import current_app
 
-from yuxin_mea.dashboard.components import no_config_banner
+from yuxin_mea.dashboard.components import (
+    build_filter_bar,
+    filter_id,
+    filter_kwargs,
+    iso_to_yymmdd,
+    no_config_banner,
+    page_bounds,
+    pager_bar,
+    pager_state,
+    yymmdd_to_iso,
+)
 from yuxin_mea.dashboard.context import load_pipeline_mgr
-from yuxin_mea.dashboard.data import load_pipeline_df
+from yuxin_mea.dashboard.data import (
+    filter_pipeline_df,
+    load_pipeline_df,
+    well_group_map,
+)
 from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
 from yuxin_mea.tasks import TASK_CLASSES
 
@@ -44,7 +58,7 @@ _STATUS_IDLE = "not_run"
 layout = html.Div(
     [
         dcc.Store(id="pipeline-selected-cell", data={}),
-        dcc.Store(id="pipeline-filter-store", data="all"),
+        dcc.Store(id="pipeline-page", data=0),
         dcc.Interval(id="pipeline-auto-refresh", interval=30_000, n_intervals=0),
 
         # ── view-head ────────────────────────────────────────────────────
@@ -66,18 +80,6 @@ layout = html.Div(
                 ),
                 html.Div(
                     [
-                        html.Div(
-                            [
-                                html.Button(
-                                    f,
-                                    id={"pipeline-filter-btn": f},
-                                    n_clicks=0,
-                                    className="active" if f == "all" else "",
-                                )
-                                for f in ("all", "incomplete", "running", "failing")
-                            ],
-                            className="toggle-group",
-                        ),
                         html.Button(
                             [html.Span("↻", className="glyph"), "refresh()"],
                             id="pipeline-refresh",
@@ -98,6 +100,9 @@ layout = html.Div(
         ),
 
         html.Div(id="pipeline-banner-slot"),
+
+        # ── filter bar (shared component) ────────────────────────────────
+        build_filter_bar("pipeline"),
 
         # ── DAG card ─────────────────────────────────────────────────────
         html.Div(
@@ -167,6 +172,7 @@ layout = html.Div(
                             ),
                             className="card-body flush",
                         ),
+                        pager_bar("pipeline"),
                     ],
                     className="card",
                     style={"flex": "1", "minWidth": "0"},
@@ -387,43 +393,6 @@ def _dag_node(idx: int, task_cls, counts: dict[str, int], selected_task: str | N
 
 
 # ---------------------------------------------------------------------------
-# Filter toggle: clientside — update button classes + store
-# ---------------------------------------------------------------------------
-
-clientside_callback(
-    """
-    function(clicks_all, clicks_incomplete, clicks_running, clicks_failing, current) {
-        var triggered = window.dash_clientside.callback_context.triggered;
-        if (!triggered || triggered.length === 0) { return [current, 'active', '', '', '']; }
-        var prop = triggered[0].prop_id;
-        var val = 'all';
-        if (prop.indexOf('"all"') >= 0)        val = 'all';
-        if (prop.indexOf('"incomplete"') >= 0) val = 'incomplete';
-        if (prop.indexOf('"running"') >= 0)    val = 'running';
-        if (prop.indexOf('"failing"') >= 0)    val = 'failing';
-        return [
-            val,
-            val === 'all'        ? 'active' : '',
-            val === 'incomplete' ? 'active' : '',
-            val === 'running'    ? 'active' : '',
-            val === 'failing'    ? 'active' : '',
-        ];
-    }
-    """,
-    Output("pipeline-filter-store", "data"),
-    Output({"pipeline-filter-btn": "all"}, "className"),
-    Output({"pipeline-filter-btn": "incomplete"}, "className"),
-    Output({"pipeline-filter-btn": "running"}, "className"),
-    Output({"pipeline-filter-btn": "failing"}, "className"),
-    Input({"pipeline-filter-btn": "all"}, "n_clicks"),
-    Input({"pipeline-filter-btn": "incomplete"}, "n_clicks"),
-    Input({"pipeline-filter-btn": "running"}, "n_clicks"),
-    Input({"pipeline-filter-btn": "failing"}, "n_clicks"),
-    State("pipeline-filter-store", "data"),
-)
-
-
-# ---------------------------------------------------------------------------
 # Cell selection → store
 # ---------------------------------------------------------------------------
 
@@ -450,28 +419,82 @@ clientside_callback(
 # Main refresh callback
 # ---------------------------------------------------------------------------
 
+# The date range picker is a single component; its start/end changes both report
+# the "…-filter-date" id, so pagination still resets on a date change.
+_PIPE_FILTER_FIELDS = ("sample", "scan-type", "date", "group", "status")
+_PIPE_FILTER_IDS = [filter_id("pipeline", f) for f in _PIPE_FILTER_FIELDS]
+
+
 @callback(
     Output("pipeline-banner-slot", "children"),
     Output("pipeline-subtitle", "children"),
     Output("pipeline-dag", "children"),
     Output("pipeline-matrix", "children"),
     Output("pipeline-matrix-title", "children"),
+    Output("pipeline-page-label", "children"),
+    Output("pipeline-page-prev", "disabled"),
+    Output("pipeline-page-next", "disabled"),
+    Output("pipeline-page", "data"),
+    Output(filter_id("pipeline", "sample"), "options"),
+    Output(filter_id("pipeline", "scan-type"), "options"),
+    Output(filter_id("pipeline", "date"), "min_date_allowed"),
+    Output(filter_id("pipeline", "date"), "max_date_allowed"),
+    Output(filter_id("pipeline", "group"), "options"),
     Input("pipeline-refresh", "n_clicks"),
     Input("pipeline-auto-refresh", "n_intervals"),
-    Input("pipeline-filter-store", "data"),
     Input("pipeline-selected-cell", "data"),
+    Input(filter_id("pipeline", "sample"), "value"),
+    Input(filter_id("pipeline", "scan-type"), "value"),
+    Input(filter_id("pipeline", "date"), "start_date"),
+    Input(filter_id("pipeline", "date"), "end_date"),
+    Input(filter_id("pipeline", "group"), "value"),
+    Input(filter_id("pipeline", "status"), "value"),
+    Input("pipeline-page-prev", "n_clicks"),
+    Input("pipeline-page-next", "n_clicks"),
+    State("pipeline-page", "data"),
 )
-def _refresh(_n: int, _intervals: int, filter_val: str, selected_cell: dict):
+def _refresh(
+    _n: int,
+    _intervals: int,
+    selected_cell: dict,
+    f_sample,
+    f_scan_type,
+    f_date_from,
+    f_date_to,
+    f_group,
+    f_status,
+    _prev,
+    _next,
+    page,
+):
+    empty_opts: list[dict] = []
     ctx_app = current_app.config["YUXIN_MEA"]
     banner = None if ctx_app.get("config_exists") else no_config_banner()
     analysis_root = ctx_app.get("analysis_root")
 
     if analysis_root is None:
-        return banner, "analysis_root not set", [], [], "status matrix"
+        return (
+            banner, "analysis_root not set", [], [], "status matrix", "", True, True, 0,
+            empty_opts, empty_opts, None, None, empty_opts,
+        )
 
     pipe_df, task_names = load_pipeline_df(Path(analysis_root))
+    group_map = well_group_map(Path(analysis_root))
     n_entries = len(pipe_df)
     subtitle = f"{len(task_names)}-task DAG · {n_entries} pipeline entries · cache: pipeline_cache.json"
+
+    # Filter option lists — sample/date/scan derived from recording_key; groups
+    # from the well→group map.
+    if not pipe_df.empty:
+        rk_parts = pipe_df["recording_key"].str.split("/", expand=True)
+        sample_opts = sorted(rk_parts[0].dropna().unique())
+        date_opts = sorted(rk_parts[1].dropna().unique())
+        scan_opts = sorted(rk_parts[3].dropna().unique())
+    else:
+        sample_opts, date_opts, scan_opts = [], [], []
+    date_min = yymmdd_to_iso(date_opts[0]) if date_opts else None
+    date_max = yymmdd_to_iso(date_opts[-1]) if date_opts else None
+    group_opts = sorted(set(group_map.values()))
 
     # Per-task counts
     counts: dict[str, dict[str, int]] = {
@@ -497,22 +520,31 @@ def _refresh(_n: int, _intervals: int, filter_val: str, selected_cell: dict):
             if tc.task_name in next_deps:
                 dag_items.append(html.Span("→", className="dag-arrow"))
 
-    # Filter rows
-    filter_val = filter_val or "all"
-    if not pipe_df.empty and task_names:
-        if filter_val == "incomplete":
-            mask = pipe_df[task_names].apply(lambda r: any(v != _STATUS_OK for v in r), axis=1)
-            filtered = pipe_df[mask]
-        elif filter_val == "running":
-            mask = pipe_df[task_names].apply(lambda r: any(v == _STATUS_RUN for v in r), axis=1)
-            filtered = pipe_df[mask]
-        elif filter_val == "failing":
-            mask = pipe_df[task_names].apply(lambda r: any(v == _STATUS_FAIL for v in r), axis=1)
-            filtered = pipe_df[mask]
-        else:
-            filtered = pipe_df
-    else:
-        filtered = pipe_df
+    # Filter rows via the shared pure filter.
+    kwargs = filter_kwargs(
+        {
+            "sample": f_sample,
+            "scan-type": f_scan_type,
+            "date-from": iso_to_yymmdd(f_date_from),
+            "date-to": iso_to_yymmdd(f_date_to),
+            "group": f_group,
+            "status": f_status,
+        }
+    )
+    filtered_all = filter_pipeline_df(pipe_df, group_map=group_map, **kwargs)
+
+    # Page index: prev/next step it; a filter change resets to 0. Cell-select,
+    # refresh, and the 30 s interval keep the current page.
+    triggered = dash.ctx.triggered_id
+    if triggered == "pipeline-page-prev":
+        page = (page or 0) - 1
+    elif triggered == "pipeline-page-next":
+        page = (page or 0) + 1
+    elif triggered in _PIPE_FILTER_IDS:
+        page = 0
+    start, end, n_pages, page = page_bounds(len(filtered_all), page or 0)
+    filtered = filtered_all.iloc[start:end]
+    page_label, prev_dis, next_dis = pager_state(page, n_pages, len(filtered_all))
 
     # Build matrix
     sel_pk = (selected_cell or {}).get("pipeline_key", "")
@@ -583,10 +615,27 @@ def _refresh(_n: int, _intervals: int, filter_val: str, selected_cell: dict):
             )
         ]
 
-    matrix_title = f"status matrix · {len(filtered)} entries × {len(task_cols)} tasks"
+    matrix_title = (
+        f"status matrix · {len(filtered_all)} entries × {len(task_cols)} tasks"
+    )
     matrix = [header, html.Tbody(rows)]
 
-    return banner, subtitle, dag_items, matrix, matrix_title
+    return (
+        banner,
+        subtitle,
+        dag_items,
+        matrix,
+        matrix_title,
+        page_label,
+        prev_dis,
+        next_dis,
+        page,
+        [{"label": s, "value": s} for s in sample_opts],
+        [{"label": s, "value": s} for s in scan_opts],
+        date_min,
+        date_max,
+        [{"label": g, "value": g} for g in group_opts],
+    )
 
 
 # ---------------------------------------------------------------------------

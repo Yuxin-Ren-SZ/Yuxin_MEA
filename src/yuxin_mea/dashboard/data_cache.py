@@ -19,7 +19,10 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
 
-from yuxin_mea.analysis.plate_raster_synchrony import WellRecord, load_plate_data
+# yuxin_mea.analysis.plate_raster_synchrony pulls in torch/spikeinterface (heavy);
+# imported lazily inside load_plate_data_cached so importing this module (and thus
+# the plate-viewer page) doesn't drag in the ML stack. `WellRecord` is used only
+# in annotations, kept lazy by `from __future__ import annotations`.
 from yuxin_mea.dashboard.cache import cache_get, cache_set, make_key
 
 # Bounded LRU: a session views only a handful of recordings, but many display-
@@ -99,6 +102,8 @@ def load_plate_data_cached(
     cached records instantly (no NAS touch). Falls back to the uncached loader
     when no manifest is available.
     """
+    from yuxin_mea.analysis.plate_raster_synchrony import load_plate_data
+
     have_manifest = bool(burst_well_dirs) or bool(curation_well_dirs)
     if not have_manifest:
         # Legacy path: without exact dirs we'd have to glob to build a key, which

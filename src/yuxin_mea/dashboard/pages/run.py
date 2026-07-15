@@ -15,9 +15,20 @@ import dash
 from dash import Input, Output, callback, dcc, html
 from flask import current_app
 
-from yuxin_mea.dashboard.components import no_config_banner
+from yuxin_mea.dashboard.components import (
+    build_filter_bar,
+    filter_id,
+    filter_kwargs,
+    iso_to_yymmdd,
+    no_config_banner,
+    yymmdd_to_iso,
+)
 from yuxin_mea.dashboard.context import load_pipeline_mgr
-from yuxin_mea.dashboard.data import load_pipeline_df, load_recordings_df
+from yuxin_mea.dashboard.data import (
+    filter_recordings,
+    load_pipeline_df,
+    load_recordings_detail,
+)
 from yuxin_mea.tasks import TASK_CLASSES
 
 
@@ -62,6 +73,9 @@ layout = html.Div(
             className="view-head",
         ),
         html.Div(id="run-banner-slot"),
+        # Filters narrow the Recordings dropdown below (keeps the built command
+        # sane — you still pick explicit keys from the filtered set).
+        build_filter_bar("run"),
         html.Div(
             [
                 html.Div(
@@ -227,20 +241,58 @@ layout = html.Div(
 @callback(
     Output("run-banner-slot", "children"),
     Output("run-recordings", "options"),
-    Input("run-tasks", "id"),  # fires once on initial render
+    Output(filter_id("run", "sample"), "options"),
+    Output(filter_id("run", "scan-type"), "options"),
+    Output(filter_id("run", "date"), "min_date_allowed"),
+    Output(filter_id("run", "date"), "max_date_allowed"),
+    Output(filter_id("run", "group"), "options"),
+    Input(filter_id("run", "sample"), "value"),
+    Input(filter_id("run", "scan-type"), "value"),
+    Input(filter_id("run", "date"), "start_date"),
+    Input(filter_id("run", "date"), "end_date"),
+    Input(filter_id("run", "group"), "value"),
+    Input(filter_id("run", "status"), "value"),
 )
-def _populate_recordings(_id: str):
+def _populate_recordings(f_sample, f_scan_type, f_date_from, f_date_to, f_group, f_status):
     ctx = current_app.config["YUXIN_MEA"]
     banner = None if ctx.get("config_exists") else no_config_banner()
-    analysis_root = ctx["analysis_root"]
+    analysis_root = ctx.get("analysis_root")
+    empty: list[dict] = []
     if analysis_root is None:
-        return banner, []
-    df = load_recordings_df(Path(analysis_root))
-    options = [
-        {"label": k, "value": k}
-        for k in df.get("cache_key", []).tolist()
-    ]
-    return banner, options
+        return banner, empty, empty, empty, None, None, empty
+
+    recordings, well_pipeline_status = load_recordings_detail(Path(analysis_root))
+
+    # Filter option universes (all recordings, unaffected by current selection).
+    sample_opts = sorted({r["sample_id"] for r in recordings})
+    scan_opts = sorted({r["scan_type"] for r in recordings})
+    date_opts = sorted({r["date"] for r in recordings})
+    date_min = yymmdd_to_iso(date_opts[0]) if date_opts else None
+    date_max = yymmdd_to_iso(date_opts[-1]) if date_opts else None
+    group_opts = sorted({g for r in recordings for g in r.get("groups", [])})
+
+    kwargs = filter_kwargs(
+        {
+            "sample": f_sample,
+            "scan-type": f_scan_type,
+            "date-from": iso_to_yymmdd(f_date_from),
+            "date-to": iso_to_yymmdd(f_date_to),
+            "group": f_group,
+            "status": f_status,
+        }
+    )
+    filtered = filter_recordings(recordings, well_pipeline_status, **kwargs)
+    rec_options = [{"label": r["cache_key"], "value": r["cache_key"]} for r in filtered]
+
+    return (
+        banner,
+        rec_options,
+        [{"label": s, "value": s} for s in sample_opts],
+        [{"label": s, "value": s} for s in scan_opts],
+        date_min,
+        date_max,
+        [{"label": g, "value": g} for g in group_opts],
+    )
 
 
 # ---------------------------------------------------------------------------

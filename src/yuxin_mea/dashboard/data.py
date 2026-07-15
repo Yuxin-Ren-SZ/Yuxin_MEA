@@ -87,6 +87,16 @@ def load_recordings_detail(
             for rec_name, well_ids in e.h5_recordings.items()
             for well_id in well_ids
         ]
+        # Distinct biological groups across this recording's wells (a recording
+        # spans many wells that may belong to different groups). Read from the
+        # per-well `groupname` populated by the metadata extractor at scan time.
+        groups = sorted(
+            {
+                g
+                for w in e.wells.values()
+                if (g := w.metadata.get("groupname"))
+            }
+        )
         recordings.append(
             {
                 "sample_id": e.sample_id,
@@ -99,6 +109,7 @@ def load_recordings_detail(
                 "file_size_mb": e.file_size // (1024 * 1024),
                 "n_wells": len(wells),
                 "wells": wells,
+                "groups": groups,
             }
         )
     recordings.sort(key=lambda r: (r["sample_id"], r["date"], r["run_id"]))
@@ -113,20 +124,73 @@ def load_recordings_detail(
     return recordings, well_pipeline_status
 
 
+def well_group_map(analysis_root: Path) -> dict[str, str]:
+    """Map each pipeline_key ``"{cache_key}/{rec_name}/{well_id}"`` → groupname.
+
+    Reads the same `experiment_cache.json` as the recordings loaders and keys
+    the result to match the Pipeline page's `pipeline_key`
+    (``f"{recording_key}/{well_id}"`` where `well_id` already carries the
+    `rec_name/` prefix). Wells without a cached groupname are omitted.
+    """
+    store = JsonCacheStore(analysis_root)
+    entries = store.load()
+    out: dict[str, str] = {}
+    for e in entries.values():
+        for rec_name, well_ids in e.h5_recordings.items():
+            for wid in well_ids:
+                we = e.wells.get(wid)
+                if we is None:
+                    continue
+                group = we.metadata.get("groupname")
+                if group is not None:
+                    out[f"{e.cache_key}/{rec_name}/{wid}"] = group
+    return out
+
+
 def filter_recordings(
     recordings: list[dict],
     well_pipeline_status: dict[str, dict],
     *,
+    sample_ids: list[str] | None = None,
     scan_types: list[str] | None = None,
     dates: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    groups: list[str] | None = None,
+    statuses: list[str] | None = None,
     queue_status: str = "all",
 ) -> list[dict]:
-    """Filter recordings for the Datasets page.  Pure function, no Dash deps."""
+    """Filter recordings for the Datasets page.  Pure function, no Dash deps.
+
+    Recording-level semantics: a recording matches `groups`/`statuses` when
+    *any* of its wells qualifies (a recording spans many wells that may belong
+    to different groups and be at different pipeline stages). Dates are 6-digit
+    ``"YYMMDD"`` strings, so `date_from`/`date_to` compare lexically.
+    """
     out = recordings
+    if sample_ids:
+        out = [r for r in out if r["sample_id"] in sample_ids]
     if scan_types:
         out = [r for r in out if r["scan_type"] in scan_types]
     if dates:
         out = [r for r in out if r["date"] in dates]
+    if date_from:
+        out = [r for r in out if r["date"] >= date_from]
+    if date_to:
+        out = [r for r in out if r["date"] <= date_to]
+    if groups:
+        group_set = set(groups)
+        out = [r for r in out if group_set & set(r.get("groups", []))]
+    if statuses:
+        status_set = set(statuses)
+        out = [
+            r for r in out
+            if any(
+                status_set & set(tasks.values())
+                for key, tasks in well_pipeline_status.items()
+                if key.startswith(r["cache_key"] + "/")
+            )
+        ]
     if queue_status == "queued":
         out = [r for r in out if any(
             k.startswith(r["cache_key"] + "/") for k in well_pipeline_status
@@ -136,6 +200,60 @@ def filter_recordings(
             k.startswith(r["cache_key"] + "/") for k in well_pipeline_status
         )]
     return out
+
+
+def filter_pipeline_df(
+    df: pd.DataFrame,
+    *,
+    sample_ids: list[str] | None = None,
+    scan_types: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    groups: list[str] | None = None,
+    statuses: list[str] | None = None,
+    group_map: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Filter the pipeline matrix DataFrame from `load_pipeline_df`.
+
+    `recording_key` is ``sample_id/date/plate_id/scan_type/run_id`` so the
+    sample/date/scan-type facets are derived by splitting it — no extra data
+    needed. Group is joined per-row via `group_map` keyed by
+    ``f"{recording_key}/{well_id}"``. Status matches when *any* task cell on the
+    row is in `statuses`. Returns the filtered DataFrame (unchanged if no
+    filters are active).
+    """
+    if df.empty:
+        return df
+    task_cols = [c for c in df.columns if c not in ("recording_key", "well_id")]
+    keep = pd.Series(True, index=df.index)
+
+    if sample_ids or scan_types or date_from or date_to:
+        parts = df["recording_key"].str.split("/", expand=True)
+        # parts: 0=sample_id, 1=date, 2=plate_id, 3=scan_type, 4=run_id
+        if sample_ids:
+            keep &= parts[0].isin(sample_ids)
+        if scan_types:
+            keep &= parts[3].isin(scan_types)
+        if date_from:
+            keep &= parts[1] >= date_from
+        if date_to:
+            keep &= parts[1] <= date_to
+
+    if groups:
+        gmap = group_map or {}
+        group_set = set(groups)
+        row_group = df.apply(
+            lambda r: gmap.get(f"{r['recording_key']}/{r['well_id']}"), axis=1
+        )
+        keep &= row_group.isin(group_set)
+
+    if statuses and task_cols:
+        status_set = set(statuses)
+        keep &= df[task_cols].apply(
+            lambda row: bool(status_set & set(row.values)), axis=1
+        )
+
+    return df[keep]
 
 
 def load_pipeline_df(analysis_root: Path) -> tuple[pd.DataFrame, list[str]]:
