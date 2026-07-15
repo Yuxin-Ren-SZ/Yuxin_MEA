@@ -296,10 +296,12 @@ are on disk now?"** — so a result can always be trusted or flagged as stale. I
   This is the *current* raw state as last scanned.
 - **Pipeline result** — at task completion the runner stamps `TaskRecord.provenance`
   (`{"h5", "metadata", "config_hash", "config_file", "stamped_at"}`) **and** writes a durable
-  `provenance.json` **sidecar** in the task's output dir (`provenance/sidecar.py`). The sidecar
-  travels with the artifact and survives a pipeline-cache reset/rebuild/crash-recovery — the
-  cache copy is just the fast-access mirror. Both are written parent-side / worker-side around
-  `pipeline/manager.py:update_status` and `cli/run.py`.
+  **`yuxin_provenance.json`** sidecar in the task's output dir (`provenance/sidecar.py`). The
+  sidecar travels with the artifact and survives a pipeline-cache reset/rebuild/crash-recovery —
+  the cache copy is just the fast-access mirror. Both are written parent-side / worker-side around
+  `pipeline/manager.py:update_status` and `cli/run.py`. (Filename is *not* `provenance.json` —
+  spikeinterface already writes that in sorter/extractor dirs; a `_schema` marker guards against
+  any foreign file being misread as a stamp.)
 
 ### Cost — why fingerprinting is tiered, not automatic
 
@@ -330,8 +332,14 @@ Compares every COMPLETE task's stamp against the current raw fingerprint + confi
 | `UNKNOWN` | no stamp (output predates provenance) | unverifiable, **not** a mismatch |
 
 Exit `1` on any *computational* drift (RAW/CONFIG); `--full-hash` re-fingerprints from disk
-instead of trusting the cached fingerprint. Read-only — the verifier never writes a cache.
-`params_hash` here is the first real caller of the previously-dead `is_task_complete` comparison.
+instead of trusting the cached fingerprint; `--mark-stale` resets the RAW/CONFIG-drifted tasks
+(and their dependents, via `PipelineManager.refresh`) to `NOT_RUN` so the next run recomputes them
+(metadata drift is left alone — labels only). Read-only unless `--mark-stale`. `params_hash` here
+is the first real caller of the previously-dead `is_task_complete` comparison.
+
+**Dashboard** surfaces the same status as a badge (`dashboard/components/badges.py`) on the
+Recordings detail card and the plate-viewer modal, via `dashboard.data.recording_provenance`
+(cache-only — no NAS re-hash, no NAS sidecar reads, so it's cheap enough to compute on render).
 
 ### Run flags (`yuxin-mea-run`)
 
@@ -344,10 +352,6 @@ instead of trusting the cached fingerprint. Read-only — the verifier never wri
 
 ## Possible follow-ups (not implemented; listed for the record)
 
-- **Stage 2 (act on drift):** `check_cache.py --mark-stale` to reset drifted tasks (+ dependents)
-  via the existing `PipelineManager.refresh`/`_cascade_tasks`; dashboard provenance **badges**
-  (OK/raw-changed/metadata-changed/unknown) and a plate-viewer provenance line, reusing
-  `provenance.verify`.
 - Wire `is_task_complete` (config-snapshot compare) into `get_next_task` eligibility so a config
   edit auto-invalidates the affected task (and, via `_cascade_tasks`, its dependents) — making
   the notebook claims true. (Provenance now *detects* this; wiring it would *act* on it.)
