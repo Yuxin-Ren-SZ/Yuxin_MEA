@@ -67,6 +67,14 @@ class RecordingEntry:
     # Authoritative source for which (rec_name, well_id) pairs exist in the file.
     h5_recordings: dict[str, list[str]] = field(default_factory=dict)
 
+    # Reproducibility fingerprint of the raw inputs, populated at scan time:
+    #   {"h5": {method, file_size, mtime_ns, sha256, ...},
+    #    "metadata": {size, mtime_ns, sha256} | None}
+    # Empty dict = not yet fingerprinted (older caches / fingerprinting disabled),
+    # which downstream verification treats as UNKNOWN rather than a mismatch.
+    # Mutated in place (frozen blocks attribute reassignment, not dict mutation).
+    raw_fingerprint: dict[str, Any] = field(default_factory=dict)
+
     @property
     def cache_key(self) -> str:
         return f"{self.sample_id}/{self.date}/{self.plate_id}/{self.scan_type}/{self.run_id}"

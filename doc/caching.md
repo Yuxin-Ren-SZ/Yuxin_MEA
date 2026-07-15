@@ -212,11 +212,12 @@ What each layer does after a given change. **auto** = happens with no user actio
 
 | Change on disk | Dataset cache (`experiment_cache.json`) | Pipeline status (`pipeline_cache.json`) | Dashboard |
 |---|---|---|---|
-| **Raw `data.raw.h5` overwritten in place** (same path/key) | **manual** — *Scan disk* (`refresh()`); startup diff won't notice (`manager.py:297-303`) | **manual** — *refresh(task)* / re-queue; status stays COMPLETE (`manager.py:135`) | listings **auto** after Scan disk; plate data **auto** only after tasks re-run & rewrite outputs |
+| **Raw `data.raw.h5` overwritten in place** (same path/key) | **manual** — *Scan disk* (`refresh()`); startup diff won't notice (`manager.py:297-303`). *Detectable:* `check_cache.py --verify-provenance` → `RAW-CHANGED` | **manual** — *refresh(task)* / re-queue; status stays COMPLETE (`manager.py:135`) | listings **auto** after Scan disk; plate data **auto** only after tasks re-run & rewrite outputs |
 | **New run added inside an existing Date dir** | **manual** — *Scan disk*; startup diffs only Date dirs (`manager.py:297-303`) | **manual** — queue the new well(s) (`add_well`) | **auto** once the well is in the caches |
 | **Brand-new Date directory** | **auto** — next `DatasetManager` build deep-scans it (`manager.py:303-314`) | **manual** — queue its wells | **auto** (listings are always fresh) |
 | **A task/well re-run rewrites its output** | N/A | **auto** — the runner wrote the new status | plate data **auto** — signature busts on next Load (`data_cache.py:53-75`) |
-| **Config param edited** (Settings Save or file edit) | N/A | **manual** — *refresh(task)*; `is_task_complete` is never called (`manager.py:210-225`) | N/A (config isn't cached) |
+| **Config param edited** (Settings Save or file edit) | N/A | **manual** — *refresh(task)*; `is_task_complete` is never called (`manager.py:210-225`). *Detectable:* `--verify-provenance` → `CONFIG-CHANGED` | N/A (config isn't cached) |
+| **`mxassay.metadata` overwritten** (groupname/labels) | **manual** — *Refresh groups* (`refresh_groupnames`); content-hashed every scan | N/A — no task reads metadata (labels only) | listings **auto** after refresh. *Detectable:* `--verify-provenance` → `METADATA-CHANGED` |
 
 ---
 
@@ -262,12 +263,95 @@ discrepancy to be aware of, flagged here — not resolved.
 
 ---
 
+## Provenance & reproducibility (fingerprints + stamps + verify)
+
+The caching layers above answer "is what I'm looking at current?". Provenance answers the
+stronger question: **"was this pipeline output produced from the same raw data + config that
+are on disk now?"** — so a result can always be trusted or flagged as stale. Implemented in
+`src/yuxin_mea/provenance/`.
+
+### What is fingerprinted
+
+- **`data.raw.h5`** — a **structure-aware, size-partitioned** sha256 (`fingerprint.py:h5_fingerprint`).
+  A MaxWell recording is 30–100 GB, almost all of it the raw voltage array
+  `recordings/<rec>/<well>/groups/routed/raw` `(n_ch, n_frames) uint16`. Hashing the whole file
+  over the NAS is prohibitive, so datasets are split by size (default 16 MB):
+  - **small datasets are hashed in full** — the analysis-critical part
+    (`settings/{gain,lsb,hpf,sampling,spike_threshold,mapping}`, `channels`, `spikes`, `events`,
+    top-level `version`/… and every attr), so a gain/mapping/sampling change is caught exactly;
+  - **large datasets are sampled** — fixed windows at deterministic *fractional* offsets, with
+    shape/dtype folded in (so a change in recording length or electrode count changes the hash).
+  The `method` id (`h5struct-v1`) is stored so the method is itself versioned. `--full-hash`
+  streams the large datasets in full (`h5full-v1`). Everything streams in fixed blocks — constant
+  memory regardless of file size.
+- **`mxassay.metadata`** — always a full sha256 (`fingerprint.py:file_hash`); tiny and frequently
+  overwritten.
+- **config** — sha256 of the resolved task params (`fingerprint.py:params_hash`), i.e. exactly
+  what the task ran with (matches `TaskRecord.config`).
+
+### Where the record lives (durable + fast)
+
+- **Dataset cache** — `RecordingEntry.raw_fingerprint = {"h5": …, "metadata": …}` in
+  `experiment_cache.json`, computed at scan time (`dataset/manager.py:_populate_fingerprint`).
+  This is the *current* raw state as last scanned.
+- **Pipeline result** — at task completion the runner stamps `TaskRecord.provenance`
+  (`{"h5", "metadata", "config_hash", "config_file", "stamped_at"}`) **and** writes a durable
+  `provenance.json` **sidecar** in the task's output dir (`provenance/sidecar.py`). The sidecar
+  travels with the artifact and survives a pipeline-cache reset/rebuild/crash-recovery — the
+  cache copy is just the fast-access mirror. Both are written parent-side / worker-side around
+  `pipeline/manager.py:update_status` and `cli/run.py`.
+
+### Cost — why fingerprinting is tiered, not automatic
+
+Content-hashing a 30–100 GB h5 over the NAS is I/O-bound and can stall under contention (a test
+on a real 53 GB file did not complete within 10 min under load). So:
+
+- The **scan default is `fingerprint_mode="stat"`** — cheap size/mtime only (the h5 stat is
+  already on the entry); `mxassay.metadata` is always content-hashed (tiny).
+- **Content hashing is opt-in**: `DatasetManager.compute_content_fingerprints()` /
+  `check_cache.py --verify-provenance --full-hash` / `yuxin-mea-run --full-hash`. Content hashes
+  are **reused when the h5 stat is unchanged** (stat-drift trigger), so they are computed at most
+  once per file. Run the content pass off-peak.
+- At run time the stamp copies whatever fingerprint the entry has (content if a pass ran, else
+  stat) and additionally re-`stat`s the file actually read; a drift from the scanned stat is
+  flagged on the stamp (`drift_from_scan`) and logged (warn, non-blocking).
+
+### Detecting drift — `check_cache.py --verify-provenance`
+
+Compares every COMPLETE task's stamp against the current raw fingerprint + config
+(`provenance/verify.py:verify_provenance`). Per task it reports:
+
+| Status | Meaning | Remedy |
+|---|---|---|
+| `OK` | stamp matches current raw + config | — |
+| `RAW-CHANGED` | the h5 differs from what produced the output | re-run analysis |
+| `CONFIG-CHANGED` | the task's params changed since it ran | re-run analysis |
+| `METADATA-CHANGED` | `mxassay.metadata` changed | labels only — `refresh_groupnames`, no re-run |
+| `UNKNOWN` | no stamp (output predates provenance) | unverifiable, **not** a mismatch |
+
+Exit `1` on any *computational* drift (RAW/CONFIG); `--full-hash` re-fingerprints from disk
+instead of trusting the cached fingerprint. Read-only — the verifier never writes a cache.
+`params_hash` here is the first real caller of the previously-dead `is_task_complete` comparison.
+
+### Run flags (`yuxin-mea-run`)
+
+- `--rescan` — force a full dataset rescan (fresh fingerprints) before draining. Off by default
+  (NAS-costly).
+- `--full-hash` — content-hash each recording's raw h5 before draining so stamps carry a content
+  fingerprint instead of just stat. Off by default; reused when the h5 stat is unchanged.
+
+---
+
 ## Possible follow-ups (not implemented; listed for the record)
 
+- **Stage 2 (act on drift):** `check_cache.py --mark-stale` to reset drifted tasks (+ dependents)
+  via the existing `PipelineManager.refresh`/`_cascade_tasks`; dashboard provenance **badges**
+  (OK/raw-changed/metadata-changed/unknown) and a plate-viewer provenance line, reusing
+  `provenance.verify`.
+- Wire `is_task_complete` (config-snapshot compare) into `get_next_task` eligibility so a config
+  edit auto-invalidates the affected task (and, via `_cascade_tasks`, its dependents) — making
+  the notebook claims true. (Provenance now *detects* this; wiring it would *act* on it.)
 - Compare the stored `mtime`/`file_size` on `RecordingEntry` during the startup scan to detect
   in-place raw-file changes instead of only diffing Date directories.
-- Wire `is_task_complete` (config-snapshot compare) into `get_next_task` eligibility so a config
-  edit auto-invalidates the affected task (and, via the existing `_cascade_tasks` reverse-dep
-  walk, its dependents) — making the notebook claims true.
 - Have `_initialise` optionally reconcile deletions (drop entries whose raw file is gone) rather
   than only warning.

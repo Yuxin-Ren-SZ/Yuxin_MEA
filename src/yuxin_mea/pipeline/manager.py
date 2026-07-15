@@ -170,12 +170,14 @@ class PipelineManager:
         status:      str,
         output_path: Path | None = None,
         error:       str | None  = None,
+        provenance:  dict | None = None,
     ) -> None:
         """Update the status of a task identified by a WorkItem.
 
         status must be one of: "running", "complete", "failed".
         output_path is stored when status == "complete".
         error is stored when status == "failed".
+        provenance (the raw+config fingerprint stamp) is stored on COMPLETE.
         """
         if status not in _VALID_UPDATE_STATUSES:
             raise ValueError(
@@ -192,6 +194,8 @@ class PipelineManager:
         record.output_path  = Path(output_path) if (
             status == TaskStatus.COMPLETE and output_path is not None
         ) else record.output_path
+        if status == TaskStatus.COMPLETE and provenance is not None:
+            record.provenance = provenance
         if status == TaskStatus.RUNNING:
             record.config = self._config_provider.get_config(
                 work_item.task_name, work_item.recording_key, work_item.well_id

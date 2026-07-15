@@ -60,12 +60,50 @@ def _disk_keys(data_root: Path) -> set[str]:
     return keys
 
 
+def _print_verify(cm, data_root: Path, analysis_root: Path, *,
+                  full_hash: bool, network_only: bool) -> int:
+    """Run + print the provenance verification. Returns 1 on computational drift."""
+    from yuxin_mea.provenance.verify import verify_provenance
+
+    print("\n== Provenance verification "
+          f"({'full content re-hash' if full_hash else 'against cached fingerprints'}) ==",
+          flush=True)
+    rep = verify_provenance(cm, data_root, analysis_root,
+                            full_hash=full_hash, network_only=network_only)
+    c = rep.counts
+    print(f"OK              : {c['OK']}")
+    print(f"RAW-CHANGED     : {c['RAW-CHANGED']}   (re-run analysis)")
+    print(f"CONFIG-CHANGED  : {c['CONFIG-CHANGED']}   (re-run analysis)")
+    print(f"METADATA-CHANGED: {c['METADATA-CHANGED']}   (labels only; refresh groups)")
+    print(f"UNKNOWN         : {c['UNKNOWN']}   (no stamp — predates provenance)")
+    if rep.errors:
+        print("\n-- fingerprint errors --")
+        for e in rep.errors[:50]:
+            print(f"  ! {e}")
+    if rep.details:
+        print("\n-- drift detail --")
+        for labels, where in rep.details[:200]:
+            print(f"  {labels:40s} {where}")
+        if len(rep.details) > 200:
+            print(f"  … and {len(rep.details) - 200} more")
+    print("\nProvenance: computational drift found." if rep.computational_drift
+          else "\nProvenance: no computational drift.")
+    return 1 if rep.computational_drift else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Read-only disk-vs-cache correctness check.")
     p.add_argument("--config", required=True, type=Path,
                    help="pipeline_config.json (for data_root + analysis_root).")
     p.add_argument("--network-only", action="store_true",
                    help="Only compare '/Network/' recordings.")
+    p.add_argument("--verify-provenance", action="store_true",
+                   help="Also verify each COMPLETE task's provenance stamp against "
+                        "the current raw fingerprint + config (reproducibility check).")
+    p.add_argument("--full-hash", action="store_true",
+                   help="With --verify-provenance, re-fingerprint each h5 from disk "
+                        "(content sha256) instead of comparing cached fingerprints. "
+                        "NAS-costly.")
     args = p.parse_args(argv)
 
     if not args.config.exists():
@@ -105,11 +143,19 @@ def main(argv: list[str] | None = None) -> int:
         for k in stale:
             print(f"  {k}")
 
-    if missing:
+    key_rc = 1 if missing else 0
+    if not missing:
+        print("\nCache in sync.")
+    else:
         print("\nCache OUT OF SYNC — disk has recordings not in cache.")
-        return 1
-    print("\nCache in sync.")
-    return 0
+
+    if args.verify_provenance:
+        prov_rc = _print_verify(
+            cm, data_root, analysis_root,
+            full_hash=args.full_hash, network_only=args.network_only,
+        )
+        return max(key_rc, prov_rc)
+    return key_rc
 
 
 if __name__ == "__main__":

@@ -76,6 +76,7 @@ def _recording_entry_decoder(d: dict) -> RecordingEntry | WellEntry | dict:
             metadata=d["metadata"],
             wells=d["wells"],
             h5_recordings=d.get("h5_recordings", {}),
+            raw_fingerprint=d.get("raw_fingerprint", {}),
         )
 
     return d
@@ -139,4 +140,5 @@ def _entry_to_dict(entry: RecordingEntry) -> dict:
             for wid, we in entry.wells.items()
         },
         "h5_recordings": entry.h5_recordings,
+        "raw_fingerprint": entry.raw_fingerprint,
     }

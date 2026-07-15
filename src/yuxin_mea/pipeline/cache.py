@@ -42,6 +42,7 @@ def _decode(d: dict):
             last_updated=d["last_updated"],
             error=d["error"],
             config=d.get("config", {}),
+            provenance=d.get("provenance"),
         )
     if _ENTRY_KEYS <= d.keys():
         return PipelineEntry(
@@ -66,6 +67,7 @@ def _entry_to_dict(entry: PipelineEntry) -> dict:
                 "last_updated": t.last_updated,
                 "error":        t.error,
                 "config":       t.config,
+                "provenance":   t.provenance,
             }
             for name, t in entry.tasks.items()
         },
