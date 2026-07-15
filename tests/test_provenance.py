@@ -392,7 +392,19 @@ def test_run_one_stamps_and_places_sidecar_in_well_dir():
         assert tr.provenance["config_file"] == "cfg.json"
 
         # durable sidecar: in the returned WELL dir, NOT the shared parent
-        assert (well_dir / "provenance.json").exists()
-        assert not (well_dir.parent / "provenance.json").exists()
+        from yuxin_mea.provenance import PROVENANCE_FILENAME
+        assert (well_dir / PROVENANCE_FILENAME).exists()
+        assert not (well_dir.parent / PROVENANCE_FILENAME).exists()
+        # filename must not collide with spikeinterface's provenance.json
+        assert PROVENANCE_FILENAME != "provenance.json"
         back = read_sidecar(well_dir)
         assert back["task"] == "stub" and back["well_id"] == "rec0000/well000"
+
+
+def test_read_sidecar_rejects_foreign_json():
+    """A foreign json sharing the name (e.g. spikeinterface's) is not our stamp."""
+    from yuxin_mea.provenance import PROVENANCE_FILENAME
+    with TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / PROVENANCE_FILENAME).write_text('{"class": "spikeinterface", "kwargs": {}}')
+        assert read_sidecar(d) is None  # no _schema marker → rejected

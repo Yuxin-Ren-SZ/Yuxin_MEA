@@ -1,5 +1,6 @@
 """Shared layout components for the dashboard."""
 
+from .badges import provenance_badge
 from .filter_bar import (
     build_filter_bar,
     filter_id,
@@ -13,6 +14,7 @@ from .pagination import PAGE_SIZE, page_bounds, pager_bar, pager_state
 __all__ = [
     "build_layout",
     "no_config_banner",
+    "provenance_badge",
     "build_filter_bar",
     "filter_id",
     "filter_kwargs",

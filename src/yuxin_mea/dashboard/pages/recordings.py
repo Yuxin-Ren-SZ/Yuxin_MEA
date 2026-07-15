@@ -26,10 +26,15 @@ from yuxin_mea.dashboard.components import (
     page_bounds,
     pager_bar,
     pager_state,
+    provenance_badge,
     yymmdd_to_iso,
 )
 from yuxin_mea.dashboard.context import load_dataset_mgr, load_pipeline_mgr
-from yuxin_mea.dashboard.data import filter_recordings, load_recordings_detail
+from yuxin_mea.dashboard.data import (
+    filter_recordings,
+    load_recordings_detail,
+    recording_provenance,
+)
 from yuxin_mea.tasks import TASK_CLASSES
 
 
@@ -389,22 +394,22 @@ def _build_rec_list(
     return children
 
 
-def _build_meta_card(rec: dict) -> html.Div:
+def _build_meta_card(rec: dict, prov_status: str | None = None) -> html.Div:
     def kv(label: str, value: str, path: bool = False) -> list:
         return [
             html.Dt(label),
             html.Dd(value, className="path" if path else ""),
         ]
 
+    badge = provenance_badge(prov_status)  # None when no verified task / OK-hidden not set
     return html.Div(
         [
             html.Div(
                 [
                     html.Span(f"recording · {rec['run_id']}", className="h-title"),
                     html.Div(
-                        [
-                            html.Span(rec["scan_type"], className="badge"),
-                        ],
+                        [html.Span(rec["scan_type"], className="badge")]
+                        + ([badge] if badge is not None else []),
                         className="h-actions",
                     ),
                 ],
@@ -637,6 +642,7 @@ def _populate(
     store_data = {
         "recordings": recordings,
         "well_pipeline_status": well_pipeline_status,
+        "provenance": recording_provenance(Path(analysis_root), ctx_app.get("config_path")),
     }
 
     # Page index: prev/next step it; any filter/scan/refresh resets to 0.
@@ -823,7 +829,8 @@ def _update_detail(selected_key: str, store_data: dict):
     if rec is None:
         return html.Div("Recording not found."), None
 
-    return _build_meta_card(rec), _build_wells_table(rec, well_pipeline_status)
+    prov = store_data.get("provenance", {}).get(selected_key)
+    return _build_meta_card(rec, prov), _build_wells_table(rec, well_pipeline_status)
 
 
 @callback(

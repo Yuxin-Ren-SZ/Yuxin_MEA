@@ -124,6 +124,27 @@ def load_recordings_detail(
     return recordings, well_pipeline_status
 
 
+def recording_provenance(analysis_root: Path, config_path) -> dict[str, str]:
+    """Per-recording provenance status for dashboard badges (read-only, cheap).
+
+    Compares each COMPLETE task's stamp against the **cached** raw fingerprint +
+    current config (no NAS re-hash). Returns ``{cache_key: status}`` where status
+    is OK / RAW-CHANGED / CONFIG-CHANGED / METADATA-CHANGED / UNKNOWN (worst-case
+    per recording). Recordings with no verified task are absent. Returns ``{}``
+    on any error so a provenance hiccup never breaks the page.
+    """
+    try:
+        from yuxin_mea.config import ConfigManager
+        from yuxin_mea.provenance import status_by_recording
+
+        cm = ConfigManager()
+        if config_path and Path(config_path).exists():
+            cm.load(config_path)
+        return status_by_recording(cm, Path(analysis_root))
+    except Exception:  # noqa: BLE001 — provenance is advisory, never fatal to the view
+        return {}
+
+
 def well_group_map(analysis_root: Path) -> dict[str, str]:
     """Map each pipeline_key ``"{cache_key}/{rec_name}/{well_id}"`` → groupname.
 

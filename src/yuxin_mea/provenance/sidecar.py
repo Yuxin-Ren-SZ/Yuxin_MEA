@@ -16,7 +16,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PROVENANCE_FILENAME = "provenance.json"
+# NOT "provenance.json" — spikeinterface already writes that in sorter/extractor
+# output dirs. Namespaced to avoid colliding with it (and anything else).
+PROVENANCE_FILENAME = "yuxin_provenance.json"
+_SCHEMA = "yuxin_mea.provenance/1"  # marker so a foreign json is never misread as ours
 
 
 def sidecar_dir(output_path: Path | str) -> Path:
@@ -48,7 +51,7 @@ def write_sidecar(output_dir: Path | str, stamp: dict[str, Any]) -> Path:
     fd, tmp = tempfile.mkstemp(dir=out_dir, prefix=".provenance_tmp_", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(stamp, fh, indent=2, default=str)
+            json.dump({"_schema": _SCHEMA, **stamp}, fh, indent=2, default=str)
             fh.write("\n")
         os.replace(tmp, target)
     except Exception:
@@ -61,10 +64,17 @@ def write_sidecar(output_dir: Path | str, stamp: dict[str, Any]) -> Path:
 
 
 def read_sidecar(output_dir: Path | str) -> dict[str, Any] | None:
-    """Read ``<output_dir>/provenance.json``; ``None`` if missing/unreadable."""
+    """Read our sidecar; ``None`` if missing/unreadable/not ours.
+
+    Validates the ``_schema`` marker so a foreign ``json`` that happens to share
+    the name (or a future format change) is never mistaken for a stamp.
+    """
     target = Path(output_dir) / PROVENANCE_FILENAME
     try:
         with open(target, encoding="utf-8") as fh:
-            return json.load(fh)
+            data = json.load(fh)
     except (OSError, ValueError):
         return None
+    if not isinstance(data, dict) or data.get("_schema") != _SCHEMA:
+        return None
+    return data

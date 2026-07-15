@@ -100,13 +100,19 @@ def _well_of(pipeline_key: str) -> str:
 
 
 def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
-                      full_hash: bool = False, network_only: bool = False) -> VerifyReport:
+                      full_hash: bool = False, network_only: bool = False,
+                      use_sidecar: bool = True) -> VerifyReport:
     """Verify all COMPLETE tasks. ``cm`` is a loaded ConfigManager (current config).
 
     Without ``full_hash`` the current raw fingerprint comes from
     ``experiment_cache.json`` (cheap; reflects the last scan). With ``full_hash``
     each recording's h5 is re-fingerprinted from disk (content sha256; NAS-costly)
     and never persisted.
+
+    ``use_sidecar`` falls back to the on-disk ``yuxin_provenance.json`` when a
+    task's cache stamp is missing. Set it ``False`` for the dashboard hot path —
+    those sidecars live on the NAS and stat-ing one per task is prohibitively slow
+    (the cache copy in ``pipeline_cache.json`` is enough for a live status view).
     """
     from yuxin_mea.dataset.cache import JsonCacheStore
     from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
@@ -140,7 +146,7 @@ def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
             if rec_task.status != "complete":
                 continue
             prov = rec_task.provenance
-            if prov is None and rec_task.output_path:
+            if prov is None and use_sidecar and rec_task.output_path:
                 prov = read_sidecar(sidecar_dir(rec_task.output_path))
             if tname not in cfg_cache:
                 cfg_cache[tname] = params_hash(cm.get_task_params(tname))
@@ -176,7 +182,8 @@ def status_by_recording(cm, analysis_root: Path) -> dict[str, str]:
     """Cheap per-recording provenance status for dashboard badges.
 
     Compares each COMPLETE task's stamp against the **cached** raw fingerprint +
-    current config (no NAS content re-hash). Returns ``{recording_key: status}``
-    (worst-case per recording). Read-only.
+    current config (no NAS content re-hash, no NAS sidecar reads). Returns
+    ``{recording_key: status}`` (worst-case per recording). Read-only.
     """
-    return verify_provenance(cm, analysis_root, analysis_root, full_hash=False).per_recording
+    return verify_provenance(cm, analysis_root, analysis_root,
+                             full_hash=False, use_sidecar=False).per_recording
