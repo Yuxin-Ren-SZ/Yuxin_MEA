@@ -155,6 +155,50 @@ def test_fingerprint_mode_is_config_driven_with_cli_override():
         assert resolve_context(absent)["fingerprint_mode"] == "stat"
 
 
+def test_stat_rescan_preserves_backfilled_fingerprint_but_drops_it_on_change():
+    """A cheap stat-mode rescan (the default, and what 'Scan disk' does via a full
+    refresh) must not destroy an expensive content fingerprint — unless the h5
+    actually changed, in which case the old hash is invalid and must go."""
+    import h5py
+    from yuxin_mea.dataset import DatasetManager
+
+    with TemporaryDirectory() as tmp:
+        t = Path(tmp)
+        dr, ar = t / "data", t / "an"
+        ar.mkdir(parents=True)
+        run = dr / "S1" / "260101" / "P1" / "Network" / "000001"
+        run.mkdir(parents=True)
+        _make_h5(run / "data.raw.h5")
+        (run / "mxassay.metadata").write_text("groupname=NPH\n")
+
+        # backfill a content fingerprint
+        dm = DatasetManager(dr, ar, fingerprint_mode="struct")
+        dm.refresh()
+        key = dm.recordings[0].cache_key
+        got = dm.recordings[0].raw_fingerprint["h5"]
+        assert got["method"] == "h5meta-v1" and got["sha256"]
+        sha = got["sha256"]
+
+        # a cheap stat rescan must PRESERVE it (file unchanged)
+        dm2 = DatasetManager(dr, ar, fingerprint_mode="stat")
+        dm2.refresh()
+        kept = dm2.recordings[0].raw_fingerprint["h5"]
+        assert kept["method"] == "h5meta-v1", "stat rescan downgraded the backfill!"
+        assert kept["sha256"] == sha
+
+        # ...and it must survive a reload from disk, not just memory
+        from yuxin_mea.dataset.cache import JsonCacheStore
+        assert JsonCacheStore(ar).load()[key].raw_fingerprint["h5"]["method"] == "h5meta-v1"
+
+        # but once the h5 actually changes, the stale content hash must be dropped
+        with h5py.File(run / "data.raw.h5", "a") as h:
+            h["recordings/rec0000/well000/settings/gain"][:] = 999.0
+        dm3 = DatasetManager(dr, ar, fingerprint_mode="stat")
+        dm3.refresh()
+        after = dm3.recordings[0].raw_fingerprint["h5"]
+        assert after["method"] == "stat", "stale content hash kept after the file changed!"
+
+
 def test_h5_mode_helpers():
     from yuxin_mea.provenance.fingerprint import (
         H5_HASH_MODES, h5_kwargs_for, h5_method_for,
