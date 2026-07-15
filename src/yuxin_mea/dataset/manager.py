@@ -85,6 +85,11 @@ class DatasetManager:
     def recordings(self) -> list[RecordingEntry]:
         return list(self._cache.values())
 
+    @property
+    def fingerprint_mode(self) -> str:
+        """Raw-fingerprint level this manager scans at (see __init__)."""
+        return self._fingerprint_mode
+
     def get_recording_by(
         self,
         filters: list[tuple[str, str, Any]],

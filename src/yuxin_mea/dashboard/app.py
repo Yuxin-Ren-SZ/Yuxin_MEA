@@ -90,6 +90,9 @@ def resolve_context(config_path: Path) -> dict:
         "data_root": data_root,
         "figure_root": figure_root,
         "cache_root": cache_root,
+        # Raw-fingerprint level used by "Scan disk" (see doc/caching.md). Default
+        # "stat" — hashing a 30-100 GB h5 over the NAS is far too slow for a scan.
+        "fingerprint_mode": str(cm.get_global("fingerprint_mode") or "stat"),
     }
 
 

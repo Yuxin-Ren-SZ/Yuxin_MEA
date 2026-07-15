@@ -120,6 +120,41 @@ def test_h5_struct_mode_skips_large_reads_but_catches_settings_and_shape():
                 )  # sampled: window at offset 0 → catch
 
 
+def test_fingerprint_mode_is_config_driven_with_cli_override():
+    """global.fingerprint_mode drives scan/run/dashboard; --hash-raw overrides it."""
+    import json
+    from yuxin_mea.cli.run import _setup_pipeline
+    from yuxin_mea.config import GLOBALS_SCHEMA
+    from yuxin_mea.dashboard.app import resolve_context
+
+    spec = GLOBALS_SCHEMA["fingerprint_mode"]
+    assert spec.default == "stat"                       # cheap by default
+    assert spec.choices == ["stat", "struct", "content", "full"]
+
+    with TemporaryDirectory() as tmp:
+        t = Path(tmp)
+        dr, ar = t / "data", t / "an"
+        dr.mkdir(); ar.mkdir()
+
+        def cfg(mode, name):
+            g = {"data_root": str(dr), "analysis_root": str(ar)}
+            if mode:
+                g["fingerprint_mode"] = mode
+            p = t / name
+            p.write_text(json.dumps({"global": g, "tasks": {}}))
+            return p
+
+        absent, struct = cfg(None, "a.json"), cfg("struct", "b.json")
+        # config → run
+        assert _setup_pipeline(absent)[1].fingerprint_mode == "stat"
+        assert _setup_pipeline(struct)[1].fingerprint_mode == "struct"
+        # CLI overrides config
+        assert _setup_pipeline(struct, fingerprint_override="content")[1].fingerprint_mode == "content"
+        # config → dashboard ("Scan disk")
+        assert resolve_context(struct)["fingerprint_mode"] == "struct"
+        assert resolve_context(absent)["fingerprint_mode"] == "stat"
+
+
 def test_h5_mode_helpers():
     from yuxin_mea.provenance.fingerprint import (
         H5_HASH_MODES, h5_kwargs_for, h5_method_for,

@@ -31,4 +31,16 @@ GLOBALS_SCHEMA: dict[str, ParamSpec] = {
         "pre-rendered raster PNGs. Leave blank to default to "
         "<analysis_root>/../dashboard_cache.",
     ),
+    "fingerprint_mode": ParamSpec(
+        "str", "stat",
+        "How much of each raw data.raw.h5 to fingerprint when scanning, for "
+        "reproducibility provenance (see doc/caching.md). "
+        "'stat' = size/mtime only (default, free). "
+        "'struct' = also hash the small analysis-critical datasets "
+        "(gain/lsb/mapping/settings) + raw shapes — no bulk reads. "
+        "'content' = also sample the raw array (slow on a busy NAS). "
+        "'full' = also read the raw array entirely (very slow on 30-100 GB). "
+        "Hashes are reused while the h5 size/mtime is unchanged.",
+        choices=["stat", "struct", "content", "full"],
+    ),
 }

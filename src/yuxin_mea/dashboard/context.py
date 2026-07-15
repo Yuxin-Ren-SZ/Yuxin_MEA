@@ -34,7 +34,12 @@ def load_dataset_mgr() -> DatasetManager | None:
     analysis_root = ctx.get("analysis_root")
     if not data_root or not analysis_root:
         return None
-    return DatasetManager(Path(data_root), Path(analysis_root))
+    # fingerprint_mode comes from the config global (Settings page); "stat" keeps
+    # "Scan disk" cheap — see doc/caching.md for the cost of the hashing tiers.
+    return DatasetManager(
+        Path(data_root), Path(analysis_root),
+        fingerprint_mode=ctx.get("fingerprint_mode", "stat"),
+    )
 
 
 def load_pipeline_mgr() -> PipelineManager | None:

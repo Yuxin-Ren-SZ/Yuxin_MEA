@@ -146,10 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--hash-raw",
         choices=["stat", "struct", "content", "full"],
-        default="stat",
+        default=None,
         help="How much of each recording's raw h5 to fingerprint before draining, "
-             "so stamps carry more than size/mtime. "
-             "stat (default) = no hashing; "
+             "so stamps carry more than size/mtime. Overrides the config's "
+             "global.fingerprint_mode (which defaults to stat). "
+             "stat = no hashing; "
              "struct = hash the small analysis-critical datasets (gain/lsb/mapping/"
              "settings) + raw shapes, no bulk reads; "
              "content = + sample the raw array (scattered NAS reads — slow on a busy "
@@ -199,7 +200,7 @@ def _split_csv(value: str | None) -> list[str] | None:
 
 
 def _setup_pipeline(
-    config_path: Path, fingerprint_mode: str = "stat",
+    config_path: Path, fingerprint_override: str | None = None,
 ) -> tuple[ConfigManager, DatasetManager, PipelineManager]:
     cm = ConfigManager()
     for cls in TASK_CLASSES:
@@ -214,8 +215,10 @@ def _setup_pipeline(
             "`yuxin-mea-dashboard --config ...` Settings page to edit)."
         )
 
+    # CLI flag wins; otherwise the config's global.fingerprint_mode; else "stat".
+    mode = fingerprint_override or str(cm.get_global("fingerprint_mode") or "stat")
     dataset_mgr = DatasetManager(
-        Path(data_root), Path(analysis_root), fingerprint_mode=fingerprint_mode
+        Path(data_root), Path(analysis_root), fingerprint_mode=mode
     )
     pipeline_mgr = PipelineManager(Path(analysis_root), config_provider=cm)
     for cls in TASK_CLASSES:
@@ -412,10 +415,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: config file not found: {args.config}", file=sys.stderr)
         return 2
 
-    hash_mode = "full" if args.full_hash else args.hash_raw
     cm, dataset_mgr, pipeline_mgr = _setup_pipeline(
-        args.config, fingerprint_mode=hash_mode,
+        args.config,
+        fingerprint_override="full" if args.full_hash else args.hash_raw,
     )
+    hash_mode = dataset_mgr.fingerprint_mode  # CLI flag > config global > "stat"
 
     # Provenance freshness: --rescan rebuilds the dataset cache (fingerprinting at
     # --hash-raw level); --hash-raw alone hashes in place. Both are opt-in — the

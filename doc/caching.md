@@ -327,9 +327,26 @@ content-hashed (tiny) in every mode.
 Hashes are **reused when the h5 stat is unchanged** (stat-drift trigger), so any tier is computed
 at most once per file. Run a content/full pass off-peak.
 
-Entry points: `DatasetManager(fingerprint_mode=…)` / `.compute_content_fingerprints(mode=…)`,
-`yuxin-mea-run --hash-raw {stat,struct,content,full}`,
-`check_cache.py --verify-provenance --hash-raw {struct,content,full}`.
+**Configured in the config file** — `global.fingerprint_mode` (default `"stat"`), editable from
+the dashboard **Settings → global** page (renders as a dropdown from `GLOBALS_SCHEMA`). It drives
+both the dashboard's **Scan disk** and `yuxin-mea-run`. Precedence:
+
+```
+--hash-raw (CLI)  >  global.fingerprint_mode (config)  >  "stat"
+```
+
+```jsonc
+// pipeline_config_local.json
+"global": {
+  "data_root": "...", "analysis_root": "...",
+  "fingerprint_mode": "struct"   // stat | struct | content | full
+}
+```
+
+Other entry points: `DatasetManager(fingerprint_mode=…)` /
+`.compute_content_fingerprints(mode=…)`,
+`check_cache.py --verify-provenance --hash-raw {struct,content,full}` (a one-off re-hash; does
+not read the config global).
 - At run time the stamp copies whatever fingerprint the entry has (content if a pass ran, else
   stat) and additionally re-`stat`s the file actually read; a drift from the scanned stat is
   flagged on the stamp (`drift_from_scan`) and logged (warn, non-blocking).
