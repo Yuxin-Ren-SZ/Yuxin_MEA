@@ -82,6 +82,10 @@ class VerifyReport:
     drifted: list[dict] = field(default_factory=list)
     # Worst-case status per recording_key (for dashboard badges).
     per_recording: dict[str, str] = field(default_factory=dict)
+    # Per recording_key, whether its provenance is an *adopted baseline* only —
+    # True when every stamped task is an adopted stamp (no real-run measurement).
+    # Reset to False the moment any measured stamp appears (e.g. after a re-run).
+    per_recording_adopted: dict[str, bool] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -89,8 +93,11 @@ class VerifyReport:
         return self.counts["RAW-CHANGED"] + self.counts["CONFIG-CHANGED"]
 
     def _bump(self, recording_key: str, status: str) -> None:
-        cur = self.per_recording.get(recording_key, "OK")
-        if _SEVERITY.get(status, 0) > _SEVERITY.get(cur, 0):
+        # First status seen registers the recording (even OK — else an all-OK
+        # recording would never appear here and its badge would never render);
+        # thereafter keep only the worst.
+        cur = self.per_recording.get(recording_key)
+        if cur is None or _SEVERITY.get(status, 0) > _SEVERITY.get(cur, 0):
             self.per_recording[recording_key] = status
 
 
@@ -129,6 +136,9 @@ def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
     report = VerifyReport()
     fresh_h5: dict[str, dict] = {}
     cfg_cache: dict[str, str] = {}
+    # Per recording: did we see a measured stamp / an adopted stamp?
+    seen_measured: set[str] = set()
+    seen_adopted: set[str] = set()
 
     for pkey, entry in sorted(pipe.items()):
         rkey = entry.recording_key
@@ -154,6 +164,8 @@ def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
             prov = rec_task.provenance
             if prov is None and use_sidecar and rec_task.output_path:
                 prov = read_sidecar(sidecar_dir(rec_task.output_path))
+            if prov is not None:
+                (seen_adopted if prov.get("adopted") else seen_measured).add(rkey)
             if tname not in cfg_cache:
                 cfg_cache[tname] = params_hash(cm.get_task_params(tname))
             issues = classify_task(prov, cur_h5, cur_meta, cfg_cache[tname])
@@ -176,6 +188,12 @@ def verify_provenance(cm, data_root: Path, analysis_root: Path, *,
             # bury real findings on a cache full of old outputs.
             if issues != ["UNKNOWN"]:
                 report.details.append(("+".join(issues), f"{rkey}/{_well_of(pkey)}/{tname}"))
+
+    # A recording's provenance is "adopted-only" when it has ≥1 adopted stamp and
+    # no measured stamp — i.e. its verification rests on the mtime-guarded baseline,
+    # not on anything recorded during a real run.
+    for rkey in seen_adopted:
+        report.per_recording_adopted[rkey] = rkey not in seen_measured
     return report
 
 
@@ -193,3 +211,19 @@ def status_by_recording(cm, analysis_root: Path) -> dict[str, str]:
     """
     return verify_provenance(cm, analysis_root, analysis_root,
                              full_hash=False, use_sidecar=False).per_recording
+
+
+def status_and_adopted_by_recording(cm, analysis_root: Path) -> dict[str, dict]:
+    """Like :func:`status_by_recording` but also flags adopted-baseline provenance.
+
+    Returns ``{recording_key: {"status": <str>, "adopted": <bool>}}``. ``adopted``
+    is True when the recording's provenance is an adopted baseline only (no
+    measured stamp) — the dashboard badge annotates those so an assumed baseline
+    is never mistaken for provenance measured during a real run.
+    """
+    rep = verify_provenance(cm, analysis_root, analysis_root,
+                            full_hash=False, use_sidecar=False)
+    return {
+        rkey: {"status": status, "adopted": rep.per_recording_adopted.get(rkey, False)}
+        for rkey, status in rep.per_recording.items()
+    }

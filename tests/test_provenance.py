@@ -351,7 +351,7 @@ def test_classify_task():
 
 def _build_caches(tmp: Path, *, prov_h5_sha="H", prov_cfg="C",
                   cur_h5_sha="H", cur_meta_sha="M", prov_meta_sha="M",
-                  with_prov=True):
+                  with_prov=True, adopted=False, extra_measured=False):
     from yuxin_mea.dataset.cache import JsonCacheStore
     from yuxin_mea.dataset.entries import RecordingEntry
     from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
@@ -371,10 +371,20 @@ def _build_caches(tmp: Path, *, prov_h5_sha="H", prov_cfg="C",
     if with_prov:
         prov = {"h5": {"method": "h5struct-v1", "sha256": prov_h5_sha},
                 "metadata": {"sha256": prov_meta_sha}, "config_hash": prov_cfg}
-    tr = TaskRecord(status=TaskStatus.COMPLETE, dependencies=[], output_path=None,
-                    last_updated=1.0, error=None, config={}, provenance=prov)
+        if adopted:
+            prov["adopted"] = True
+    tasks = {"preprocessing": TaskRecord(
+        status=TaskStatus.COMPLETE, dependencies=[], output_path=None,
+        last_updated=1.0, error=None, config={}, provenance=prov)}
+    if extra_measured:
+        # a second task with a *measured* stamp (no adopted flag) on the same recording
+        tasks["sorting"] = TaskRecord(
+            status=TaskStatus.COMPLETE, dependencies=[], output_path=None,
+            last_updated=1.0, error=None, config={},
+            provenance={"h5": {"method": "h5struct-v1", "sha256": cur_h5_sha},
+                        "metadata": {"sha256": cur_meta_sha}, "config_hash": prov_cfg})
     pe = PipelineEntry(recording_key=rkey, well_id="rec0000/well000",
-                       created_at=0.0, tasks={"preprocessing": tr})
+                       created_at=0.0, tasks=tasks)
     JsonPipelineCacheStore(tmp).save({pe.pipeline_key: pe})
     return rkey
 
@@ -422,6 +432,38 @@ def test_verify_end_to_end():
         _build_caches(tp, with_prov=False)
         r = verify_provenance(cm, tp, tp)
         assert r.counts["UNKNOWN"] == 1 and r.computational_drift == 0
+
+
+def test_verify_registers_ok_and_flags_adopted():
+    """OK recordings must appear in per_recording (else no badge), and an adopted
+    baseline must be distinguishable from a measured stamp."""
+    from yuxin_mea.provenance import params_hash
+    from yuxin_mea.provenance.verify import (
+        status_and_adopted_by_recording, verify_provenance,
+    )
+
+    cm = _FakeCM({"sorter": "kilosort4"})
+    cfg = params_hash({"sorter": "kilosort4"})
+    with TemporaryDirectory() as tmp:
+        tp = Path(tmp)
+
+        # measured OK
+        rkey = _build_caches(tp, prov_cfg=cfg, prov_h5_sha="H", cur_h5_sha="H")
+        rep = verify_provenance(cm, tp, tp)
+        assert rep.per_recording.get(rkey) == "OK"           # OK registered (was a bug)
+        assert rep.per_recording_adopted.get(rkey, False) is False
+        sa = status_and_adopted_by_recording(cm, tp)[rkey]
+        assert sa == {"status": "OK", "adopted": False}
+
+        # adopted OK → flagged adopted
+        _build_caches(tp, prov_cfg=cfg, prov_h5_sha="H", cur_h5_sha="H", adopted=True)
+        sa = status_and_adopted_by_recording(cm, tp)[rkey]
+        assert sa == {"status": "OK", "adopted": True}
+
+        # a measured stamp on the same recording wins → not adopted-only
+        _build_caches(tp, prov_cfg=cfg, prov_h5_sha="H", cur_h5_sha="H",
+                      adopted=True, extra_measured=True)
+        assert status_and_adopted_by_recording(cm, tp)[rkey]["adopted"] is False
 
 
 def test_verify_drifted_structured_and_per_recording():

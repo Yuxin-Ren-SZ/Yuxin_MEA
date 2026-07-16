@@ -423,14 +423,15 @@ def _fmt_raw_fingerprint(rf: dict) -> tuple[str, str]:
     return h5_txt, md_txt
 
 
-def _build_meta_card(rec: dict, prov_status: str | None = None) -> html.Div:
+def _build_meta_card(rec: dict, prov_status: str | None = None,
+                     prov_adopted: bool = False) -> html.Div:
     def kv(label: str, value: str, path: bool = False) -> list:
         return [
             html.Dt(label),
             html.Dd(value, className="path" if path else ""),
         ]
 
-    badge = provenance_badge(prov_status)  # None when no verified task / OK-hidden not set
+    badge = provenance_badge(prov_status, adopted=prov_adopted)  # None if no verified task
     raw_h5, raw_md = _fmt_raw_fingerprint(rec.get("raw_fingerprint", {}))
     return html.Div(
         [
@@ -861,8 +862,9 @@ def _update_detail(selected_key: str, store_data: dict):
     if rec is None:
         return html.Div("Recording not found."), None
 
-    prov = store_data.get("provenance", {}).get(selected_key)
-    return _build_meta_card(rec, prov), _build_wells_table(rec, well_pipeline_status)
+    prov = store_data.get("provenance", {}).get(selected_key) or {}
+    return (_build_meta_card(rec, prov.get("status"), prov.get("adopted", False)),
+            _build_wells_table(rec, well_pipeline_status))
 
 
 @callback(

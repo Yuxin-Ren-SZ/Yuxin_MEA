@@ -128,23 +128,25 @@ def load_recordings_detail(
     return recordings, well_pipeline_status
 
 
-def recording_provenance(analysis_root: Path, config_path) -> dict[str, str]:
+def recording_provenance(analysis_root: Path, config_path) -> dict[str, dict]:
     """Per-recording provenance status for dashboard badges (read-only, cheap).
 
     Compares each COMPLETE task's stamp against the **cached** raw fingerprint +
-    current config (no NAS re-hash). Returns ``{cache_key: status}`` where status
-    is OK / RAW-CHANGED / CONFIG-CHANGED / METADATA-CHANGED / UNKNOWN (worst-case
-    per recording). Recordings with no verified task are absent. Returns ``{}``
-    on any error so a provenance hiccup never breaks the page.
+    current config (no NAS re-hash). Returns
+    ``{cache_key: {"status": <OK/RAW-CHANGED/CONFIG-CHANGED/METADATA-CHANGED/
+    UNKNOWN>, "adopted": <bool>}}`` (worst-case per recording; ``adopted`` = the
+    status rests on an adopted baseline, not a measured run). Recordings with no
+    verified task are absent. Returns ``{}`` on any error so a provenance hiccup
+    never breaks the page.
     """
     try:
         from yuxin_mea.config import ConfigManager
-        from yuxin_mea.provenance import status_by_recording
+        from yuxin_mea.provenance.verify import status_and_adopted_by_recording
 
         cm = ConfigManager()
         if config_path and Path(config_path).exists():
             cm.load(config_path)
-        return status_by_recording(cm, Path(analysis_root))
+        return status_and_adopted_by_recording(cm, Path(analysis_root))
     except Exception:  # noqa: BLE001 — provenance is advisory, never fatal to the view
         return {}
 

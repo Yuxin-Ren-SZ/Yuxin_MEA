@@ -574,10 +574,11 @@ def _render_overview_outputs(analysis_root, cache_root, recording_key, source_ke
     # Provenance status for this recording (computed once per Load, shown in the
     # single-well modal). Advisory — never blocks the view.
     config_path = current_app.config.get("YUXIN_MEA", {}).get("config_path")
-    prov_status = recording_provenance(Path(analysis_root), config_path).get(recording_key)
+    prov = recording_provenance(Path(analysis_root), config_path).get(recording_key) or {}
     context = {
         "recording_key": recording_key, "source": source_key,
-        "settings": settings, "ok_wells": ok_wells, "provenance": prov_status,
+        "settings": settings, "ok_wells": ok_wells,
+        "provenance": prov.get("status"), "provenance_adopted": prov.get("adopted", False),
     }
     status = f"✓ {recording_key} ({source_key}) — {len(ok_wells)}/24 wells"
     return overview, context, status
@@ -678,7 +679,8 @@ def _on_plate_nav(_p, _n, current, options, source, display_mode, marker_size,
 
 
 def _well_meta_row(recording_key: str, groupname: str | None,
-                   prov_status: str | None = None) -> html.Div:
+                   prov_status: str | None = None,
+                   prov_adopted: bool = False) -> html.Div:
     """Pill row of recording metadata shown atop the single-well modal.
 
     Recording-level fields come from splitting ``recording_key``
@@ -710,7 +712,7 @@ def _well_meta_row(recording_key: str, groupname: str | None,
         )
         for label, val in fields
     ]
-    badge = provenance_badge(prov_status)
+    badge = provenance_badge(prov_status, adopted=prov_adopted)
     if badge is not None:
         pills.append(badge)
     return html.Div(pills, style={"display": "flex", "gap": "6px",
@@ -773,7 +775,8 @@ def _open_well(_cell_clicks, _prev, _next, active_well, context):
     graph = dcc.Graph(figure=fig, style={"height": "72vh"}, config={"responsive": True})
     groupname = getattr(wr, "groupname", None)
     body = html.Div([
-        _well_meta_row(context["recording_key"], groupname, context.get("provenance")),
+        _well_meta_row(context["recording_key"], groupname, context.get("provenance"),
+                       context.get("provenance_adopted", False)),
         graph,
     ])
     return body, _MODAL_SHOWN, f"{wr.well_name} ({wr.well_id})", target
