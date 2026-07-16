@@ -25,15 +25,25 @@ _PROV = {
 }
 
 
-def provenance_badge(status: str | None, *, show_ok: bool = True) -> html.Span | None:
+def provenance_badge(status: str | None, *, show_ok: bool = True,
+                     adopted: bool = False) -> html.Span | None:
     """Return a styled badge for a provenance status, or ``None`` to render nothing.
 
     ``None``/empty status → nothing (recording has no verified task). ``show_ok``
     False hides the green OK badge (keep list views quiet, only flag problems).
+    ``adopted`` annotates the badge with "· baseline" when the status rests on an
+    *adopted* stamp (raw fingerprint assumed from the file on disk, mtime-guarded)
+    rather than provenance measured during a real run — so the two are never
+    confused. It is shown even for OK (an adopted OK is weaker than a measured OK).
     """
-    if not status or (status == "OK" and not show_ok):
+    if not status or (status == "OK" and not show_ok and not adopted):
         return None
     label, colour, tip = _PROV.get(status, ("unstamped", "var(--ink-3)", status))
+    if adopted:
+        label = f"{label} · baseline"
+        tip = (tip + "  —  ADOPTED baseline: the raw fingerprint was assumed from "
+               "the file on disk (guarded by mtime), not measured during the run; "
+               "re-run the task for measured provenance.")
     return html.Span(
         label,
         title=tip,
@@ -41,5 +51,6 @@ def provenance_badge(status: str | None, *, show_ok: bool = True) -> html.Span |
             "fontFamily": "var(--font-mono)", "fontSize": "10px", "fontWeight": "600",
             "color": colour, "border": f"1px solid {colour}", "borderRadius": "999px",
             "padding": "1px 8px", "whiteSpace": "nowrap",
+            **({"borderStyle": "dashed"} if adopted else {}),  # dashed = assumed
         },
     )
