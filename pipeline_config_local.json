@@ -3,7 +3,8 @@
     "data_root": "/mnt/benshalom-nas/raw_data/rbs_maxtwo_desktop/harddisk20tbV2/Sadegh_Lab",
     "analysis_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis",
     "figure_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis",
-    "cache_root": ""
+    "cache_root": "",
+    "fingerprint_mode": "stat"
   },
   "tasks": {
     "preprocessing": {
@@ -25,7 +26,35 @@
     "sorting": {
       "preprocessing_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/preprocessed_data",
       "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/spikesorted_data",
-      "sorter": "kilosort4"
+      "sorter": "kilosort4",
+      "docker_image": "",
+      "verbose": true,
+      "remove_existing_folder": true,
+      "delete_output_folder": false,
+      "overwrite": true,
+      "clean_excess_spikes": true,
+      "remove_empty_units": true,
+      "min_high_vram_gb": 14.0,
+      "high_vram_sorter_kwargs": {
+        "batch_size_seconds": 2.0,
+        "clear_cache": true,
+        "invert_sign": true,
+        "cluster_downsampling": 20,
+        "max_cluster_subset": null,
+        "nblocks": 0,
+        "dmin": 17,
+        "do_correction": false
+      },
+      "low_vram_sorter_kwargs": {
+        "batch_size_seconds": 0.5,
+        "clear_cache": true,
+        "invert_sign": true,
+        "cluster_downsampling": 30,
+        "max_cluster_subset": 50000,
+        "nblocks": 0,
+        "do_correction": false
+      },
+      "sorter_kwargs": {}
     },
     "auto_merge": {
       "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/auto_merge_data",
@@ -60,6 +89,7 @@
     },
     "burst_detection": {
       "curation_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/curation_data",
+      "analyzer_output_root": "./analyzer_data",
       "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/burst_detection_data",
       "gamma": 1.0,
       "min_burstlet_participation": 0.2,
