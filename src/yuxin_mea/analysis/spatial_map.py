@@ -340,6 +340,26 @@ def compute_spatial_map(
     )
 
 
+def empty_spatial_results(bins: int = 64, reason: str = "") -> SpatialMapResults:
+    """A COMPLETE-but-empty bundle for wells too sparse for a spatial map.
+
+    Mirrors the burst detectors returning zero events (COMPLETE, not FAILED) on
+    sparse wells: a zero field + empty propagation, well scalars all NaN/0.
+    """
+    field = np.zeros((int(bins), int(bins)), dtype=float)
+    prop = pd.DataFrame(columns=_PROP_COLUMNS)
+    return SpatialMapResults(
+        activity_field=field,
+        burst_propagation=prop,
+        metrics=spatial_summary(field, prop),
+        diagnostics={
+            "n_units": 0, "bins": int(bins), "sigma_um": float("nan"),
+            "n_bursts_total": 0, "n_bursts_used": 0,
+            "field_extent": [0.0, 0.0, 0.0, 0.0], "empty_reason": reason,
+        },
+    )
+
+
 def _atomic_json_write(data: dict, dest: Path) -> None:
     fd, tmp_path = tempfile.mkstemp(dir=dest.parent, suffix=".tmp")
     try:

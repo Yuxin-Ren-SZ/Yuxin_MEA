@@ -153,7 +153,9 @@ class ConnectivityTask(BaseAnalysisTask):
 
         from yuxin_mea.analysis.connectivity import (
             ConnectivityConfig,
+            ConnectivityError,
             compute_connectivity,
+            empty_connectivity_results,
             write_connectivity,
         )
 
@@ -185,7 +187,14 @@ class ConnectivityTask(BaseAnalysisTask):
                 }
 
         config = ConnectivityConfig.from_task_params(p)
-        results = compute_connectivity(spike_times, positions=positions, config=config)
+        try:
+            results = compute_connectivity(
+                spike_times, positions=positions, config=config
+            )
+        except ConnectivityError as exc:
+            # Too few eligible units: write an empty graph, COMPLETE (not FAILED)
+            # — mirrors the burst detectors on sparse wells.
+            results = empty_connectivity_results(config=config, reason=str(exc))
 
         output_dir = self.build_output_path(
             p["output_root"], recording_key, rec_name, actual_well_id,

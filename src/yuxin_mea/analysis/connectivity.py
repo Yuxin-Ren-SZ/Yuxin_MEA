@@ -454,6 +454,36 @@ def compute_connectivity(
     )
 
 
+def empty_connectivity_results(
+    config: ConnectivityConfig | None = None, reason: str = ""
+) -> ConnectivityResults:
+    """A COMPLETE-but-empty bundle for wells too sparse for a connectivity graph.
+
+    Mirrors the burst detectors returning zero events (COMPLETE, not FAILED) on
+    sparse wells: empty matrices, graph scalars all NaN/0, no edges.
+    """
+    cfg = config or ConnectivityConfig()
+    W = np.zeros((0, 0), dtype=float)
+    return ConnectivityResults(
+        sttc_matrix=W,
+        sttc_sweep={float(d): W for d in cfg.dt_sweep},
+        adjacency=np.zeros((0, 0), dtype=bool),
+        graph_metrics=graph_metrics(W),
+        edges=pd.DataFrame(columns=["u", "v", "sttc", "dist_um"]),
+        unit_ids=[],
+        diagnostics={
+            "dt_primary": float(cfg.dt),
+            "dt_sweep": [float(d) for d in cfg.dt_sweep],
+            "n_units": 0, "n_edges": 0,
+            "thresh_method": "circular_shuffle_percentile",
+            "thresh_percentile": float(cfg.thresh_percentile),
+            "thresh_value": float("nan"),
+            "n_shuffle": int(cfg.n_shuffle), "T": 0.0,
+            "empty_reason": reason,
+        },
+    )
+
+
 def _atomic_json_write(data: dict, dest: Path) -> None:
     fd, tmp_path = tempfile.mkstemp(dir=dest.parent, suffix=".tmp")
     try:

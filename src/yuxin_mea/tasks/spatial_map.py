@@ -133,7 +133,9 @@ class SpatialMapTask(BaseAnalysisTask):
 
         from yuxin_mea.analysis.spatial_map import (
             SpatialMapConfig,
+            SpatialMapError,
             compute_spatial_map,
+            empty_spatial_results,
             write_spatial_map,
         )
 
@@ -169,9 +171,14 @@ class SpatialMapTask(BaseAnalysisTask):
         bursts = pd.read_pickle(bursts_path) if bursts_path.exists() else None
 
         config = SpatialMapConfig.from_task_params(p)
-        results = compute_spatial_map(
-            spike_times, quality_metrics, bursts, config=config
-        )
+        try:
+            results = compute_spatial_map(
+                spike_times, quality_metrics, bursts, config=config
+            )
+        except SpatialMapError as exc:
+            # Sparse well (no positioned units): write an empty field, COMPLETE
+            # (not FAILED) — mirrors the burst detectors on sparse wells.
+            results = empty_spatial_results(bins=int(p["bins"]), reason=str(exc))
 
         output_dir = self.build_output_path(
             p["output_root"], recording_key, rec_name, actual_well_id,
