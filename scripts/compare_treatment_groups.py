@@ -107,6 +107,22 @@ METRIC_SPECS: dict[str, dict[str, Any]] = {
                      "get": lambda m: _nested(m, "burst_typing", "k")},
     "cluster_n_clusters": {"source": "ml", "kind": "diff",
                            "get": lambda m: _nested(m, "cluster_n_clusters")},
+    # --- Spatial activity map (spatial_map_data spatial_metrics.json) ---------
+    # activity_gini / mean_prop_speed are non-negative -> ratio (log2) is valid.
+    "activity_gini": {"source": "spatial", "kind": "ratio",
+                      "get": lambda m: _nested(m, "activity_gini")},
+    "mean_prop_speed_um_ms": {"source": "spatial", "kind": "ratio",
+                              "get": lambda m: _nested(m, "mean_prop_speed_um_ms")},
+    # --- Functional connectivity (connectivity_data graph_metrics.json) -------
+    # mean_sttc in [-1,1] and modularity can be <=0 -> must be diff, not ratio.
+    "mean_sttc": {"source": "connectivity", "kind": "diff",
+                  "get": lambda m: _nested(m, "mean_sttc")},
+    "edge_density": {"source": "connectivity", "kind": "ratio",
+                     "get": lambda m: _nested(m, "edge_density")},
+    "modularity": {"source": "connectivity", "kind": "diff",
+                   "get": lambda m: _nested(m, "modularity")},
+    "small_worldness": {"source": "connectivity", "kind": "ratio",
+                        "get": lambda m: _nested(m, "small_worldness")},
 }
 
 RATIO_EPS = 1e-9  # guards log2 of zero for counts/rates
@@ -333,6 +349,17 @@ def _parse_metrics_path(metrics_path: Path, burst_dirname: str) -> dict[str, str
     }
 
 
+def _read_json(path: Path) -> dict[str, Any]:
+    """Load a per-well metrics JSON; empty dict on missing/unreadable file."""
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("json read fail %s: %s", path, exc)
+        return {}
+
+
 def _curation_median_firing(qm_path: Path) -> dict[str, Any]:
     """One-well curation summary from quality_metrics.pkl (median_firing_rate, n_curated)."""
     if not qm_path.exists():
@@ -359,6 +386,8 @@ def build_long_table(
     burst_dirname: str = "burst_detection_data",
     ml_dirname: str = "ml_burst_data_umap",
     curation_dirname: str = "curation_data",
+    spatial_dirname: str = "spatial_map_data",
+    conn_dirname: str = "connectivity_data",
     scan_type: str = "Network",
     limit: int | None = None,
 ) -> pd.DataFrame:
@@ -387,6 +416,8 @@ def build_long_table(
         rel = Path(ids["recording_key"]) / ids["rec_name"] / ids["well_id"]
         ml_path = analysis_root / ml_dirname / rel / "ml_burst_detection" / "diagnostics.json"
         cur_path = analysis_root / curation_dirname / rel / "auto_curation" / "quality_metrics.pkl"
+        spatial_path = analysis_root / spatial_dirname / rel / "spatial_map" / "spatial_metrics.json"
+        conn_path = analysis_root / conn_dirname / rel / "connectivity" / "graph_metrics.json"
 
         ml_diag: dict[str, Any] = {}
         if ml_path.exists():
@@ -399,6 +430,9 @@ def build_long_table(
         cur = _curation_median_firing(cur_path)
         if not cur:
             n_no_cur += 1
+
+        spatial_metrics = _read_json(spatial_path)
+        conn_metrics = _read_json(conn_path)
 
         meta = group_lut.get((ids["recording_key"], ids["well_id"]), {})
         row: dict[str, Any] = {
@@ -413,6 +447,10 @@ def build_long_table(
                 row[name] = spec["get"](ml_diag)
             elif spec["source"] == "curation":
                 row[name] = spec["get"](cur)
+            elif spec["source"] == "spatial":
+                row[name] = spec["get"](spatial_metrics)
+            elif spec["source"] == "connectivity":
+                row[name] = spec["get"](conn_metrics)
         rows.append(row)
 
     logger.info("Assembled %d well-recordings (%d missing ML, %d missing curation)",

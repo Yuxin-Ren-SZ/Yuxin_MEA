@@ -114,6 +114,14 @@ METRIC_LABELS: dict[str, str] = {
     "burst_modulation_index": "Burst modulation index",
     "burst_type_k": "Burst types (k)",
     "cluster_n_clusters": "Bin clusters (n)",
+    # Spatial activity map
+    "activity_gini": "Activity concentration (Gini)",
+    "mean_prop_speed_um_ms": "Propagation speed (µm/ms)",
+    # Functional connectivity (STTC)
+    "mean_sttc": "Mean STTC",
+    "edge_density": "Edge density",
+    "modularity": "Modularity",
+    "small_worldness": "Small-worldness",
 }
 
 

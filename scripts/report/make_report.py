@@ -24,14 +24,14 @@ from pathlib import Path
 
 from . import (
     fig3_qpcr, fig4_activity_dev, fig5_burst_phenotype, fig6_ml,
-    fig_umap_migration, fig_assets, fig_s1_method_compare, fig_s2_units,
-    fig_s3_rasters, fig_s4_crossgroup, load,
+    fig7_spatial_connectivity, fig_umap_migration, fig_assets,
+    fig_s1_method_compare, fig_s2_units, fig_s3_rasters, fig_s4_crossgroup, load,
 )
 from .report_style import apply_style, report_dir, resolve_roots
 
 logger = logging.getLogger("report")
 
-MAIN = ["f1", "f2", "f3", "f4", "f5", "f6", "f6b"]
+MAIN = ["f1", "f2", "f3", "f4", "f5", "f6", "f6b", "f7"]
 SUPP = ["s1", "s2", "s3", "s4"]
 
 
@@ -90,6 +90,7 @@ def build(args) -> dict:
     run("f5", lambda: fig5_burst_phenotype.render(tidy, figure_root, args.rosglo_table))
     run("f6", lambda: fig6_ml.render(tidy, analysis_root, figure_root))
     run("f6b", lambda: fig_umap_migration.render(tidy, analysis_root, figure_root))
+    run("f7", lambda: fig7_spatial_connectivity.render(tidy, analysis_root, figure_root))
     run("s1", lambda: fig_s1_method_compare.render(figure_root))
     run("s2", lambda: fig_s2_units.render(tidy, analysis_root, figure_root))
     run("s3", lambda: fig_s3_rasters.render(tidy, analysis_root, figure_root))

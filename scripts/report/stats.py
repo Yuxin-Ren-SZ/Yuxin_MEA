@@ -26,8 +26,14 @@ import pandas as pd
 RATIO_METRICS = [
     "nb_rate", "nb_count", "nb_duration_mean", "nb_spikes_per_burst_mean",
     "nb_ibi_mean", "median_firing_rate", "n_curated",
+    # Spatial / connectivity (non-negative -> log2 ratio valid)
+    "activity_gini", "mean_prop_speed_um_ms", "edge_density", "small_worldness",
 ]
-DIFF_METRICS = ["burst_modulation_index", "burst_type_k", "cluster_n_clusters"]
+# mean_sttc in [-1,1] and modularity can be <=0 -> diff, not ratio.
+DIFF_METRICS = [
+    "burst_modulation_index", "burst_type_k", "cluster_n_clusters",
+    "mean_sttc", "modularity",
+]
 ALL_METRICS = RATIO_METRICS + DIFF_METRICS
 
 _EPS = 1e-9
