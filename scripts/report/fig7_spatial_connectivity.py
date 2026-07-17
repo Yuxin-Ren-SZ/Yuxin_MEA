@@ -156,7 +156,7 @@ def _panel_propagation(ax, analysis_root, row):
         speed, direction, r2, ox, oy = _plane_fit(lat, xy)
         sc = ax.scatter(xy[:, 0], xy[:, 1], c=lat * 1e3, cmap="viridis",
                         s=22, edgecolors="0.3", linewidths=0.3, zorder=3)
-        span = np.hypot(xy[:, 0].ptp(), xy[:, 1].ptp()) or 1.0
+        span = float(np.hypot(np.ptp(xy[:, 0]), np.ptp(xy[:, 1]))) or 1.0
         ax.quiver(ox, oy, np.cos(direction), np.sin(direction),
                   angles="xy", scale_units="xy",
                   scale=1.0 / (0.3 * span), color="k", width=0.012, zorder=4)
@@ -169,7 +169,9 @@ def _panel_propagation(ax, analysis_root, row):
                 transform=ax.transAxes, va="top", ha="left", fontsize=6,
                 bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.8))
     except Exception:  # noqa: BLE001
+        ax.clear()
         _placeholder(ax, "propagation\nn/a")
+        ax.set_title("B  Burst propagation", loc="left", fontweight="bold")
 
 
 def _panel_graph(ax, analysis_root, row, title):
@@ -246,7 +248,8 @@ def _panel_forest(ax, summ, vc):
                 for a in treated]
     handles.append(ax.plot([], [], marker="o", ls="", mfc="none", mec="0.4",
                            color="0.4", label="open = exploratory (single-chip/<5 wells)")[0])
-    ax.legend(handles=handles, loc="best", fontsize=5.5, ncol=1)
+    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.16),
+              fontsize=5.5, ncol=2, frameon=False)
 
 
 # --------------------------------------------------------------------------- #
