@@ -145,6 +145,32 @@
       "burst_gate_threshold": 0.4,
       "min_fit_units": 15,
       "debug": true
+    },
+    "spatial_map": {
+      "curation_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/curation_data",
+      "burst_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/burst_detection_data",
+      "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/spatial_map_data",
+      "bins": 64,
+      "sigma_um": 50.0,
+      "active_thresh_frac": 0.05,
+      "min_participation": 5
+    },
+    "connectivity": {
+      "curation_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/curation_data",
+      "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/connectivity_data",
+      "dt": 0.02,
+      "dt_sweep": [
+        0.005,
+        0.01,
+        0.02,
+        0.05
+      ],
+      "min_units": 3,
+      "min_spikes_per_unit": 5,
+      "n_shuffle": 100,
+      "thresh_percentile": 95.0,
+      "random_state": 42,
+      "n_jobs": 1
     }
   }
 }

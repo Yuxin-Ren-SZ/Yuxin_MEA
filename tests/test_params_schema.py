@@ -16,9 +16,11 @@ from yuxin_mea.tasks import (
     AutoCurationTask,
     AutoMergeTask,
     BurstDetectionTask,
+    ConnectivityTask,
     MLBurstDetectionTask,
     PreprocessingTask,
     SortingTask,
+    SpatialMapTask,
 )
 
 
@@ -30,6 +32,8 @@ ALL_TASKS = [
     AutoCurationTask,
     BurstDetectionTask,
     MLBurstDetectionTask,
+    SpatialMapTask,
+    ConnectivityTask,
 ]
 
 
