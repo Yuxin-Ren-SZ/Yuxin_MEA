@@ -28,11 +28,23 @@ RATIO_METRICS = [
     "nb_ibi_mean", "median_firing_rate", "n_curated",
     # Spatial / connectivity (non-negative -> log2 ratio valid)
     "activity_gini", "mean_prop_speed_um_ms", "edge_density", "small_worldness",
+    "clustering_coeff", "global_efficiency",
+    # Node-level graph metrics (non-negative, comfortably > 0)
+    "participation_mean", "degree_cv", "rich_club",
+    # Criticality (exponents / non-negative)
+    "aval_tau", "aval_alpha", "gamma_fit",
+    # Directed / TE (non-negative, comfortably > 0)
+    "te_edge_density", "degree_asymmetry",
 ]
-# mean_sttc in [-1,1] and modularity can be <=0 -> diff, not ratio.
+# Bounded, can be <=0, or sit near 0 (log2 ratio unstable) -> diff, not ratio.
 DIFF_METRICS = [
     "burst_modulation_index", "burst_type_k", "cluster_n_clusters",
     "mean_sttc", "modularity",
+    "assortativity",                                   # [-1, 1]
+    "branching_ratio_mr", "branching_ratio_naive", "dcc",   # ~1 / ~0
+    "reciprocity", "flow_hierarchy",                   # [0, 1], can be 0
+    # near-zero fractions / TE — log2 ratio explodes, so use post-pre difference
+    "hub_fraction", "leaf_fraction", "mean_betweenness", "mean_te",
 ]
 ALL_METRICS = RATIO_METRICS + DIFF_METRICS
 

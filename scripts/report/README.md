@@ -27,7 +27,9 @@ python -m scripts.report.make_report --figures f2 \
 | F6 | `F6_ml_characterization` (A HMM posteriors + B feature UMAP; representative well) + `F6d_burst_modulation` | `debug_trace.pkl`, `tidy_long.csv` | — |
 | F6b | `F6b_umap_migration` | per-well pooled `debug_trace.pkl` (hand-picked chip-matched CX138 trio, shared UMAP; 4 columns = auto-spaced developmental **stages** Day 0→latest, not fixed days) | — |
 | F6c | `F6c_burst_archetypes` | pooled `network_bursts.pkl` across focus groups (global burst-type clustering + per-group composition) | — |
-| F7 | *(placeholder)* | spatial map + STTC — see [`doc/spatial_connectivity_plan.md`](../../doc/spatial_connectivity_plan.md) | not built |
+| F7 | `F7_spatial_connectivity` | spatial activity maps + STTC graph-level metrics | — |
+| F7b | `F7b_node_directed` | node cartography (hubs/leaves/participation) + directed transfer-entropy graph + DiD forests | — |
+| F8 | `F8_criticality` | neuronal avalanches: power-laws (τ/α), crackling γ, branching ratio (MR), DCC + DiD | — |
 | S1 | `S1_method_comparison` | `burst_method_comparison/per_well.csv` | — |
 | S2 | `S2_unit_qc_waveforms` | `quality_metrics.pkl`, templates | — |
 | S3 | `S3_representative_rasters` | curated spikes | — |

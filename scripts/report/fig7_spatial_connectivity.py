@@ -324,7 +324,8 @@ def _stars(q):
     return "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else ""
 
 
-def _panel_forest(ax, summ, vc):
+def _panel_forest(ax, summ, vc, resp=None):
+    rng = np.random.default_rng(0)
     treated = [a for a in ordered_groups(summ.arm.unique()) if a in FOCUS_ARMS]
     arms = ["Control"] + treated
     arm_off = np.linspace(0.32, -0.32, len(arms))
@@ -342,6 +343,13 @@ def _panel_forest(ax, summ, vc):
             y = y0 + arm_off[ai]
             is_ctrl = arm == "Control"
             exploratory = str(getattr(r, "tier", "confirmatory")) == "exploratory"
+            if resp is not None:                      # raw per-well points behind
+                pts = resp.loc[(resp.metric == metric) & (resp.arm == arm),
+                               "response"].to_numpy(float)
+                if len(pts):
+                    jit = (rng.random(len(pts)) - 0.5) * 0.16
+                    ax.scatter(pts, np.full(len(pts), y) + jit, s=4,
+                               color=group_color(arm), alpha=0.28, lw=0, zorder=2)
             xerr = np.array([[max(r.median_response - r.ci_low, 0)],
                              [max(r.ci_high - r.median_response, 0)]])
             face = "none" if exploratory else group_color(arm)
@@ -360,6 +368,12 @@ def _panel_forest(ax, summ, vc):
     ax.axvline(0, ls="--", color="0.5", lw=0.8, zorder=1)
     ax.set_yticks(yticks); ax.set_yticklabels(ylabels)
     ax.set_ylim(min(yticks) - 0.6, max(yticks) + 0.6)
+    # clip the view to the bootstrap-CI range so a few near-zero-baseline
+    # outliers (huge log2) don't squash the medians + point cloud
+    if len(summ):
+        lo = float(summ.ci_low.min()); hi = float(summ.ci_high.max())
+        pad = 0.25 * (hi - lo) + 0.15
+        ax.set_xlim(lo - pad, hi + pad)
     ax.set_xlabel("within-well response  (log2 post/pre; Δ for STTC/modularity)")
     ax.set_title("D  Connectivity response vs Control maturation", loc="left",
                  fontweight="bold")
@@ -432,7 +446,7 @@ def build_f7(tidy, analysis_root):
         axd.set_title("D  Connectivity response vs Control", loc="left",
                       fontweight="bold")
     else:
-        _panel_forest(axd, summ, vc)
+        _panel_forest(axd, summ, vc, resp)
 
     fig.suptitle(
         "Figure 7 — Spatial activity maps & functional connectivity (STTC), "

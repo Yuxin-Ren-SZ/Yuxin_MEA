@@ -125,6 +125,27 @@ METRIC_LABELS: dict[str, str] = {
     "modularity": "Modularity",
     "global_efficiency": "Global efficiency",
     "small_worldness": "Small-worldness",
+    # Node-level graph metrics
+    "hub_fraction": "Hub fraction",
+    "leaf_fraction": "Leaf fraction",
+    "mean_betweenness": "Mean betweenness",
+    "participation_mean": "Participation coeff.",
+    "degree_cv": "Degree CV",
+    "rich_club": "Rich-club coeff.",
+    "assortativity": "Assortativity",
+    # Criticality
+    "branching_ratio_mr": "Branching ratio (MR)",
+    "branching_ratio_naive": "Branching ratio (naive)",
+    "dcc": "DCC (distance to criticality)",
+    "aval_tau": "Avalanche size exp. τ",
+    "aval_alpha": "Avalanche duration exp. α",
+    "gamma_fit": "Crackling exp. γ",
+    # Directed / transfer entropy
+    "mean_te": "Mean transfer entropy",
+    "te_edge_density": "TE edge density",
+    "degree_asymmetry": "Degree asymmetry",
+    "reciprocity": "Reciprocity",
+    "flow_hierarchy": "Flow hierarchy",
 }
 
 
