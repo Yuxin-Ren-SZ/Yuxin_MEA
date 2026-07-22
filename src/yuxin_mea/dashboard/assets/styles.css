@@ -1016,3 +1016,11 @@ pre.code.terminal {
   gap: 1px;
 }
 .rec-progress span { display: block; height: 100%; }
+
+/* ---- Single-unit inspector ---- */
+.unit-row:hover { background: var(--bg-deep); }
+.unit-row.selected { background: var(--bg-deep); box-shadow: inset 3px 0 0 var(--ok); }
+.btn.chip { padding: 2px 12px; border-radius: 12px; font-size: 11px; min-height: 24px; }
+.btn.chip.active { background: var(--ok); border-color: var(--ok); color: #fff; }
+.btn.chip.active:hover { background: var(--ok); color: #fff; }
+.merge-chip { border: 1px solid var(--line); }

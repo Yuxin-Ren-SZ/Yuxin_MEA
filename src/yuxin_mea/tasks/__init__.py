@@ -5,6 +5,7 @@ from .burst_detection import BurstDetectionTask
 from .connectivity import ConnectivityTask
 from .criticality import CriticalityTask
 from .directed_connectivity import DirectedConnectivityTask
+from .manual_curation import ManualCurationTask
 from .ml_burst_detection import MLBurstDetectionTask
 from .preprocessing import PreprocessingTask
 from .sorting import SortingTask
@@ -20,6 +21,7 @@ TASK_CLASSES = (
     AutoMergeTask,
     AnalyzerTask,
     AutoCurationTask,
+    ManualCurationTask,
     BurstDetectionTask,
     MLBurstDetectionTask,
     SpatialMapTask,
@@ -36,6 +38,7 @@ __all__ = [
     "ConnectivityTask",
     "CriticalityTask",
     "DirectedConnectivityTask",
+    "ManualCurationTask",
     "MLBurstDetectionTask",
     "PreprocessingTask",
     "SortingTask",
