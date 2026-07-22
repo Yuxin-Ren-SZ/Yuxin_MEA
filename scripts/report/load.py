@@ -111,6 +111,23 @@ def load_curated_spikes(
     return arr.item() if arr.ndim == 0 else dict(enumerate(arr))
 
 
+def load_ml_bursts(analysis_root: Path, row: pd.Series | dict[str, Any]) -> pd.DataFrame:
+    """Per-burst table (``network_bursts.pkl``) for one well-recording.
+
+    Columns include the raw burst-shape features F6c clusters on: duration_s,
+    within_burst_fr, participation, total_spikes, burst_peak, peak_synchrony,
+    synchrony_energy; the ML-internal detector features: llr_aggregate, llr_peak,
+    posterior_peak, posterior_mean, ff_peak, n_distinct_clusters; plus the
+    per-well burst_type label. (Written by ``ml_burst_detector`` — see the event
+    dict there for the authoritative schema.)
+    """
+    p = artifact_path(
+        analysis_root, "ml_burst_data_umap", row,
+        "ml_burst_detection", "network_bursts.pkl",
+    )
+    return pd.read_pickle(p)
+
+
 def load_templates(analysis_root: Path, row: pd.Series | dict[str, Any]):
     """Average waveform templates ``(n_units, n_samples, n_channels)``."""
     import numpy as np

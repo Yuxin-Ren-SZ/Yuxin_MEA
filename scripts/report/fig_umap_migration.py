@@ -34,7 +34,20 @@ _UMAP_KW = dict(n_neighbors=30, min_dist=0.0, n_components=2, random_state=42)
 _FIT_SAMPLE = 20000          # bins used to FIT the UMAP per well
 _GREY_SAMPLE = 12000         # bins drawn for the light context layer (display only)
 ROW_ARMS = ["Control", "IVH_Early", "IVH_Late"]
-TARGET_DAYS = [0, 14, 21]    # treatment-relative days (tau) to display
+# Hand-picked, chip-matched trio for the published F6b (from the candidate
+# gallery). CX138 tops out ~Day 15 post-treatment, so timepoints are 0/7/14.
+SELECTED_WELLS = {
+    "Control":   "CX138|T003346|well015",
+    "IVH_Early": "CX138|T003346|well001",
+    "IVH_Late":  "CX138|T003346|well014",
+}
+# 4 columns auto-spaced across each well's own post-treatment window (evenly
+# from Day 0 to its latest recorded day), so all four are distinct even when a
+# well doesn't reach a fixed Day 21. Column headers are stage labels; each panel
+# annotates its actual treatment day.
+N_TIMEPOINTS = 4
+COL_STAGES = ["Day 0\n(treatment)", "early\n(~⅓ window)",
+              "mid\n(~⅔ window)", "latest\nrecorded"]
 _REST_C = "#4477aa"
 _BURST_C = "#d62728"
 
@@ -60,17 +73,28 @@ def _pick_well(tidy, analysis_root, arm: str):
     return None if best is None else best[0]
 
 
-def _pool_well(tidy, analysis_root, well_uid: str):
-    """Pool ALL bins of all recordings of one well → shared 2-D UMAP.
+def _thin_recordings(sub, max_recordings):
+    """Stride-select up to ``max_recordings`` rows spanning the DIV range."""
+    if max_recordings is None or len(sub) <= max_recordings:
+        return sub
+    idx = np.linspace(0, len(sub) - 1, max_recordings).round().astype(int)
+    return sub.iloc[np.unique(idx)]
 
-    UMAP is *fit* on a random ``_FIT_SAMPLE`` subsample (speed), then every bin is
-    *transformed* onto the fitted axes, so the returned embedding is 100% of bins.
+
+def _pool_well(tidy, analysis_root, well_uid: str, fit_sample: int = _FIT_SAMPLE,
+               max_recordings: int | None = None):
+    """Pool bins of a well's recordings → shared 2-D UMAP.
+
+    UMAP is *fit* on a random ``fit_sample`` subsample (speed), then every loaded
+    bin is *transformed* onto the fitted axes. ``max_recordings`` thins the
+    recording set (for fast gallery thumbnails); None = use all recordings.
     Returns dict with emb (N,2), div/tau/is_burst (N,) or None if no data.
     """
     import umap
     from sklearn.preprocessing import StandardScaler
 
-    sub = tidy[tidy.well_uid == well_uid].sort_values("DIV")
+    sub = _thin_recordings(tidy[tidy.well_uid == well_uid].sort_values("DIV"),
+                           max_recordings)
     Xs, divs, taus, burst = [], [], [], []
     for _, r in sub.iterrows():
         p = L.ml_trace_path(analysis_root, r)
@@ -90,19 +114,22 @@ def _pool_well(tidy, analysis_root, well_uid: str):
         return None
     Xall = np.nan_to_num(np.vstack(Xs))
     Z = StandardScaler().fit_transform(Xall)
-    fit_idx = _stride_keep(Z.shape[0], _FIT_SAMPLE)     # subsample only for the fit
+    fit_idx = _stride_keep(Z.shape[0], fit_sample)      # subsample only for the fit
     reducer = umap.UMAP(**_UMAP_KW).fit(Z[fit_idx])
     emb = np.asarray(reducer.transform(Z))              # transform 100% of bins
     return dict(emb=emb, div=np.concatenate(divs),
                 tau=np.concatenate(taus), is_burst=np.concatenate(burst))
 
 
-def _nearest_day(avail: np.ndarray, target: int) -> int | None:
-    """Nearest available post-treatment day (tau ≥ 0) to a target."""
-    post = np.unique(avail[avail >= 0])
+def _auto_days(tau: np.ndarray, n: int = N_TIMEPOINTS) -> list[int]:
+    """`n` treatment days evenly spaced across the well's available post-Tx
+    recordings (Day 0 → latest). Uses actual recorded days; distinct when the
+    well has ≥n post recordings."""
+    post = np.unique(tau[tau >= 0])
     if len(post) == 0:
-        return None
-    return int(post[np.argmin(np.abs(post - target))])
+        return []
+    idx = np.unique(np.linspace(0, len(post) - 1, n).round().astype(int))
+    return [int(d) for d in post[idx]]
 
 
 def build_umap_migration(tidy, analysis_root):
@@ -110,28 +137,31 @@ def build_umap_migration(tidy, analysis_root):
 
     pooled = {}
     for arm in ROW_ARMS:
-        w = _pick_well(tidy, analysis_root, arm)
+        w = SELECTED_WELLS.get(arm) or _pick_well(tidy, analysis_root, arm)
         pooled[arm] = (_pool_well(tidy, analysis_root, w), w) if w else (None, None)
 
-    n_rows, n_cols = len(ROW_ARMS), len(TARGET_DAYS)
+    n_rows, n_cols = len(ROW_ARMS), N_TIMEPOINTS
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.0 * n_cols, 3.0 * n_rows),
                              squeeze=False)
     for ri, arm in enumerate(ROW_ARMS):
         d, _ = pooled[arm]
         grey_idx = (_stride_keep(len(d["emb"]), _GREY_SAMPLE)
                     if d is not None else None)
-        for ci, target in enumerate(TARGET_DAYS):
+        days = _auto_days(d["tau"]) if d is not None else []
+        for ci in range(n_cols):
             ax = axes[ri, ci]
             ax.set_xticks([]); ax.set_yticks([])
+            if ri == 0:
+                ax.set_title(COL_STAGES[ci], fontsize=8, fontweight="bold")
             if d is None:
                 ax.text(0.5, 0.5, "no debug traces", ha="center", va="center",
                         transform=ax.transAxes, fontsize=7)
                 continue
-            day = _nearest_day(d["tau"], target)
             # faint context: subsample of the full embedding (display only)
             g = d["emb"][grey_idx]
             ax.scatter(g[:, 0], g[:, 1], s=1.0, c="0.88", lw=0, zorder=1,
                        rasterized=True)
+            day = days[ci] if ci < len(days) else None
             if day is not None:
                 # colored day = 100% of that day's bins
                 sel = d["tau"] == day
@@ -141,14 +171,9 @@ def build_umap_migration(tidy, analysis_root):
                            c=_REST_C, lw=0, alpha=0.5, zorder=2, rasterized=True)
                 ax.scatter(d["emb"][brst, 0], d["emb"][brst, 1], s=4,
                            c=_BURST_C, lw=0, alpha=0.75, zorder=3, rasterized=True)
-            latest = (target == TARGET_DAYS[-1]
-                      and day is not None and day < target)
-            note = f"Day {day}" + (" (latest)" if latest else "") if day is not None else "n/a"
+            note = f"Day {day}" if day is not None else "n/a"
             ax.text(0.03, 0.96, note, transform=ax.transAxes, fontsize=6.5,
                     va="top", ha="left", color="0.25")
-            if ri == 0:
-                ax.set_title(f"Day {target} of treatment", fontsize=8,
-                             fontweight="bold")
             if ci == 0:
                 ax.set_ylabel(arm, fontsize=8, fontweight="bold")
     # single resting/burst legend
@@ -160,11 +185,88 @@ def build_umap_migration(tidy, analysis_root):
                  fontsize=8.5, y=1.0)
     return fig, {arm: (None if d is None else
                        {int(t): int((d["tau"] == t).sum())
-                        for t in [_nearest_day(d["tau"], x) for x in TARGET_DAYS]
-                        if t is not None})
+                        for t in _auto_days(d["tau"])})
                  for arm, (d, _) in pooled.items()}
 
 
 def render(tidy, analysis_root, figure_root):
     fig, meta = build_umap_migration(tidy, analysis_root)
     return save_fig(fig, "F6b_umap_migration", figure_root, subdir="main"), meta
+
+
+# --------------------------------------------------------------------------- #
+# Candidate gallery — one pooled-UMAP-by-DIV thumbnail per candidate well, so a
+# representative chip-matched (Control, IVH_Early, IVH_Late) trio can be picked.
+# --------------------------------------------------------------------------- #
+def _pool_worker(payload):
+    """Picklable worker: pool one well (own tidy subset) → (well_uid, dict)."""
+    import pandas as pd
+    analysis_root, records, well_uid, fit_sample, max_recordings = payload
+    sub = pd.DataFrame.from_records(records)
+    try:
+        d = _pool_well(sub, analysis_root, well_uid, fit_sample, max_recordings)
+    except Exception:
+        d = None
+    return well_uid, d
+
+
+def render_candidate_gallery(tidy, analysis_root, figure_root, chip: str,
+                             arms=("Control", "IVH_Early", "IVH_Late"),
+                             fit_sample: int = 3000, max_recordings: int = 8,
+                             workers: int = 8):
+    import matplotlib.pyplot as plt
+    from concurrent.futures import ProcessPoolExecutor
+
+    wi = S.well_index(tidy)
+    per_arm = {a: sorted(wi[(wi.arm == a) & (wi.chip == chip)].well_uid) for a in arms}
+    all_wells = [w for a in arms for w in per_arm[a]]
+    cols = ["well_uid", "DIV", "tau", "recording_key", "rec_name",
+            "well_id", "sample_id", "canonical_group"]
+    payloads = [(analysis_root,
+                 tidy.loc[tidy.well_uid == w, cols].to_dict("records"),
+                 w, fit_sample, max_recordings) for w in all_wells]
+    pooled: dict = {}
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        for wuid, d in ex.map(_pool_worker, payloads):
+            pooled[wuid] = d
+
+    ncols = max((len(v) for v in per_arm.values()), default=1)
+    nrows = len(arms)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(2.2 * ncols, 2.4 * nrows),
+                             squeeze=False)
+    divs_all = tidy[tidy.sample_id == chip].DIV
+    vmin, vmax = int(divs_all.min()), int(divs_all.max())
+    sc = None
+    for ri, arm in enumerate(arms):
+        wells = per_arm[arm]
+        for ci in range(ncols):
+            ax = axes[ri, ci]
+            ax.set_xticks([]); ax.set_yticks([])
+            if ci >= len(wells):
+                ax.set_visible(False)
+                continue
+            w = wells[ci]
+            d = pooled.get(w)
+            wid = w.split("|")[-1]
+            if d is None:
+                ax.text(0.5, 0.5, f"{wid}\nno traces", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=6)
+                continue
+            sc = ax.scatter(d["emb"][:, 0], d["emb"][:, 1], s=1.5, c=d["div"],
+                            cmap="viridis", vmin=vmin, vmax=vmax, lw=0, alpha=0.7,
+                            rasterized=True)
+            ax.scatter(d["emb"][d["is_burst"], 0], d["emb"][d["is_burst"], 1],
+                       s=2, c=_BURST_C, lw=0, alpha=0.7, rasterized=True)
+            post = np.unique(d["tau"][d["tau"] >= 0])
+            ax.set_title(f"{wid}  DIV{int(d['div'].min())}-{int(d['div'].max())}\n"
+                         f"maxDay{int(post.max()) if len(post) else 'NA'}",
+                         fontsize=6)
+            if ci == 0:
+                ax.set_ylabel(arm, fontsize=8, fontweight="bold")
+    if sc is not None:
+        cb = fig.colorbar(sc, ax=axes, shrink=0.5, pad=0.02)
+        cb.set_label("DIV", fontsize=7); cb.ax.tick_params(labelsize=6)
+    fig.suptitle(f"F6b candidate gallery — {chip} (red = burst bins; "
+                 f"DIV colour; pick one chip-matched trio)", fontsize=9, y=1.0)
+    return save_fig(fig, f"F6b_gallery_{chip}", figure_root, subdir="gallery",
+                    formats=("png",))

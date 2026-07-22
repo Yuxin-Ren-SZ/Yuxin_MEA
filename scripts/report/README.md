@@ -24,8 +24,9 @@ python -m scripts.report.make_report --figures f2 \
 | F3 | `F3_qpcr` | user qPCR table | `--qpcr-table` (else SYNTHETIC placeholder) |
 | F4 | `F4_activity_development` | `tidy_long.csv` + curated spikes | — |
 | F5 | `F5_burst_phenotype` | `tidy_long.csv` (DiD stats); IVH_E/L + H2O2_20uM vs Control | `--rosglo-table` (panel B; else placeholder) |
-| F6 | `F6_ml_characterization` + `F6d_burst_modulation` | `debug_trace.pkl`, `tidy_long.csv` | — |
-| F6b | `F6b_umap_migration` | per-well pooled `debug_trace.pkl` (Control/IVH, shared UMAP across DIV) | — |
+| F6 | `F6_ml_characterization` (A HMM posteriors + B feature UMAP; representative well) + `F6d_burst_modulation` | `debug_trace.pkl`, `tidy_long.csv` | — |
+| F6b | `F6b_umap_migration` | per-well pooled `debug_trace.pkl` (hand-picked chip-matched CX138 trio, shared UMAP; 4 columns = auto-spaced developmental **stages** Day 0→latest, not fixed days) | — |
+| F6c | `F6c_burst_archetypes` | pooled `network_bursts.pkl` across focus groups (global burst-type clustering + per-group composition) | — |
 | F7 | *(placeholder)* | spatial map + STTC — see [`doc/spatial_connectivity_plan.md`](../../doc/spatial_connectivity_plan.md) | not built |
 | S1 | `S1_method_comparison` | `burst_method_comparison/per_well.csv` | — |
 | S2 | `S2_unit_qc_waveforms` | `quality_metrics.pkl`, templates | — |

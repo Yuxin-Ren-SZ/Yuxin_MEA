@@ -1,17 +1,18 @@
 """F6 — ML burst characterization (methods novelty).
 
-Panels (single representative well for A-C, whole cohort for D):
+Panels (single representative well for A-B, whole cohort for D):
 
 * **A. HMM burst posteriors** — per-unit P(burst) heatmap over a time window
   with the population co-burst signal (fraction of units with P>0.5) beneath.
 * **B. Feature-space embedding** — 2-D UMAP of the 26-D per-bin feature matrix,
   bins coloured by whether HDBSCAN assigned them to a burst cluster. Shows the
   low-density burst manifold the detector recovers.
-* **C. Burst-type clustering** — detected bursts in (duration, within-burst FR)
-  space coloured by the per-well KMeans/GMM burst type, illustrating distinct
-  burst shapes.
 * **D. Burst modulation index across arms** — cohort-level distribution of the
   HMM burst-modulation index (well_uid unit), tying the ML method to biology.
+
+(Per-well burst-type clustering moved to the cohort-wide F6c, where bursts are
+pooled across wells and clustered in one shared feature space — see
+``fig6c_bursttypes.py``. Panel labels here read A / B / D to match F6d output.)
 """
 from __future__ import annotations
 
@@ -90,22 +91,6 @@ def _panel_umap(ax, tr, seed: int = 42) -> None:
     ax.set_title("B  Feature-space embedding", loc="left", fontweight="bold")
 
 
-def _panel_bursttype(ax, tr) -> None:
-    bfn = list(tr.burst_feature_names)
-    B = np.asarray(tr.burst_feature_matrix, dtype=float)
-    types = np.asarray(tr.burst_type_labels)
-    xi, yi = bfn.index("duration_s"), bfn.index("within_burst_fr")
-    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b", "#e377c2"]
-    for t in sorted(set(types)):
-        m = types == t
-        ax.scatter(B[m, xi], B[m, yi], s=14, color=palette[t % len(palette)],
-                   alpha=0.8, lw=0.3, edgecolor="white", label=f"type {t}")
-    ax.set_xlabel(METRIC_LABELS.get("nb_duration_mean", "burst duration (s)"))
-    ax.set_ylabel("within-burst firing rate (Hz)")
-    ax.legend(fontsize=6, loc="best", title="burst type", title_fontsize=6)
-    ax.set_title("C  Burst-type clustering", loc="left", fontweight="bold")
-
-
 def _panel_modulation(ax, tidy) -> None:
     metric = "burst_modulation_index"
     per_well = tidy.groupby(["well_uid"]).agg(
@@ -136,9 +121,10 @@ def build_f6(tidy, analysis_root):
     row = _pick_example(tidy)
     tr = L.load_ml_trace(analysis_root, row)
 
-    fig = plt.figure(figsize=(9.2, 6.2))
+    fig = plt.figure(figsize=(7.6, 6.4))
     gs = fig.add_gridspec(
-        3, 2, height_ratios=[1.0, 0.28, 1.15], hspace=0.5, wspace=0.28)
+        3, 3, height_ratios=[1.0, 0.28, 1.3],
+        width_ratios=[1, 2, 1], hspace=0.5, wspace=0.05)
     # Panel A: heatmap + trace stacked, sharing x; thin colorbar column at right
     # so the colorbar never shrinks the heatmap out of alignment with the trace.
     gsA = gs[0, :].subgridspec(1, 2, width_ratios=[1, 0.02], wspace=0.02)
@@ -147,12 +133,11 @@ def build_f6(tidy, analysis_root):
     cax = fig.add_subplot(gsA[0, 1])
     ax_trace = fig.add_subplot(gsT[0, 0], sharex=ax_post)
     fig.add_subplot(gsT[0, 1]).set_visible(False)  # keep trace width == heatmap
-    ax_umap = fig.add_subplot(gs[2, 0])
-    ax_type = fig.add_subplot(gs[2, 1])
+    ax_umap = fig.add_subplot(gs[2, 1])            # centred square UMAP
 
     _panel_posterior(ax_post, ax_trace, cax, tr)
     _panel_umap(ax_umap, tr)
-    _panel_bursttype(ax_type, tr)
+    ax_umap.set_box_aspect(1)
 
     tag = f"{row.well_uid.split('|')[0]} {row.well_name} DIV{int(row.DIV)} ({row.canonical_group})"
     fig.suptitle(f"Figure 6 — ML burst characterization   ·   example well: {tag}",

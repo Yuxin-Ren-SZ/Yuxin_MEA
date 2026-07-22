@@ -45,7 +45,8 @@ def _stars(q: float) -> str:
     return "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else ""
 
 
-def _panel_forest(ax, summ, vc) -> None:
+def _panel_forest(ax, summ, vc, resp) -> None:
+    rng = np.random.default_rng(0)
     treated = [a for a in ordered_groups(summ.arm.unique())
                if a in FOCUS_ARMS]
     arms = ["Control"] + treated
@@ -63,6 +64,13 @@ def _panel_forest(ax, summ, vc) -> None:
             r = r.iloc[0]
             y = y0 + arm_off[ai]
             is_ctrl = arm == "Control"
+            # raw per-well responses (jittered) behind the median±CI
+            pts = resp.loc[(resp.metric == metric) & (resp.arm == arm),
+                           "response"].to_numpy(float)
+            if len(pts):
+                jit = (rng.random(len(pts)) - 0.5) * 0.13
+                ax.scatter(pts, np.full(len(pts), y) + jit, s=5,
+                           color=group_color(arm), alpha=0.30, lw=0, zorder=2)
             xerr = np.array([[max(r.median_response - r.ci_low, 0)],
                              [max(r.ci_high - r.median_response, 0)]])
             ax.errorbar(
@@ -84,6 +92,11 @@ def _panel_forest(ax, summ, vc) -> None:
     ax.set_xlabel("within-well response  log2(post / pre)")
     ax.set_title("A  Response vs developmental maturation", loc="left",
                  fontweight="bold")
+    # make the comparison behind the stars explicit
+    ax.text(0.0, -0.135,
+            "* / ** / *** = q<0.05 / 0.01 / 0.001, treated arm vs Control "
+            "(difference-in-differences, Mann-Whitney + BH-FDR)",
+            transform=ax.transAxes, fontsize=5.5, color="0.35", va="top")
     handles = [ax.plot([], [], marker="D", ls="", color="k",
                        label="Control (maturation)")[0]]
     handles += [ax.plot([], [], marker="o", ls="", color=group_color(a), label=a)[0]
@@ -145,7 +158,7 @@ def build_f5(tidy, rosglo_table=None):
 
     fig, (axf, axr) = plt.subplots(
         1, 2, figsize=(8.6, 4.2), gridspec_kw={"width_ratios": [2.3, 0.8]})
-    _panel_forest(axf, summ, vc)
+    _panel_forest(axf, summ, vc, resp)
     _panel_rosglo(axr, rosglo_table)
     fig.suptitle(
         "Figure 5 — IVH & oxidative-stress network-burst change vs Control "
