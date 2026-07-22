@@ -39,6 +39,19 @@ FOREST_METRICS = [
 ]
 
 
+def _axis_label(metrics) -> str:
+    """Ratio vs difference is decided per metric in ``stats``; say which applies.
+
+    Hard-coding this drifts: several connectivity metrics moved from log2-ratio
+    to difference once it turned out they are exactly zero in a meaningful share
+    of wells, and a stale label would have mislabelled the units.
+    """
+    ratio = [m for m in metrics if m in S.RATIO_METRICS]
+    diff = [m for m in metrics if m in S.DIFF_METRICS]
+    if ratio and diff:
+        return "(log2 post/pre; \u0394 for bounded metrics)"
+    return "log2(post / pre)" if ratio else "(post \u2212 pre)"
+
 def _stars(q: float) -> str:
     if np.isnan(q):
         return ""
@@ -89,7 +102,7 @@ def _panel_forest(ax, summ, vc, resp) -> None:
     ax.set_yticks(yticks)
     ax.set_yticklabels(ylabels)
     ax.set_ylim(min(yticks) - 0.6, max(yticks) + 0.6)
-    ax.set_xlabel("within-well response  log2(post / pre)")
+    ax.set_xlabel("within-well response  " + _axis_label(FOREST_METRICS))
     ax.set_title("A  Response vs developmental maturation", loc="left",
                  fontweight="bold")
     # make the comparison behind the stars explicit

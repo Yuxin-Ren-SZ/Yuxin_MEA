@@ -94,6 +94,19 @@ def _panel_directed_graph(ax, analysis_root, row, top_frac=0.15):
     ax.set_aspect("equal")
 
 
+def _axis_label(metrics) -> str:
+    """Ratio vs difference is decided per metric in ``stats``; say which applies.
+
+    Hard-coding this drifts: several connectivity metrics moved from log2-ratio
+    to difference once it turned out they are exactly zero in a meaningful share
+    of wells, and a stale label would have mislabelled the units.
+    """
+    ratio = [m for m in metrics if m in S.RATIO_METRICS]
+    diff = [m for m in metrics if m in S.DIFF_METRICS]
+    if ratio and diff:
+        return "(log2 post/pre; \u0394 for bounded metrics)"
+    return "log2(post / pre)" if ratio else "(post \u2212 pre)"
+
 def _stars(q):
     if q is None or np.isnan(q):
         return ""
@@ -147,7 +160,7 @@ def _forest(ax, tidy, metrics, title):
         lo = float(summ.ci_low.min()); hi = float(summ.ci_high.max())
         pad = 0.25 * (hi - lo) + 0.1
         ax.set_xlim(lo - pad, hi + pad)
-    ax.set_xlabel("response (log2 post/pre; Δ for bounded)", fontsize=7)
+    ax.set_xlabel("response  " + _axis_label(metrics), fontsize=7)
     ax.set_title(title, loc="left", fontweight="bold")
 
 

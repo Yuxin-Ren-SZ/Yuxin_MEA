@@ -15,6 +15,50 @@ python -m scripts.report.make_report --figures f2 \
     --f2-scalebar-um 50 --f2-px-per-um 1.5                                         # ICC
 ```
 
+## Interactive composer
+
+`make_report` builds a *fixed* set of figures — the panel list, the grid and the
+treatment arms are hard-coded in each `build_fX`. When the layout is still being
+decided, use the composer instead:
+
+```bash
+python -m scripts.report.composer --config pipeline_config_local.json   # http://127.0.0.1:8060
+```
+
+Every panel is rendered and shown on one page. Drag panels between figures,
+resize them on a 12-column grid, add or remove treatment arms, split a four-panel
+figure in two or merge two into one, then **Export** — which writes, into
+`<figure_root>/report/composed/<name>/`:
+
+* `figures.pdf` — one page per figure,
+* `<FigureID>.{pdf,png,svg}` per figure,
+* `figure_spec.json` — **the resume file**: load it next session (top-bar *Load*,
+  or `--` pass it to the CLI below) to get the layout, groups and every panel
+  parameter back,
+* `manifest.json` — outputs, data fingerprint and per-panel warnings.
+
+Headless, for scripting or to re-render a spec unchanged:
+
+```bash
+python -m scripts.report.composer.compose figure_spec.json --out /tmp/figs
+python -m scripts.report.composer.compose --name report        # the built-in default
+```
+
+Notes:
+
+* **Preview equals export.** Panel thumbnails come from the same matplotlib code
+  the PDF uses, and a panel's `(x, y, w, h)` on the canvas are the same integers
+  the exporter feeds to `GridSpec`. Per-figure *Preview* renders the whole figure
+  through the export path when you want to be certain.
+* **Group coverage is shown.** Node-graph, criticality and directed-TE metrics
+  were only computed for the focus arms, so the group list marks
+  `NPH — no node/criticality/directed` and the affected panels say so rather than
+  drawing an empty row.
+* Panels live in `panels.py` (registry + `RenderContext`), `panels_stats.py`
+  (forests, matched-DIV) and `panels_artifacts.py` (rasters, maps, graphs,
+  avalanches, unit QC). Adding a panel is one `register(PanelSpec(...))` call;
+  it then appears in the palette with its parameters as widgets.
+
 ## Figures
 
 | id | file | source | needs input |
@@ -59,6 +103,18 @@ python -m scripts.report.make_report --figures f2 \
 * **AraC (3 wells, CX118 only) and NPH (4 wells, CX138 only)** have no chip
   replication → shown as *exploratory* (open markers, no p-value) in main
   figures, never annotated significant.
+* **Ratio vs difference is decided by whether a metric is ever zero**, not by
+  whether it is non-negative (`stats.RATIO_METRICS` / `DIFF_METRICS`). A log2
+  ratio needs a strictly positive baseline *and* post; with either at zero the
+  `_EPS` guard fabricates a response of ~±30 log2 units that then drives the
+  forest medians and CIs. Twelve bounded graph descriptors are frequently
+  exactly zero — `hub_fraction` in 1364/1516 wells, `leaf_fraction` 454/1516,
+  `edge_density`/`global_efficiency` 86/1843, `clustering_coeff` 123/1843 — so
+  they are difference metrics, and **the F7/F7b/F8 forest x-axes are `post − pre`
+  for those rows**, not log2. Ratio is kept only where zero is rare and
+  meaningful (rates, counts, durations) or impossible (MLE avalanche exponents,
+  small-worldness σ). `well_response` flags any remaining `eps_floored` row; on
+  the current cohort there are none.
 
 ## Modules
 

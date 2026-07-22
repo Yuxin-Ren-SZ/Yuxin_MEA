@@ -154,6 +154,19 @@ def _panel_branching(ax, tidy):
             fontsize=5.5, color="0.45", va="bottom", ha="right")
 
 
+def _axis_label(metrics) -> str:
+    """Ratio vs difference is decided per metric in ``stats``; say which applies.
+
+    Hard-coding this drifts: several connectivity metrics moved from log2-ratio
+    to difference once it turned out they are exactly zero in a meaningful share
+    of wells, and a stale label would have mislabelled the units.
+    """
+    ratio = [m for m in metrics if m in S.RATIO_METRICS]
+    diff = [m for m in metrics if m in S.DIFF_METRICS]
+    if ratio and diff:
+        return "(log2 post/pre; \u0394 for bounded metrics)"
+    return "log2(post / pre)" if ratio else "(post \u2212 pre)"
+
 def _stars(q):
     if q is None or np.isnan(q):
         return ""
@@ -188,7 +201,7 @@ def _panel_forest(ax, summ, vc):
     ax.axvline(0, ls="--", color="0.5", lw=0.8)
     ax.set_yticks(yticks); ax.set_yticklabels(ylabels)
     ax.set_ylim(min(yticks) - 0.6, max(yticks) + 0.6)
-    ax.set_xlabel("response  (log2 post/pre; Δ for BR/DCC)")
+    ax.set_xlabel("response  " + _axis_label(FOREST_METRICS))
     ax.set_title("D  Criticality response vs Control", loc="left", fontweight="bold")
     handles = [ax.plot([], [], marker="D", ls="", color="k", label="Control")[0]]
     handles += [ax.plot([], [], marker="o", ls="", color=group_color(a), label=a)[0]
