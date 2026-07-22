@@ -138,11 +138,18 @@ def _proportion_within(a: np.ndarray, b: np.ndarray, dt: float) -> float:
 
 
 def _sttc_from(pa: float, pb: float, ta: float, tb: float) -> float:
-    """Combine the two half-terms, guarding the 0/0 at P·T == 1."""
+    """Combine the two half-terms, resolving the 0/0 at P·T == 1.
+
+    Per Cutts & Eglen (2014) / Elephant: when a half-term's denominator vanishes
+    (``P·T == 1``, i.e. one train's ±dt window tiles the whole recording) that
+    half-term equals 1.0, so STTC = 0.5·(1 + other); both degenerate → 1.0.
+    (An earlier version returned 0.0 here, deflating STTC for densely-tiling
+    units and dropping their edges.)
+    """
     denom1 = 1.0 - pa * tb
     denom2 = 1.0 - pb * ta
-    term1 = (pa - tb) / denom1 if abs(denom1) > 1e-12 else 0.0
-    term2 = (pb - ta) / denom2 if abs(denom2) > 1e-12 else 0.0
+    term1 = (pa - tb) / denom1 if abs(denom1) > 1e-12 else 1.0
+    term2 = (pb - ta) / denom2 if abs(denom2) > 1e-12 else 1.0
     return 0.5 * (term1 + term2)
 
 
@@ -338,23 +345,33 @@ def graph_metrics(W: np.ndarray, adjacency: np.ndarray | None = None,
     density = nx.density(G)
     clustering = nx.average_clustering(G)
     try:
-        comms = nx.community.greedy_modularity_communities(G)
-        modularity = nx.community.modularity(G, comms)
+        # Detect AND score on the same (STTC-weighted) objective.
+        comms = nx.community.greedy_modularity_communities(G, weight="weight")
+        modularity = nx.community.modularity(G, comms, weight="weight")
     except Exception:
         modularity = float("nan")
     efficiency = nx.global_efficiency(G)
 
+    mean_deg = 2.0 * n_edges / n            # full-graph mean degree (reported)
+
     # Analytic small-worldness (Humphries-Gurney σ with an ER reference).
-    mean_deg = 2.0 * n_edges / n
-    if mean_deg > 1.0 and density > 0 and clustering > 0:
-        c_rand = density
-        l_rand = np.log(n) / np.log(mean_deg)
-        # Observed path length on the largest connected component.
-        comps = list(nx.connected_components(G))
-        gc = G.subgraph(max(comps, key=len)) if comps else G
-        l_obs = nx.average_shortest_path_length(gc) if gc.number_of_nodes() > 1 else np.nan
-        if np.isfinite(l_obs) and l_rand > 0 and c_rand > 0 and l_obs > 0:
-            small_world = (clustering / c_rand) / (l_obs / l_rand)
+    # All four quantities are evaluated on the SAME node set — the largest
+    # connected component — so the observed path length is comparable to its ER
+    # reference. (Mixing a full-n numerator with a giant-component-only l_obs
+    # inflated σ, and the bias differed by graph fragmentation.)
+    comps = list(nx.connected_components(G))
+    gc = G.subgraph(max(comps, key=len)) if comps else G
+    n_gc = gc.number_of_nodes()
+    m_gc = gc.number_of_edges()
+    mean_deg_gc = (2.0 * m_gc / n_gc) if n_gc else 0.0
+    if n_gc > 2 and mean_deg_gc > 1.0:
+        clustering_gc = nx.average_clustering(gc)
+        c_rand = nx.density(gc)
+        l_rand = np.log(n_gc) / np.log(mean_deg_gc)
+        l_obs = nx.average_shortest_path_length(gc)
+        if (np.isfinite(l_obs) and l_obs > 0 and l_rand > 0
+                and c_rand > 0 and clustering_gc > 0):
+            small_world = (clustering_gc / c_rand) / (l_obs / l_rand)
         else:
             small_world = float("nan")
     else:

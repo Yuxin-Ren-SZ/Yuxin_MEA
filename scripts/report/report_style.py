@@ -120,7 +120,10 @@ METRIC_LABELS: dict[str, str] = {
     # Functional connectivity (STTC)
     "mean_sttc": "Mean STTC",
     "edge_density": "Edge density",
+    "mean_degree": "Mean degree",
+    "clustering_coeff": "Clustering coeff.",
     "modularity": "Modularity",
+    "global_efficiency": "Global efficiency",
     "small_worldness": "Small-worldness",
 }
 
