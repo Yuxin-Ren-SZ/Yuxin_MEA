@@ -234,8 +234,7 @@ function buildFigureCard(fig) {
     margin: 3,
     float: true,
     minRow: fig.rows,
-    acceptWidgets: true,
-    dragOut: true,
+    acceptWidgets: true,          // enables dragging panels between figures
     resizable: {handles: 'se, sw, ne, nw, e, w, s, n'},
     handle: '.tile-head',
   }, gridEl);
@@ -349,11 +348,16 @@ function onGridAdded(fig, items) {
     fig.panels.push(p);
     markDirty();
   });
-  buildCanvas();
+  // Rebuild after GridStack finishes its own bookkeeping for this drop.
+  // buildCanvas() destroys and recreates every grid; doing that synchronously
+  // inside the event leaves GridStack holding references to dead nodes.
+  setTimeout(buildCanvas, 0);
 }
 
 function onGridRemoved(fig, items) {
-  // handled by 'added' on the receiving grid; nothing to do for a pure move
+  // A move fires 'removed' here and 'added' on the receiving grid; the receiving
+  // side owns the state change, so there is nothing to do. Deletions go through
+  // the tile's own × button, not through GridStack.
 }
 
 function findPanelAnywhere(uid) {
@@ -652,12 +656,32 @@ async function doLoad(name) {
   } catch (e) { banner(e.message, 'error'); }
 }
 
+/* Export writes figure_spec.json beside the PDF; this loads such a file back in
+ * from anywhere on disk, which is the "resume from the exported file" path. */
+async function doLoadPath() {
+  const path = prompt('Path to a figure_spec.json (or its directory):',
+                      state.lastExportDir || '');
+  if (!path) return;
+  try {
+    const res = await api('/api/spec_from_path', {path});
+    adopt(res.composition);
+    $('#spec-name').value = state.comp.name;
+    syncGlobalsToInputs();
+    buildGroups(); buildCanvas(); renderFigureInspector(); renderPanelInspector();
+    markDirty(false);
+    const notes = [...(res.data_delta || []), ...(res.warnings || [])];
+    banner(notes.length ? `loaded — ${notes.join('; ')}` : 'loaded', notes.length ? '' : 'ok');
+  } catch (e) { banner(e.message, 'error'); }
+}
+
 async function doExport() {
   state.comp.name = $('#spec-name').value.trim() || 'composition';
   banner('exporting… (rendering every figure at full DPI)');
   try {
     const m = await api('/api/export', {composition: state.comp});
     markDirty(false);
+    state.lastExportDir = m.out_dir;
+    if (m.specs) { state.boot.specs = m.specs; fillSpecList(); }
     const box = el('div');
     box.appendChild(el('p', null, `${m.figures.length} figures → ${m.out_dir}`));
     const pre = el('pre');
@@ -774,6 +798,7 @@ async function init() {
   $('#btn-merge').addEventListener('click', doMerge);
   $('#btn-add-figure').addEventListener('click', addFigure);
   $('#spec-list').addEventListener('change', (e) => doLoad(e.target.value));
+  $('#btn-load-path').addEventListener('click', doLoadPath);
   $('#btn-reset').addEventListener('click', () => {
     if (!confirm('Discard this composition and start from the default report?')) return;
     localStorage.removeItem(STORE_KEY);

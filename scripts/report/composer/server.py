@@ -156,18 +156,40 @@ def create_app(config_path: str | None = None, cache_dir: Path | None = None) ->
         return jsonify({"saved": str(path), "name": safe_name(comp.name),
                         "specs": sorted(p.stem for p in specs_dir.glob("*.json"))})
 
+    def _loaded(comp: Composition):
+        return jsonify({"composition": comp.to_json(),
+                        "data_delta": fingerprint_delta(comp.data, fingerprint),
+                        "warnings": comp.validate(known_panels=set(P.PANELS))})
+
     @app.get("/api/spec/<name>")
     def load_spec(name: str):
         path = specs_dir / f"{safe_name(name)}.json"
         if not path.exists():
             return jsonify({"error": f"no spec {name!r}"}), 404
         try:
-            comp = Composition.load(path)
+            return _loaded(Composition.load(path))
         except SpecError as exc:
             return _json_error(exc)
-        return jsonify({"composition": comp.to_json(),
-                        "data_delta": fingerprint_delta(comp.data, fingerprint),
-                        "warnings": comp.validate(known_panels=set(P.PANELS))})
+
+    @app.post("/api/spec_from_path")
+    def load_spec_from_path():
+        """Load any ``figure_spec.json`` by path.
+
+        Export writes its spec next to the PDF; this is what lets that file be
+        fed straight back in, including one carried over from another machine.
+        """
+        raw = str((request.get_json(force=True) or {}).get("path", "")).strip()
+        if not raw:
+            return jsonify({"error": "no path given"}), 400
+        path = Path(raw).expanduser()
+        if path.is_dir():
+            path = path / "figure_spec.json"
+        if not path.exists():
+            return jsonify({"error": f"no such file: {path}"}), 404
+        try:
+            return _loaded(Composition.load(path))
+        except (SpecError, ValueError) as exc:
+            return _json_error(exc)
 
     # -- layout operations ----------------------------------------------------
     @app.post("/api/split")
@@ -203,6 +225,12 @@ def create_app(config_path: str | None = None, cache_dir: Path | None = None) ->
             formats = tuple(body.get("formats") or ("pdf", "png", "svg"))
             manifest = CM.export(comp, ctx_for(comp.groups, comp.seed),
                                  out_dir=body.get("out_dir"), formats=formats)
+            # Also register the spec under its name, so the exported layout is
+            # in the Load list next session. Exporting is the action users
+            # actually take at the end of a session; requiring a separate Save
+            # to be able to resume would lose the work they just committed to.
+            comp.save(specs_dir / f"{safe_name(comp.name)}.json")
+            manifest["specs"] = sorted(p.stem for p in specs_dir.glob("*.json"))
         except SpecError as exc:
             return _json_error(exc)
         except Exception as exc:  # noqa: BLE001
