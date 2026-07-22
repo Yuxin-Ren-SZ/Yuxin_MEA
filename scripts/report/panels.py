@@ -374,6 +374,7 @@ def load_registry() -> dict[str, PanelSpec]:
     """
     if not PANELS:
         from . import panels_artifacts  # noqa: F401
+        from . import panels_cohort  # noqa: F401
         from . import panels_stats  # noqa: F401
     return PANELS
 

@@ -55,9 +55,14 @@ Notes:
   `NPH — no node/criticality/directed` and the affected panels say so rather than
   drawing an empty row.
 * Panels live in `panels.py` (registry + `RenderContext`), `panels_stats.py`
-  (forests, matched-DIV) and `panels_artifacts.py` (rasters, maps, graphs,
-  avalanches, unit QC). Adding a panel is one `register(PanelSpec(...))` call;
-  it then appears in the palette with its parameters as widgets.
+  (forests, matched-DIV), `panels_artifacts.py` (rasters, maps, graphs,
+  avalanches, unit QC) and `panels_cohort.py` (burst archetypes, state
+  manifolds). Adding a panel is one `register(PanelSpec(...))` call; it then
+  appears in the palette with its parameters as widgets.
+* **Expensive shared work is fit once.** F6c's four views share one cohort-wide
+  UMAP + KMeans, and an F6b row of timepoints shares one pooled per-well
+  embedding, via `RenderContext.dataset`. Placing four archetype panels costs
+  one fit, not four.
 
 ## Figures
 

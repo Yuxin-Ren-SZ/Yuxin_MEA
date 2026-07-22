@@ -63,14 +63,24 @@ def _stars(q: float) -> str:
     return "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else ""
 
 
-def collect_bursts(tidy, analysis_root, seed: int = 0) -> pd.DataFrame:
-    """Pool per-burst feature rows across sampled wells of the focus groups."""
+def collect_bursts(tidy, analysis_root, seed: int = 0, groups=None,
+                   max_rows_per_group: int | None = None,
+                   max_bursts: int | None = None) -> pd.DataFrame:
+    """Pool per-burst feature rows across sampled wells of the focus groups.
+
+    ``groups`` and the two caps default to the module constants, i.e. to exactly
+    what the batch F6c does. They are parameters so the interactive composer can
+    narrow the arms or trade bursts for speed while iterating on a layout.
+    """
+    groups = list(groups) if groups is not None else FOCUS_GROUPS
+    max_rows_per_group = max_rows_per_group or _MAX_ROWS_PER_GROUP
+    max_bursts = max_bursts or _MAX_BURSTS
     frames = []
-    for grp in FOCUS_GROUPS:
+    for grp in groups:
         rows = tidy[(tidy.canonical_group == grp) & (tidy.nb_count >= 5)]
         if rows.empty:
             continue
-        take = rows.sample(min(len(rows), _MAX_ROWS_PER_GROUP), random_state=seed)
+        take = rows.sample(min(len(rows), max_rows_per_group), random_state=seed)
         for _, r in take.iterrows():
             try:
                 b = L.load_ml_bursts(analysis_root, r)
@@ -84,8 +94,8 @@ def collect_bursts(tidy, analysis_root, seed: int = 0) -> pd.DataFrame:
             frames.append(b)
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     out = out.dropna(subset=FEATURES)
-    if len(out) > _MAX_BURSTS:
-        out = out.sample(_MAX_BURSTS, random_state=seed).reset_index(drop=True)
+    if len(out) > max_bursts:
+        out = out.sample(max_bursts, random_state=seed).reset_index(drop=True)
     return out
 
 

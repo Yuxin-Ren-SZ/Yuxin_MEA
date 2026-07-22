@@ -390,6 +390,22 @@ def default_composition(groups: list[str] | None = None) -> Composition:
                    rows=10, panels=panels(
                        ("ml.posterior", 0, 0, 12, 5, None),
                        ("ml.umap", 3, 5, 6, 5, None))),
+        FigureSpec(id="F6b", title="Post-treatment network-state dynamics",
+                   width_in=12.0, rows=5, panels=panels(
+                       ("manifold.state", 0, 0, 3, 5,
+                        {"arm": "IVH_Late", "stage": 0}),
+                       ("manifold.state", 3, 0, 3, 5,
+                        {"arm": "IVH_Late", "stage": 1}),
+                       ("manifold.state", 6, 0, 3, 5,
+                        {"arm": "IVH_Late", "stage": 2}),
+                       ("manifold.state", 9, 0, 3, 5,
+                        {"arm": "IVH_Late", "stage": 3}))),
+        FigureSpec(id="F6c", title="Cohort-wide burst archetypes", width_in=8.4,
+                   rows=10, panels=panels(
+                       ("archetypes.space", 0, 0, 6, 5, {"color_by": "group"}),
+                       ("archetypes.space", 6, 0, 6, 5, {"color_by": "archetype"}),
+                       ("archetypes.composition", 0, 5, 6, 5, None),
+                       ("archetypes.profiles", 6, 5, 6, 5, None))),
         FigureSpec(id="F7", title="Spatial activity & functional connectivity",
                    width_in=9.0, rows=10, panels=panels(
                        ("spatial.field", 0, 0, 4, 5, None),
