@@ -35,23 +35,38 @@ from .. import panels as P
 from ..report_style import apply_style, figures_base
 from .spec import Composition, FigureSpec, PanelPlacement
 
-# Outer margins as figure fractions. Generous top leaves room for the suptitle.
-MARGIN = {"left": 0.055, "right": 0.02, "bottom": 0.055, "top": 0.085}
-MARGIN_NO_TITLE = {**MARGIN, "top": 0.03}
+# Outer margins **in inches**, not figure fractions. Everything they make room
+# for — tick labels, axis labels, the suptitle — is sized in points, so the space
+# needed is physical and constant. Expressed as a fraction it would shrink with
+# the figure, and a short two-panel figure would collide where a tall one did not.
+MARGIN_IN = {"left": 0.50, "right": 0.16, "bottom": 0.42, "top": 0.34}
+MARGIN_IN_NO_TITLE = {**MARGIN_IN, "top": 0.12}
+
+
+def _margin_fractions(margin_in: dict, width_in: float, height_in: float) -> dict:
+    return {
+        "left": margin_in["left"] / width_in,
+        "right": margin_in["right"] / width_in,
+        "bottom": margin_in["bottom"] / height_in,
+        "top": margin_in["top"] / height_in,
+    }
 
 
 def cell_rect(p: PanelPlacement, fig_spec: FigureSpec, comp: Composition,
-              margin: dict | None = None) -> tuple[float, float, float, float]:
+              margin_in: dict | None = None) -> tuple[float, float, float, float]:
     """``(left, right, bottom, top)`` of a grid cell, in figure fractions.
 
     Grid y counts downward from the top (screen convention); matplotlib measures
     from the bottom, hence the flip.
     """
-    m = margin or MARGIN
+    width_in = fig_spec.width_in
+    height_in = max(1.0, fig_spec.rows * comp.row_height_in)
+    m = _margin_fractions(margin_in or MARGIN_IN, width_in, height_in)
     ax0, ax1 = m["left"], 1.0 - m["right"]
     ay0, ay1 = m["bottom"], 1.0 - m["top"]
     span_x, span_y = ax1 - ax0, ay1 - ay0
-    gx, gy = comp.gutter_x, comp.gutter_y
+    gx = comp.gutter_x_in / width_in
+    gy = comp.gutter_y_in / height_in
     left = ax0 + (p.x / comp.grid_cols) * span_x + gx
     right = ax0 + ((p.x + p.w) / comp.grid_cols) * span_x - gx
     top = ay1 - (p.y / fig_spec.rows) * span_y - gy
@@ -72,7 +87,8 @@ def build_figure(fig_spec: FigureSpec, comp: Composition, ctx: P.RenderContext,
     fig = Figure(figsize=(fig_spec.width_in, height_in), dpi=comp.dpi)
     FigureCanvasAgg(fig)                       # OO API: no pyplot, thread-safe
 
-    margin = MARGIN if (fig_spec.show_suptitle and fig_spec.title) else MARGIN_NO_TITLE
+    has_title = bool(fig_spec.show_suptitle and fig_spec.title)
+    margin = MARGIN_IN if has_title else MARGIN_IN_NO_TITLE
     labels = fig_spec.auto_labels()
     records: list[dict] = []
 
@@ -84,12 +100,17 @@ def build_figure(fig_spec: FigureSpec, comp: Composition, ctx: P.RenderContext,
                    cell={"x": p.x, "y": p.y, "w": p.w, "h": p.h})
         records.append(rec)
         if draw_labels and labels[p.uid]:
-            fig.text(max(left - 0.035, 0.002), min(top + 0.012, 0.998),
+            # offsets in inches for the same reason the margins are
+            fig.text(max(left - 0.30 / fig_spec.width_in, 0.002),
+                     min(top + 0.04 / height_in, 0.995),
                      labels[p.uid], fontsize=10, fontweight="bold",
                      ha="left", va="bottom")
 
-    if fig_spec.show_suptitle and fig_spec.title:
-        fig.suptitle(fig_spec.title, fontsize=9, y=0.995)
+    if has_title:
+        # place the suptitle inside the reserved top margin rather than at a
+        # fixed fraction, which would overlap the first row on a short figure
+        fig.suptitle(fig_spec.title, fontsize=9,
+                     y=1.0 - (MARGIN_IN["top"] * 0.32) / height_in, va="top")
     return fig, records
 
 

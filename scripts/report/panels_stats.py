@@ -111,6 +111,15 @@ def draw_forest(ax, ctx, metrics, show_points=True, clip_to_ci=True,
                     ax.text(r.ci_high + 0.05, y, s, va="center", ha="left",
                             fontsize=7, color=group_color(arm))
 
+    # Say so when a selected arm contributed nothing. The node, criticality and
+    # directed metrics were only ever computed for the focus arms, so enabling
+    # NPH/AraC/H2O2_10uM would otherwise just silently thin the plot.
+    absent = [g for g in ctx.groups if g not in set(summ.arm.unique())]
+    if absent:
+        ax.text(0.5, -0.16, f"no data for {', '.join(absent)}",
+                transform=ax.transAxes, ha="center", va="top",
+                fontsize=5.5, color="#b45309")
+
     ax.axvline(0, ls="--", color="0.5", lw=0.8, zorder=1)
     ax.set_yticks(yticks)
     ax.set_yticklabels(ylabels, fontsize=6.5)

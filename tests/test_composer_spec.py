@@ -32,14 +32,17 @@ def test_json_round_trip_is_lossless(tmp_path):
     assert back.to_json() == c.to_json()
 
 
-def test_load_accepts_the_pre_split_single_gutter_field(tmp_path):
+def test_load_fills_in_missing_globals(tmp_path):
+    """A hand-edited spec that omits optional globals still loads."""
     d = _comp().to_json()
-    d["globals"].pop("gutter_x"), d["globals"].pop("gutter_y")
-    d["globals"]["gutter"] = 0.05
-    p = tmp_path / "old.json"
+    d["globals"] = {"groups": ["Control", "IVH_Late"]}
+    p = tmp_path / "sparse.json"
     p.write_text(json.dumps(d))
     back = SP.Composition.load(p)
-    assert back.gutter_x == 0.05 and back.gutter_y == 0.05
+    assert back.groups == ["Control", "IVH_Late"]
+    assert back.grid_cols == SP.DEFAULT_GRID_COLS
+    assert back.gutter_x_in > 0 and back.gutter_y_in > 0
+    assert back.dpi == 300
 
 
 def test_future_version_is_refused(tmp_path):
@@ -108,6 +111,22 @@ def test_merge_concatenates_and_reflows_without_collisions():
     assert head.title == "merged"
     assert {p.uid for p in head.panels} == {"a", "b", "c", "d"}
     assert c.validate() == []                 # reflow removed every overlap
+
+
+def test_merge_keeps_the_source_figures_panel_order():
+    """Reflowing by position would interleave the two figures and scramble labels."""
+    c = _comp()
+    head = SP.merge_figures(c, ["F1", "F2"])
+    labels = head.auto_labels()
+    assert [labels[u] for u in ("a", "b", "c", "d")] == ["A", "B", "C", "D"]
+
+
+def test_reflow_by_list_order_ignores_current_positions():
+    f = SP.FigureSpec(id="X", rows=1, panels=[
+        SP.PanelPlacement(uid="second", panel="p", x=6, y=0, w=6, h=2),
+        SP.PanelPlacement(uid="first", panel="p", x=0, y=0, w=6, h=2)])
+    SP.reflow(f, order="list")
+    assert [(p.uid, p.x) for p in f.panels] == [("second", 0), ("first", 6)]
 
 
 def test_reflow_wraps_at_the_grid_width():

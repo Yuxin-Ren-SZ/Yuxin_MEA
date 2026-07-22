@@ -48,7 +48,7 @@ def ctx(tmp_path):
 
 
 def _comp(panels, rows=8, cols=12, gutter=0.0):
-    c = SP.Composition(name="t", grid_cols=cols, gutter_x=gutter, gutter_y=gutter)
+    c = SP.Composition(name="t", grid_cols=cols, gutter_x_in=gutter, gutter_y_in=gutter)
     c.figures = [SP.FigureSpec(id="F", title="", show_suptitle=False, rows=rows,
                                panels=panels)]
     return c
@@ -58,6 +58,13 @@ def _placement(uid, x, y, w, h, panel="forest.burst"):
     return SP.PanelPlacement(uid=uid, panel=panel, x=x, y=y, w=w, h=h)
 
 
+def _frac(comp, fig, margin_in=None):
+    """Margins as figure fractions — they are declared in inches."""
+    return C._margin_fractions(
+        margin_in or C.MARGIN_IN_NO_TITLE, fig.width_in,
+        max(1.0, fig.rows * comp.row_height_in))
+
+
 # --------------------------------------------------------------------------- #
 # Cell arithmetic
 # --------------------------------------------------------------------------- #
@@ -65,11 +72,15 @@ def _placement(uid, x, y, w, h, panel="forest.burst"):
     (0, 0, 6, 4), (6, 0, 6, 4), (0, 4, 4, 4), (4, 4, 8, 4), (0, 0, 12, 8),
 ])
 def test_cell_rect_is_the_exact_grid_fraction(x, y, w, h):
-    """With no gutter and no suptitle margin, cells tile the drawing area exactly."""
+    """With no gutter, cells tile the drawing area exactly.
+
+    This is the arithmetic the whole composer rests on: cell edges are a linear
+    function of (x, y, w, h) and nothing else.
+    """
     comp = _comp([_placement("p", x, y, w, h)])
     f = comp.figures[0]
-    m = C.MARGIN_NO_TITLE
-    left, right, bottom, top = C.cell_rect(f.panels[0], f, comp, m)
+    m = _frac(comp, f)
+    left, right, bottom, top = C.cell_rect(f.panels[0], f, comp, C.MARGIN_IN_NO_TITLE)
 
     ax0, ax1 = m["left"], 1 - m["right"]
     ay0, ay1 = m["bottom"], 1 - m["top"]
@@ -84,32 +95,35 @@ def test_grid_y_counts_downward_from_the_top():
     """Screen convention: y=0 is the top row, which is the *highest* in figure coords."""
     comp = _comp([_placement("top", 0, 0, 12, 4), _placement("bot", 0, 4, 12, 4)])
     f = comp.figures[0]
-    top_rect = C.cell_rect(f.panels[0], f, comp, C.MARGIN_NO_TITLE)
-    bot_rect = C.cell_rect(f.panels[1], f, comp, C.MARGIN_NO_TITLE)
+    top_rect = C.cell_rect(f.panels[0], f, comp, C.MARGIN_IN_NO_TITLE)
+    bot_rect = C.cell_rect(f.panels[1], f, comp, C.MARGIN_IN_NO_TITLE)
     assert top_rect[2] > bot_rect[3] - TOL          # top.bottom >= bot.top
 
 
 def test_adjacent_cells_share_an_edge_when_the_gutter_is_zero():
     comp = _comp([_placement("l", 0, 0, 6, 8), _placement("r", 6, 0, 6, 8)])
     f = comp.figures[0]
-    lr = C.cell_rect(f.panels[0], f, comp, C.MARGIN_NO_TITLE)
-    rr = C.cell_rect(f.panels[1], f, comp, C.MARGIN_NO_TITLE)
+    lr = C.cell_rect(f.panels[0], f, comp, C.MARGIN_IN_NO_TITLE)
+    rr = C.cell_rect(f.panels[1], f, comp, C.MARGIN_IN_NO_TITLE)
     assert lr[1] == pytest.approx(rr[0], abs=TOL)
 
 
 def test_gutter_insets_symmetrically():
     plain = _comp([_placement("p", 0, 0, 6, 4)], gutter=0.0)
-    inset = _comp([_placement("p", 0, 0, 6, 4)], gutter=0.02)
-    a = C.cell_rect(plain.figures[0].panels[0], plain.figures[0], plain, C.MARGIN_NO_TITLE)
-    b = C.cell_rect(inset.figures[0].panels[0], inset.figures[0], inset, C.MARGIN_NO_TITLE)
-    assert b[0] - a[0] == pytest.approx(0.02, abs=TOL)
-    assert a[1] - b[1] == pytest.approx(0.02, abs=TOL)
+    inset = _comp([_placement("p", 0, 0, 6, 4)], gutter=0.2)
+    a = C.cell_rect(plain.figures[0].panels[0], plain.figures[0], plain,
+                    C.MARGIN_IN_NO_TITLE)
+    b = C.cell_rect(inset.figures[0].panels[0], inset.figures[0], inset,
+                    C.MARGIN_IN_NO_TITLE)
+    inset_frac = 0.2 / inset.figures[0].width_in       # gutter is in inches
+    assert b[0] - a[0] == pytest.approx(inset_frac, abs=TOL)
+    assert a[1] - b[1] == pytest.approx(inset_frac, abs=TOL)
 
 
 def test_an_oversized_gutter_cannot_invert_a_cell():
-    comp = _comp([_placement("p", 0, 0, 1, 1)], rows=8, gutter=0.9)
+    comp = _comp([_placement("p", 0, 0, 1, 1)], rows=8, gutter=9.0)
     left, right, bottom, top = C.cell_rect(
-        comp.figures[0].panels[0], comp.figures[0], comp, C.MARGIN_NO_TITLE)
+        comp.figures[0].panels[0], comp.figures[0], comp, C.MARGIN_IN_NO_TITLE)
     assert right > left and top > bottom
 
 
@@ -125,7 +139,7 @@ def test_rendered_axes_land_on_their_cells(ctx):
     assert [r["status"] for r in records] == ["ok"] * 3
     by_uid = {p.uid: p for p in f.panels}
     for ax, rec in zip(fig.axes, records):
-        want = C.cell_rect(by_uid[rec["uid"]], f, comp, C.MARGIN_NO_TITLE)
+        want = C.cell_rect(by_uid[rec["uid"]], f, comp, C.MARGIN_IN_NO_TITLE)
         pos = ax.get_position()
         assert (pos.x0, pos.x1, pos.y0, pos.y1) == pytest.approx(want, abs=1e-6)
 

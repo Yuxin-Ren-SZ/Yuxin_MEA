@@ -91,6 +91,35 @@ def _bh_fdr(pvals: np.ndarray) -> np.ndarray:
     return q
 
 
+# Columns every stats table carries, so an empty result still has a usable shape.
+_SUMMARY_COLUMNS = ["arm", "metric", "n_wells", "n_chips", "median_response",
+                    "ci_low", "ci_high", "p_wilcoxon", "tier", "q_bh"]
+_VS_CONTROL_COLUMNS = ["arm", "metric", "n_wells", "n_chips", "median_arm",
+                       "median_ctrl", "did", "cliffs_delta", "p_vs_control",
+                       "tier", "q_bh"]
+_MWU_COLUMNS = ["arm", "metric", "n_wells", "n_chips", "median_arm",
+                "median_ctrl", "p_mwu", "tier", "q_bh"]
+
+
+def _finalize(rows: list[dict], p_col: str, columns: list[str]) -> pd.DataFrame:
+    """Assemble a stats table and BH-adjust the confirmatory tests.
+
+    An empty ``rows`` is normal, not an error: it just means no arm had enough
+    paired wells for this metric — e.g. an arm the node/criticality metrics were
+    never computed for. Returning a correctly-shaped empty frame keeps callers
+    from having to special-case it (they would otherwise hit ``.tier`` on a bare
+    DataFrame).
+    """
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    out = pd.DataFrame(rows)
+    out["q_bh"] = np.nan
+    conf = (out.tier == "confirmatory") & out[p_col].notna()
+    if conf.any():
+        out["q_bh"] = _bh_fdr(out[p_col].where(conf, np.nan).to_numpy())
+    return out
+
+
 def arm_of(groups: pd.Series) -> str:
     """A physical well's treatment identity = the non-Control group it takes."""
     non = [g for g in groups if g != "Control"]
@@ -203,14 +232,7 @@ def arm_response_summary(resp: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
                   if (n_chips >= MIN_CHIPS_CONFIRMATORY and n_wells >= MIN_WELLS_CONFIRMATORY)
                   else "exploratory"),
         ))
-    out = pd.DataFrame(rows)
-    # BH-FDR across confirmatory tests only (exploratory left raw).
-    out["q_bh"] = np.nan
-    conf = (out.tier == "confirmatory") & out.p_wilcoxon.notna()
-    if conf.any():
-        pv = out.p_wilcoxon.where(conf, np.nan).to_numpy()
-        out["q_bh"] = _bh_fdr(pv)
-    return out
+    return _finalize(rows, "p_wilcoxon", _SUMMARY_COLUMNS)
 
 
 def cliffs_delta(a: np.ndarray, b: np.ndarray) -> float:
@@ -260,13 +282,7 @@ def arm_response_vs_control(resp: pd.DataFrame) -> pd.DataFrame:
                   if (n_chips >= MIN_CHIPS_CONFIRMATORY and n_wells >= MIN_WELLS_CONFIRMATORY)
                   else "exploratory"),
         ))
-    out = pd.DataFrame(rows)
-    out["q_bh"] = np.nan
-    conf = (out.tier == "confirmatory") & out.p_vs_control.notna()
-    if conf.any():
-        pv = out.p_vs_control.where(conf, np.nan).to_numpy()
-        out["q_bh"] = _bh_fdr(pv)
-    return out
+    return _finalize(rows, "p_vs_control", _VS_CONTROL_COLUMNS)
 
 
 # --------------------------------------------------------------------------- #
@@ -316,10 +332,4 @@ def mwu_vs_control(matched: pd.DataFrame, metric: str, seed: int = 0) -> pd.Data
                   if (n_chips >= MIN_CHIPS_CONFIRMATORY and n_wells >= MIN_WELLS_CONFIRMATORY)
                   else "exploratory"),
         ))
-    out = pd.DataFrame(rows)
-    out["q_bh"] = np.nan
-    conf = (out.tier == "confirmatory") & out.p_mwu.notna()
-    if conf.any():
-        pv = out.p_mwu.where(conf, np.nan).to_numpy()
-        out["q_bh"] = _bh_fdr(pv)
-    return out
+    return _finalize(rows, "p_mwu", _MWU_COLUMNS)

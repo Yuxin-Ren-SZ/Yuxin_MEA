@@ -114,12 +114,14 @@ class Composition:
     grid_cols: int = DEFAULT_GRID_COLS
     row_height_in: float = DEFAULT_ROW_HEIGHT_IN
     dpi: int = 300
-    # Gap around every cell, in figure fractions. Pinned rects give matplotlib no
+    # Gap around every cell, **in inches**. Pinned rects give matplotlib no
     # chance to reserve room for decorations, so the gutter *is* the space that
-    # axis labels, tick labels and titles live in. It is larger vertically
-    # because a panel's x-label and the panel below it's title share that gap.
-    gutter_x: float = 0.018
-    gutter_y: float = 0.034
+    # axis labels, tick labels and titles live in. Inches rather than figure
+    # fractions because that space is set by font size, not by figure size: a
+    # short figure needs the same 0.16" for an x-label as a tall one. Larger
+    # vertically because a panel's x-label and the next panel's title share it.
+    gutter_x_in: float = 0.12
+    gutter_y_in: float = 0.20
     seed: int = 0
     figures: list[FigureSpec] = field(default_factory=list)
     data: dict = field(default_factory=dict)
@@ -138,8 +140,8 @@ class Composition:
                 "grid_cols": self.grid_cols,
                 "row_height_in": self.row_height_in,
                 "dpi": self.dpi,
-                "gutter_x": self.gutter_x,
-                "gutter_y": self.gutter_y,
+                "gutter_x_in": self.gutter_x_in,
+                "gutter_y_in": self.gutter_y_in,
                 "seed": self.seed,
             },
             "figures": [f.to_json() for f in self.figures],
@@ -159,9 +161,8 @@ class Composition:
             grid_cols=int(g.get("grid_cols", DEFAULT_GRID_COLS)),
             row_height_in=float(g.get("row_height_in", DEFAULT_ROW_HEIGHT_IN)),
             dpi=int(g.get("dpi", 300)),
-            # "gutter" is the pre-split single-value form
-            gutter_x=float(g.get("gutter_x", g.get("gutter", 0.018))),
-            gutter_y=float(g.get("gutter_y", g.get("gutter", 0.034))),
+            gutter_x_in=float(g.get("gutter_x_in", 0.12)),
+            gutter_y_in=float(g.get("gutter_y_in", 0.20)),
             seed=int(g.get("seed", 0)),
             figures=[FigureSpec.from_json(f) for f in d.get("figures", [])],
             data=dict(d.get("data") or {}),
@@ -253,13 +254,18 @@ def _overlaps(f: FigureSpec) -> list[str]:
 # --------------------------------------------------------------------------- #
 # Layout operations — split / merge / reflow
 # --------------------------------------------------------------------------- #
-def reflow(f: FigureSpec, grid_cols: int = DEFAULT_GRID_COLS) -> FigureSpec:
-    """Re-pack panels into a tidy grid, preserving reading order and cell sizes.
+def reflow(f: FigureSpec, grid_cols: int = DEFAULT_GRID_COLS,
+           order: str = "reading") -> FigureSpec:
+    """Re-pack panels into a tidy grid, preserving cell sizes.
 
-    Used after a merge, where two figures' coordinates would otherwise collide.
+    ``order="reading"`` re-packs by current position, which is what you want
+    after a split. ``order="list"`` keeps the panel list's order — used after a
+    merge, where sorting by position would interleave the two source figures'
+    panels and scramble the A/B/C lettering.
     """
     x = y = row_h = 0
-    for p in f.ordered_panels():
+    seq = f.panels if order == "list" else f.ordered_panels()
+    for p in seq:
         w = min(p.w, grid_cols)
         if x + w > grid_cols:
             x, y, row_h = 0, y + row_h, 0
@@ -303,7 +309,7 @@ def merge_figures(comp: Composition, fig_ids: list[str],
     head.width_in = max(t.width_in for t in targets)
     if new_title:
         head.title = new_title
-    reflow(head, comp.grid_cols)
+    reflow(head, comp.grid_cols, order="list")
     return head
 
 
