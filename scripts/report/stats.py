@@ -23,28 +23,49 @@ import numpy as np
 import pandas as pd
 
 # Metric families (mirrors METRIC_SPECS in compare_treatment_groups.py).
+#
+# The classification rule is *not* "non-negative -> ratio". A log2 ratio needs
+# values that are reliably **strictly positive**. When baseline or post is
+# exactly 0 the ratio collapses onto ``_EPS`` and the response saturates at
+# ~+-30 log2 units — an artifact of the guard, not an effect. So any metric that
+# is exactly zero in a non-trivial share of wells belongs in DIFF_METRICS, even
+# though it is non-negative.
+#
+# Ratio is kept where zero is *rare and meaningful* (a rate/count going to zero
+# really is a floor, and log2 flooring is the intended behaviour), and for
+# quantities bounded well away from zero (MLE exponents, small-worldness sigma).
 RATIO_METRICS = [
+    # Rates / counts / durations — zero means "activity stopped", flooring is
+    # deliberate.
     "nb_rate", "nb_count", "nb_duration_mean", "nb_spikes_per_burst_mean",
     "nb_ibi_mean", "median_firing_rate", "n_curated",
-    # Spatial / connectivity (non-negative -> log2 ratio valid)
-    "activity_gini", "mean_prop_speed_um_ms", "edge_density", "small_worldness",
-    "clustering_coeff", "global_efficiency",
-    # Node-level graph metrics (non-negative, comfortably > 0)
-    "participation_mean", "degree_cv", "rich_club",
-    # Criticality (exponents / non-negative)
+    # Spatial — strictly positive in practice.
+    "activity_gini", "mean_prop_speed_um_ms",
+    # Sigma is itself a ratio, bounded away from 0.
+    "small_worldness",
+    # Criticality exponents — MLE fits, empirically 1.2-3.0.
     "aval_tau", "aval_alpha", "gamma_fit",
-    # Directed / TE (non-negative, comfortably > 0)
-    "te_edge_density", "degree_asymmetry",
 ]
-# Bounded, can be <=0, or sit near 0 (log2 ratio unstable) -> diff, not ratio.
+# Bounded, signed, or frequently exactly zero -> diff, not ratio.
+#
+# Zero-share on the current cohort (n non-null wells) is given per metric; each
+# of these produced |response| up to ~30 log2 units when classified as a ratio.
 DIFF_METRICS = [
     "burst_modulation_index", "burst_type_k", "cluster_n_clusters",
     "mean_sttc", "modularity",
     "assortativity",                                   # [-1, 1]
     "branching_ratio_mr", "branching_ratio_naive", "dcc",   # ~1 / ~0
     "reciprocity", "flow_hierarchy",                   # [0, 1], can be 0
-    # near-zero fractions / TE — log2 ratio explodes, so use post-pre difference
-    "hub_fraction", "leaf_fraction", "mean_betweenness", "mean_te",
+    # STTC graph descriptors — all 0 when a well's thresholded graph has no
+    # edges: edge_density/global_efficiency 86/1843, clustering_coeff 123/1843.
+    "edge_density", "clustering_coeff", "global_efficiency",
+    # Node-level graph metrics — bounded fractions/coefficients, often exactly
+    # zero: hub_fraction 1364/1516, leaf_fraction 454/1516,
+    # participation_mean 108/1516, degree_cv 66/1516.
+    "hub_fraction", "leaf_fraction", "mean_betweenness", "participation_mean",
+    "degree_cv", "rich_club",
+    # Directed / TE — zero whenever the thresholded directed graph is empty.
+    "mean_te", "te_edge_density", "degree_asymmetry",
 ]
 ALL_METRICS = RATIO_METRICS + DIFF_METRICS
 
@@ -106,6 +127,12 @@ def well_response(tidy: pd.DataFrame, metrics: list[str] | None = None) -> pd.Da
     be read as the *difference-in-differences* vs Control (see
     :func:`arm_response_vs_control`), because the raw pre→post change is
     confounded with development. Only wells with ≥1 pre and ≥1 post are returned.
+
+    The returned frame carries an ``eps_floored`` flag: True when a *ratio*
+    metric had a zero baseline or post, so its response came from the ``_EPS``
+    guard rather than from the data. Those rows are legitimate floors for rates
+    and counts, but a metric with many of them is misclassified — see the
+    :data:`RATIO_METRICS` / :data:`DIFF_METRICS` note.
     """
     metrics = metrics or ALL_METRICS
     wi = well_index(tidy)
@@ -123,13 +150,15 @@ def well_response(tidy: pd.DataFrame, metrics: list[str] | None = None) -> pd.Da
             p = post[m].median()
             if pd.isna(b) or pd.isna(p):
                 continue
-            if m in DIFF_METRICS:
-                resp = p - b
-            else:
+            is_ratio = m not in DIFF_METRICS
+            if is_ratio:
                 resp = np.log2((p + _EPS) / (b + _EPS))
+            else:
+                resp = p - b
             rows.append(dict(
                 well_uid=wuid, chip=chip, arm=arm, metric=m,
                 baseline=b, post=p, response=resp,
+                eps_floored=bool(is_ratio and (b <= 0 or p <= 0)),
                 n_pre=len(pre), n_post=len(post),
             ))
     return pd.DataFrame(rows)
