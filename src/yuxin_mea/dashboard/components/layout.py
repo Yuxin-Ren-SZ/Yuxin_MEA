@@ -26,12 +26,14 @@ _NAV_META: dict[str, tuple[str, str]] = {
     "Recordings": ("operations", "▦"),
     "Pipeline": ("operations", "≡"),
     "Run": ("operations", "▸"),
-    "Burst diagnostic": ("analysis", "∿"),
-    "Plate viewer": ("analysis", "▤"),
+    "Plate viewer": ("network", "▤"),
+    "Burst inspector": ("network", "◎"),
+    "Burst diagnostic": ("network", "∿"),
+    "Unit inspector": ("single-unit", "⊙"),
     "Settings": ("system", "{}"),
 }
 
-_SECTION_ORDER = ("operations", "analysis", "system")
+_SECTION_ORDER = ("operations", "network", "single-unit", "system")
 
 
 def _git_rev() -> str:
