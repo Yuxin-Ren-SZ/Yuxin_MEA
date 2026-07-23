@@ -54,3 +54,74 @@ def test_compute_criticality_end_to_end():
     assert np.isfinite(res.metrics["branching_ratio_mr"]) or \
         np.isnan(res.metrics["branching_ratio_mr"])  # MR may be nan on trivial data
     assert set(("dcc", "aval_tau", "aval_alpha")).issubset(res.metrics)
+
+
+class TestPowerlawDegenerateInput:
+    """A well whose avalanche distribution defeats the powerlaw MLE must yield a
+    NaN row, not sink the whole task.
+
+    Found in production: a 2-unit well raised
+    ``ValueError("No data points in defined range of the distribution")`` from
+    inside scipy, via powerlaw's lazy distribution construction, and failed the
+    well's entire criticality task. The exponent is genuinely unavailable there,
+    but n_avalanches and the branching ratio still are.
+    """
+
+    @staticmethod
+    def _good_data():
+        rng = np.random.default_rng(0)
+        return (rng.pareto(1.5, size=5000) + 1).astype(int)
+
+    def test_all_nan_when_the_fit_itself_cannot_be_built(self, monkeypatch):
+        class _Boom:
+            def __init__(self, *a, **k):
+                pass
+
+            def __getattr__(self, name):
+                # mirrors powerlaw.Fit.__getattr__ fitting lazily on access
+                raise ValueError("No data points in defined range of the distribution.")
+
+        import powerlaw
+        monkeypatch.setattr(powerlaw, "Fit", _Boom)
+
+        out = C._fit_powerlaw(self._good_data())
+        assert np.isnan(out["exponent"]) and np.isnan(out["xmin"])
+        assert np.isnan(out["ks"]) and np.isnan(out["R_lognormal"])
+        assert out["n"] == 5000            # the count is still honest
+
+    def test_exponent_survives_a_failing_lognormal_comparison(self, monkeypatch):
+        """distribution_compare is a diagnostic — losing it must not lose tau."""
+        import powerlaw
+        real_fit = powerlaw.Fit
+
+        class _NoCompare(real_fit):
+            def distribution_compare(self, *a, **k):
+                raise ValueError("No data points in defined range of the distribution.")
+
+        monkeypatch.setattr(powerlaw, "Fit", _NoCompare)
+
+        out = C._fit_powerlaw(self._good_data())
+        assert 2.0 < out["exponent"] < 3.2      # exponent unaffected
+        assert np.isfinite(out["xmin"])
+        assert np.isnan(out["R_lognormal"]) and np.isnan(out["p_lognormal"])
+
+    def test_healthy_data_is_unchanged_by_the_guards(self):
+        out = C._fit_powerlaw(self._good_data())
+        assert 2.0 < out["exponent"] < 3.2
+        assert np.isfinite(out["R_lognormal"])
+
+    def test_two_unit_well_completes_with_partial_metrics(self):
+        """The production shape: enough pooled spikes, far too few units."""
+        rng = np.random.default_rng(3)
+        burst_times = np.arange(0, 200, 0.5)
+        spikes = {}
+        for u in range(2):
+            s = []
+            for bt in burst_times:
+                s.extend(bt + rng.random(rng.integers(1, 4)) * 0.01)
+            spikes[u] = np.sort(np.array(s))
+        res = C.compute_criticality(spikes, C.CriticalityConfig())
+        # completes rather than raising; exponents may or may not be fittable
+        assert res.metrics["n_avalanches"] > 0
+        for key in ("aval_tau", "aval_alpha", "dcc"):
+            assert isinstance(res.metrics[key], float)

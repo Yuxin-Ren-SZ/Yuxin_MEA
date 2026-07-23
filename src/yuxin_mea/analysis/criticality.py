@@ -98,19 +98,42 @@ def _fit_powerlaw(x: np.ndarray) -> dict:
     import powerlaw
 
     x = x[x > 0]
+    unfittable = {"exponent": np.nan, "xmin": np.nan, "ks": np.nan,
+                  "R_lognormal": np.nan, "p_lognormal": np.nan, "n": int(len(x))}
     if len(x) < 20 or np.unique(x).size < 3:
-        return {"exponent": np.nan, "xmin": np.nan, "ks": np.nan,
-                "R_lognormal": np.nan, "p_lognormal": np.nan, "n": int(len(x))}
+        return unfittable
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        fit = powerlaw.Fit(x, discrete=True, verbose=False)
-        R, p = fit.distribution_compare("power_law", "lognormal",
-                                        normalized_ratio=True)
-        ks = float(getattr(fit.power_law, "D", np.nan))  # KS distance (.KS() broken in 2.0.0)
-    return {"exponent": float(fit.alpha), "xmin": float(fit.xmin),
-            "ks": ks, "R_lognormal": float(R),
-            "p_lognormal": float(p), "n": int(len(x))}
+        # `powerlaw.Fit` builds each candidate distribution lazily in
+        # ``Fit.__getattr__``, so the MLE actually runs on first attribute access
+        # — ``fit.alpha``/``fit.xmin``/``fit.power_law`` all fit here, not above.
+        # On a degenerate avalanche distribution (e.g. a 2-unit well) the search
+        # lands on an x_min that excludes every point and powerlaw raises
+        # ValueError("No data points in defined range of the distribution") from
+        # inside scipy's optimiser. There is then no exponent to report, so the
+        # honest answer is the all-NaN row: the well still gets a criticality
+        # output recording n_avalanches, rather than failing the whole task and
+        # leaving the well with no output at all.
+        try:
+            fit = powerlaw.Fit(x, discrete=True, verbose=False)
+            exponent = float(fit.alpha)
+            xmin = float(fit.xmin)
+            # KS distance; .KS() is broken in powerlaw 2.0.0, hence .D
+            ks = float(getattr(fit.power_law, "D", np.nan))
+        except Exception:  # noqa: BLE001 — degenerate input, not a code fault
+            return unfittable
+        # The lognormal comparison is a goodness-of-fit diagnostic, not the
+        # estimate, so it degrades on its own without discarding the exponent.
+        try:
+            R, p = fit.distribution_compare("power_law", "lognormal",
+                                            normalized_ratio=True)
+            R, p = float(R), float(p)
+        except Exception:  # noqa: BLE001
+            R = p = float("nan")
+    return {"exponent": exponent, "xmin": xmin,
+            "ks": ks, "R_lognormal": R,
+            "p_lognormal": p, "n": int(len(x))}
 
 
 def _gamma_fit(sizes: np.ndarray, durs: np.ndarray) -> float:
