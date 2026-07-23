@@ -4,7 +4,7 @@ Usage::
 
     python -m scripts.report.make_report --config pipeline_config_local.json --all
     python -m scripts.report.make_report --figures f5 f6 s4
-    python -m scripts.report.make_report --figures f3 --qpcr-table qpcr.csv
+    python -m scripts.report.make_report --figures f3 s5 --qpcr-dir /path/to/qPCR
     python -m scripts.report.make_report --figures f2 \
         --f2-images a.tif b.tif c.tif --f2-labels GFAP MAP2 DAPI \
         --f2-scalebar-um 50 --f2-px-per-um 1.5
@@ -13,7 +13,8 @@ Data-generated MEA figures (F4-F6, S1-S4) need no extra input. Wet-lab / asset
 figures skip with an explicit message unless their inputs are supplied:
   * F1 needs ``--f1-assets`` (schematic image files),
   * F2 needs ``--f2-images`` (+ optional labels / scale bar),
-  * F3 needs ``--qpcr-table`` (else a clearly-named SYNTHETIC placeholder).
+  * F3 needs ``--qpcr-dir`` (or legacy ``--qpcr-table``; else a clearly-named
+    SYNTHETIC placeholder), S5/S6 need ``--qpcr-dir``.
 """
 from __future__ import annotations
 
@@ -26,14 +27,15 @@ from . import (
     fig3_qpcr, fig4_activity_dev, fig5_burst_phenotype, fig6_ml,
     fig6c_bursttypes, fig7_spatial_connectivity, fig7b_node_directed,
     fig8_criticality, fig_umap_migration, fig_assets,
-    fig_s1_method_compare, fig_s2_units, fig_s3_rasters, fig_s4_crossgroup, load,
+    fig_s1_method_compare, fig_s2_units, fig_s3_rasters, fig_s4_crossgroup,
+    fig_s5_refgene, fig_s6_qpcr_trajectories, load,
 )
 from .report_style import apply_style, report_dir, resolve_roots
 
 logger = logging.getLogger("report")
 
 MAIN = ["f1", "f2", "f3", "f4", "f5", "f6", "f6b", "f6c", "f7", "f7b", "f8"]
-SUPP = ["s1", "s2", "s3", "s4"]
+SUPP = ["s1", "s2", "s3", "s4", "s5", "s6"]
 
 
 def _paths(result):
@@ -82,9 +84,12 @@ def build(args) -> dict:
             manifest["f2"] = {"skipped": "needs --f2-images (ICC micrographs)"}
             logger.warning("[f2] skipped: provide --f2-images")
     if "f3" in which:
-        if not args.qpcr_table:
-            logger.warning("[f3] no --qpcr-table; writing SYNTHETIC placeholder")
-        run("f3", lambda: fig3_qpcr.render(figure_root, args.qpcr_table))
+        if not (args.qpcr_dir or args.qpcr_table):
+            logger.warning("[f3] no --qpcr-dir/--qpcr-table; writing SYNTHETIC "
+                           "placeholder")
+        run("f3", lambda: fig3_qpcr.render(figure_root, args.qpcr_table,
+                                           qpcr_dir=args.qpcr_dir,
+                                           genes=args.qpcr_genes))
 
     # --- data-generated MEA figures ---
     run("f4", lambda: fig4_activity_dev.render(tidy, analysis_root, figure_root))
@@ -99,6 +104,16 @@ def build(args) -> dict:
     run("s2", lambda: fig_s2_units.render(tidy, analysis_root, figure_root))
     run("s3", lambda: fig_s3_rasters.render(tidy, analysis_root, figure_root))
     run("s4", lambda: fig_s4_crossgroup.render(tidy, figure_root))
+    for fid, fn in (("s5", lambda: fig_s5_refgene.render(figure_root, args.qpcr_dir)),
+                    ("s6", lambda: fig_s6_qpcr_trajectories.render(
+                        figure_root, args.qpcr_dir, genes=args.qpcr_genes))):
+        if fid not in which:
+            continue
+        if args.qpcr_dir:
+            run(fid, fn)
+        else:
+            manifest[fid] = {"skipped": "needs --qpcr-dir (qPCR plate directories)"}
+            logger.warning("[%s] skipped: provide --qpcr-dir", fid)
 
     out = report_dir(figure_root)
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -113,7 +128,16 @@ def main(argv=None) -> int:
                    help="pipeline config JSON (default: pipeline_config_local.json)")
     p.add_argument("--figures", nargs="*", default=["all"],
                    help="figure ids to build: f1..f6 s1..s4, or 'all'")
-    p.add_argument("--qpcr-table", default=None, help="qPCR CSV/xlsx for F3")
+    p.add_argument("--qpcr-dir", default=None,
+                   help="qPCR analysis root holding one directory per plate "
+                        "(F3 marker genes + S5 reference-gene screen)")
+    p.add_argument("--qpcr-genes", nargs="*", default=None,
+                   help="subset of gene symbols to draw in F3/S6 (default: all "
+                        "genes found, ordered by priority tier). The CSVs always "
+                        "cover every gene.")
+    p.add_argument("--qpcr-table", default=None,
+                   help="legacy generic qPCR CSV/xlsx for F3 (superseded by "
+                        "--qpcr-dir)")
     p.add_argument("--rosglo-table", default=None,
                    help="ROS-Glo CSV/xlsx (group,value) for F5 panel B")
     p.add_argument("--f1-assets", nargs="*", default=None,

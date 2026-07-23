@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from .report_style import save_fig
+from .report_style import caption, save_fig
 
 
 def _imread(path):
@@ -35,6 +35,7 @@ def compose_grid(
     scalebar_um: float | None = None,
     px_per_um: float | None = None,
     title: str | None = None,
+    cap: str | None = None,
     figsize=None,
 ):
     """Lay images into an ncols grid. Missing files render an explicit stub."""
@@ -76,13 +77,21 @@ def compose_grid(
     if title:
         fig.suptitle(title, fontsize=9, y=1.0)
     fig.tight_layout()
+    if cap:
+        caption(fig, cap)
     return fig
 
 
 def render_f1(figure_root, asset_paths: Sequence[str | Path], ncols: int = 2):
     fig = compose_grid(
         asset_paths, ncols=ncols, panel_letters=False,
-        title="Figure 1 — Graphical abstract (culture · MEA · pipeline)")
+        title="Figure 1 — Graphical abstract (culture · MEA · pipeline)",
+        cap="Graphical abstract: study schematic — iPSC-derived neuronal culture "
+            "on the HD-MEA (MaxWell MaxTwo), the within-well pre/post treatment "
+            "design (IVH CSF / oxidative stress applied on the treatment day), "
+            "and the analysis pipeline from spike sorting through burst, "
+            "connectivity and criticality read-outs. Composed from user-supplied "
+            "schematic assets.")
     return save_fig(fig, "F1_graphical_abstract", figure_root, subdir="main")
 
 
@@ -92,5 +101,10 @@ def render_f2(figure_root, image_paths: Sequence[str | Path],
     fig = compose_grid(
         image_paths, ncols=ncols, labels=labels, scalebar_um=scalebar_um,
         px_per_um=px_per_um,
-        title="Figure 2 — Immunocytochemical characterisation")
+        title="Figure 2 — Immunocytochemical characterisation",
+        cap="Immunocytochemistry of the culture: each panel is a fluorescence "
+            "channel for a cell-type / structural marker (channel labelled "
+            "top-left; scale bar bottom-right of the last panel). Confirms "
+            "neuronal and glial identity of the network recorded on the MEA. "
+            "Representative micrographs supplied by the user.")
     return save_fig(fig, "F2_icc", figure_root, subdir="main")

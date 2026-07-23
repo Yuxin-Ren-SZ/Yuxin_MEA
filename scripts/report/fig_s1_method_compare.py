@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from . import load as L
-from .report_style import OKABE_ITO, save_fig
+from .report_style import OKABE_ITO, caption, save_fig
 
 
 def build_s1(figure_root):
@@ -57,6 +57,14 @@ def build_s1(figure_root):
 
     fig.suptitle("Figure S1 — ML vs traditional burst detection", fontsize=9, y=1.02)
     fig.tight_layout()
+    caption(fig,
+        "Agreement between the ML burst detector (used throughout) and the "
+        "traditional threshold method, one point per well. (A) Per-well "
+        "network-burst counts, ML vs traditional (dashed = identity). "
+        "(B) Bland-Altman of burst duration (difference vs mean; solid = bias, "
+        "dashed = 95% limits of agreement). (C) Event overlap (per-burst "
+        "intersection-over-union). Method-validation figure, not a group "
+        "comparison.")
     return fig
 
 

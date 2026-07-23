@@ -21,7 +21,7 @@ import pandas as pd
 
 from . import load as L
 from .report_style import (
-    METRIC_LABELS, group_color, ordered_groups, save_fig,
+    METRIC_LABELS, caption, group_color, ordered_groups, save_fig,
 )
 
 # UMAP params mirror the pipeline (ml_burst_detection config), n_components=2 for viz.
@@ -118,40 +118,159 @@ def _panel_modulation(ax, tidy) -> None:
 def build_f6(tidy, analysis_root):
     import matplotlib.pyplot as plt
 
-    row = _pick_example(tidy)
-    tr = L.load_ml_trace(analysis_root, row)
+    from . import stats as S
+    from .trajectory import pick_early_late
 
-    fig = plt.figure(figsize=(7.6, 6.4))
-    gs = fig.add_gridspec(
-        3, 3, height_ratios=[1.0, 0.28, 1.3],
-        width_ratios=[1, 2, 1], hspace=0.5, wspace=0.05)
-    # Panel A: heatmap + trace stacked, sharing x; thin colorbar column at right
-    # so the colorbar never shrinks the heatmap out of alignment with the trace.
-    gsA = gs[0, :].subgridspec(1, 2, width_ratios=[1, 0.02], wspace=0.02)
-    gsT = gs[1, :].subgridspec(1, 2, width_ratios=[1, 0.02], wspace=0.02)
-    ax_post = fig.add_subplot(gsA[0, 0])
-    cax = fig.add_subplot(gsA[0, 1])
-    ax_trace = fig.add_subplot(gsT[0, 0], sharex=ax_post)
-    fig.add_subplot(gsT[0, 1]).set_visible(False)  # keep trace width == heatmap
-    ax_umap = fig.add_subplot(gs[2, 1])            # centred square UMAP
+    def _valid(row):
+        if row is None:
+            return False
+        try:
+            tr = L.load_ml_trace(analysis_root, row)
+            return getattr(tr, "posterior_matrix", None) is not None
+        except Exception:  # noqa: BLE001
+            return False
 
-    _panel_posterior(ax_post, ax_trace, cax, tr)
-    _panel_umap(ax_umap, tr)
-    ax_umap.set_box_aspect(1)
+    # find an IVH_Late well whose EARLY and LATE recordings both have real traces
+    wi = S.well_index(tidy)
+    cand_wells = wi.loc[(wi.arm == "IVH_Late") & wi.paired, "well_uid"]
+    ex, e_row, l_row = None, None, None
+    scored = tidy[tidy.well_uid.isin(cand_wells) & (tidy.nb_count >= 10)]
+    for w in scored.groupby("well_uid").nb_count.median().sort_values(ascending=False).index:
+        e, l = pick_early_late(tidy, w)
+        if _valid(e) and _valid(l) and int(e.tau) != int(l.tau):
+            ex, e_row, l_row = w, e, l
+            break
+    if ex is None:
+        ex = tidy[tidy.canonical_group == "IVH_Late"].well_uid.iloc[0]
+        e_row, l_row = pick_early_late(tidy, ex)
 
-    tag = f"{row.well_uid.split('|')[0]} {row.well_name} DIV{int(row.DIV)} ({row.canonical_group})"
-    fig.suptitle(f"Figure 6 — ML burst characterization   ·   example well: {tag}",
+    fig = plt.figure(figsize=(9.0, 6.8))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.15], hspace=0.42, wspace=0.22)
+    axp0 = axu0 = None
+    for ci, (row, lab) in enumerate([(e_row, "early"), (l_row, "late")]):
+        axp = fig.add_subplot(gs[0, ci]); axu = fig.add_subplot(gs[1, ci])
+        if ci == 0:
+            axp0, axu0 = axp, axu
+        try:
+            if row is None:
+                raise ValueError("no recording")
+            tr = L.load_ml_trace(analysis_root, row)
+            if getattr(tr, "posterior_matrix", None) is None:
+                raise ValueError("no posterior")
+            _posterior_img(axp, tr)
+            _panel_umap(axu, tr); axu.set_title("", loc="left"); axu.set_box_aspect(1)
+            axp.set_title(f"{lab} · DIV{int(row.DIV)} tau{int(row.tau):+d}", fontsize=8)
+        except Exception:  # noqa: BLE001
+            for a in (axp, axu):
+                a.set_xticks([]); a.set_yticks([])
+                a.text(0.5, 0.5, f"{lab}: no debug trace", ha="center",
+                       va="center", transform=a.transAxes, fontsize=7, color="0.5")
+    if axp0 is not None:
+        axp0.annotate("A  HMM burst posteriors (early vs late)", xy=(0, 1.18),
+                      xycoords="axes fraction", fontweight="bold", fontsize=9)
+        axu0.annotate("B  Feature-space embedding (early vs late)", xy=(0, 1.05),
+                      xycoords="axes fraction", fontweight="bold", fontsize=9)
+    tag = "" if ex is None else f"  ·  {ex.split('|')[0]} (IVH_Late)"
+    fig.suptitle(f"Figure 6 — ML burst characterization: same well, early vs late{tag}",
                  fontsize=9, y=1.0)
-    return fig, {"example": row.well_uid}
+    caption(fig,
+        "ML burst characterization of one representative treated well, shown "
+        "early (τ≈0) vs late (τ≈14) so the post-treatment change is visible. "
+        "(A) HMM burst-state posteriors over time with the co-burst-fraction "
+        "trace beneath (shared x-axis); shaded = detected network-burst windows. "
+        "(B) Feature-space embedding (UMAP) of the well's time bins, coloured by "
+        "burst vs rest state, on a shared embedding so early and late are "
+        "comparable. Illustrative single-well panels (not a group statistic).")
+    return fig, {"example": ex}
+
+
+def _posterior_img(ax, tr, t_win=(0.0, 60.0)):
+    """Compact per-unit P(burst) heatmap over a time window (no trace/colorbar)."""
+    bins = np.asarray(tr.bins)
+    ncols = tr.posterior_matrix.shape[1]
+    centers = (bins[:-1] + bins[1:]) / 2 if len(bins) == ncols + 1 else bins[:ncols]
+    m = (centers >= t_win[0]) & (centers <= t_win[1])
+    P = tr.posterior_matrix[:, m]
+    order = np.argsort(-P.mean(axis=1))
+    ax.imshow(P[order], aspect="auto", cmap="magma", vmin=0, vmax=1,
+              extent=[float(centers[m][0]), float(centers[m][-1]), 0, P.shape[0]],
+              origin="lower", interpolation="nearest")
+    ax.set_xlabel("time (s)", fontsize=7); ax.set_ylabel("unit", fontsize=7)
+    ax.tick_params(labelsize=6)
+
+
+_MOD_ARMS = ["Control", "IVH_Early", "IVH_Late"]
 
 
 def build_f6_modulation(tidy):
-    """Panel D as a standalone cohort figure (kept separate: whole-cohort scope)."""
+    """Burst modulation index (HMM burst-vs-Poisson sharpness): its time-course
+    (A, vs tau) + the within-well difference-in-differences vs Control (B)."""
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(4.6, 3.4))
-    _panel_modulation(ax, tidy)
+    from . import stats as S
+    from .forest import stars as _stars
+    from .trajectory import plot_trajectory
+
+    fig, (axa, axb) = plt.subplots(1, 2, figsize=(8.4, 3.6),
+                                   gridspec_kw={"width_ratios": [1.3, 1.0]})
+    # A — trajectory vs treatment day
+    plot_trajectory(axa, tidy, "burst_modulation_index", _MOD_ARMS,
+                    title="A  Burst modulation vs treatment day")
+
+    # B — within-well DiD response (post−pre), per *chip* (biological replicate):
+    # bold points = the 3 chip means, wells faint behind, mean bar, LMM star.
+    resp = S.well_response(tidy, metrics=["burst_modulation_index"])
+    resp = resp[resp.arm.isin(_MOD_ARMS)]
+    vc = (S.arm_response_vs_control_lmm(resp, focus_arms=["IVH_Early", "IVH_Late"])
+          .set_index("arm") if not resp.empty else None)
+    cr = S.chip_response(resp)
+    rng = np.random.default_rng(0)
+    for i, a in enumerate(_MOD_ARMS):
+        w = resp.loc[resp.arm == a, "response"].dropna().to_numpy()   # wells (tech)
+        cp = cr.loc[cr.arm == a, "response"].dropna().to_numpy()      # chips (bio)
+        if len(w):
+            jit = (rng.random(len(w)) - 0.5) * 0.30
+            axb.scatter(np.full(len(w), i) + jit, w, s=6, color=group_color(a),
+                        alpha=0.16, lw=0, zorder=2)
+        if len(cp):
+            m = float(np.mean(cp))
+            axb.hlines(m, i - 0.28, i + 0.28, color=group_color(a), lw=1.8, zorder=4)
+            jit = (rng.random(len(cp)) - 0.5) * 0.16
+            axb.scatter(np.full(len(cp), i) + jit, cp, s=28,
+                        facecolor=group_color(a), edgecolor="white",
+                        linewidth=0.5, zorder=5)
+        if a != "Control" and vc is not None and a in vc.index:
+            row = vc.loc[a]
+            s = _stars(row.q_bh) if bool(row.chip_consistent) else ""
+            if not s and bool(row.get("suggestive", False)):
+                s = "△"
+            if s:
+                top = max(float(w.max()) if len(w) else -np.inf,
+                          float(cp.max()) if len(cp) else -np.inf)
+                axb.text(i, top, s, ha="center", va="bottom", fontsize=9,
+                         color=group_color(a))
+    axb.axhline(0, ls="--", color="0.5", lw=0.8)
+    axb.set_xticks(range(len(_MOD_ARMS)))
+    axb.set_xticklabels(_MOD_ARMS, rotation=25, ha="right", fontsize=7)
+    axb.set_ylabel("modulation Δ (post − pre)")
+    axb.set_title("B  Response vs Control (DiD, chip-level)", loc="left",
+                  fontweight="bold")
+    axb.text(0.0, -0.30, "bold = per-chip means (n=3); faint = wells; "
+             "△ = suggestive (consistent 3/3 chips, p<0.05 uncorr, not FDR-sig)",
+             transform=axb.transAxes, fontsize=5, color="0.4", va="top")
+    fig.suptitle("Figure 6d — Burst modulation index (HMM burst-vs-Poisson "
+                 "sharpness); chip = biological replicate", fontsize=9, y=1.02)
     fig.tight_layout()
+    caption(fig,
+        "Burst modulation index (how sharply bursting departs from a Poisson "
+        "process; higher = crisper bursts). (A) Group trajectories vs treatment "
+        "day (tau): line = per-arm median across wells, ribbon = 95% bootstrap CI "
+        "(well-level), dotted vertical = treatment day (tau 0). (B) Within-well "
+        "difference-in-differences vs Control (post−pre) at the biological-"
+        "replicate level: bold points = 3 per-chip means, faint = wells, bar = "
+        "mean of chip means; △ = suggestive (same direction on all 3 chips, "
+        "uncorrected p<0.05, does not survive FDR at n=3); ★ would mark FDR "
+        "q<0.05 (none). Unit: chip (n=3 per arm).")
     return fig
 
 

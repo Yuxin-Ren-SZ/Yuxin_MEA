@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from .fig4_activity_dev import _panel_raster
-from .report_style import group_color, ordered_groups, save_fig
+from .report_style import caption, group_color, ordered_groups, save_fig
 
 DIV_WINDOW = (18, 24)
 
@@ -49,6 +49,12 @@ def build_s3(tidy, analysis_root):
     fig.suptitle(f"Figure S3 — Representative rasters at DIV "
                  f"{DIV_WINDOW[0]}-{DIV_WINDOW[1]}", fontsize=9, y=1.0)
     fig.tight_layout()
+    caption(fig,
+        f"Representative spike rasters, one per group, from wells recorded at a "
+        f"matched developmental stage (DIV {DIV_WINDOW[0]}-{DIV_WINDOW[1]}) so "
+        f"the groups are comparable for maturation. Each row = a unit, each tick "
+        f"= a spike; synchronous vertical bands = network bursts. Illustrative "
+        f"examples of the raw activity behind the quantitative figures.")
     return fig, picks
 
 

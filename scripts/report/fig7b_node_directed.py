@@ -20,9 +20,10 @@ import numpy as np
 import pandas as pd
 
 from . import load, stats as S
-from .report_style import METRIC_LABELS, group_color, ordered_groups, save_fig
+from .report_style import (
+    METRIC_LABELS, caption, group_color, ordered_groups, save_fig)
 
-FOCUS_ARMS = ["IVH_Early", "IVH_Late", "H2O2_20uM"]
+FOCUS_ARMS = ["IVH_Early", "IVH_Late"]
 NODE_METRICS = ["hub_fraction", "leaf_fraction", "participation_mean",
                 "mean_betweenness", "rich_club", "assortativity"]
 DIR_METRICS = ["mean_te", "degree_asymmetry", "reciprocity", "flow_hierarchy"]
@@ -30,17 +31,36 @@ _ROLE_COLORS = {"connector_hub": "#d62728", "provincial_hub": "#ff7f0e",
                 "peripheral": "#7f7f7f", "leaf": "#1f77b4"}
 
 
-def _pick(tidy, metric="mean_sttc"):
-    sub = tidy[(tidy.canonical_group == "IVH_Late") & (tidy.DIV >= 14)
-               & (tidy.DIV <= 24) & tidy[metric].notna()]
+def _pick(tidy, group="IVH_Late", metric="mean_sttc", lo=14, hi=24):
+    sub = tidy[(tidy.canonical_group == group) & (tidy.DIV >= lo)
+               & (tidy.DIV <= hi) & tidy[metric].notna()]
     if sub.empty:
         return None
     med = sub[metric].median()
     return sub.iloc[(sub[metric] - med).abs().to_numpy().argsort()[0]]
 
 
-def _panel_cartography(ax, analysis_root, row):
-    ax.set_title("A  Node cartography", loc="left", fontweight="bold")
+def _pick_pair(tidy, treated="IVH_Late", metric="mean_sttc", lo=14, hi=24):
+    """Representative Control + treated wells on the same chip at matched DIV."""
+    win = tidy[(tidy.DIV >= lo) & (tidy.DIV <= hi) & tidy[metric].notna()]
+    best = None
+    for chip in win.sample_id.unique():
+        c = win[(win.sample_id == chip) & (win.canonical_group == "Control")]
+        t = win[(win.sample_id == chip) & (win.canonical_group == treated)]
+        if c.empty or t.empty:
+            continue
+        t_row = t.iloc[(t[metric] - t[metric].median()).abs().to_numpy().argsort()[0]]
+        c_row = c.iloc[(c.DIV - t_row.DIV).abs().to_numpy().argsort()[0]]
+        gap = abs(int(c_row.DIV) - int(t_row.DIV))
+        if best is None or gap < best[0]:
+            best = (gap, c_row, t_row)
+    if best is None:
+        return _pick(tidy, "Control"), _pick(tidy, treated)
+    return best[1], best[2]
+
+
+def _panel_cartography(ax, analysis_root, row, title):
+    ax.set_title(title, fontsize=7)
     if row is None:
         return
     p = load.artifact_path(analysis_root, "connectivity_data", row,
@@ -57,9 +77,10 @@ def _panel_cartography(ax, analysis_root, row):
                        lw=0, label=role.replace("_", " "))
     ax.axhline(2.5, ls="--", color="0.5", lw=0.8)
     ax.axvline(0.62, ls=":", color="0.6", lw=0.8)
-    ax.set_xlabel("participation coefficient P")
-    ax.set_ylabel("within-module degree z")
-    ax.legend(fontsize=5.5, loc="upper left")
+    ax.set_xlabel("participation P", fontsize=7)
+    if title.startswith("Control"):
+        ax.set_ylabel("within-module degree z", fontsize=7)
+        ax.legend(fontsize=5, loc="lower left")
 
 
 def _panel_directed_graph(ax, analysis_root, row, top_frac=0.15):
@@ -101,70 +122,80 @@ def _stars(q):
 
 
 def _forest(ax, tidy, metrics, title):
+    from .forest import plot_did_forest
+
     resp = S.well_response(tidy, metrics=metrics)
     resp = resp[resp.arm.isin(["Control"] + FOCUS_ARMS)]
-    summ = S.arm_response_summary(resp) if not resp.empty else pd.DataFrame()
-    vc = S.arm_response_vs_control(resp) if not resp.empty else pd.DataFrame()
-    if summ.empty:
-        ax.text(0.5, 0.5, "no paired wells", ha="center", va="center",
-                transform=ax.transAxes)
-        ax.set_title(title, loc="left", fontweight="bold")
-        return
-    rng = np.random.default_rng(0)
-    treated = [a for a in ordered_groups(summ.arm.unique()) if a in FOCUS_ARMS]
-    arms = ["Control"] + treated
-    arm_off = np.linspace(0.3, -0.3, len(arms))
-    vc_idx = vc.set_index(["arm", "metric"]) if len(vc) else None
-    yticks, ylabels = [], []
-    for mi, metric in enumerate(metrics):
-        y0 = -mi; yticks.append(y0); ylabels.append(METRIC_LABELS.get(metric, metric))
-        for ai, arm in enumerate(arms):
-            r = summ[(summ.metric == metric) & (summ.arm == arm)]
-            if r.empty:
-                continue
-            r = r.iloc[0]; y = y0 + arm_off[ai]; is_ctrl = arm == "Control"
-            pts = resp.loc[(resp.metric == metric) & (resp.arm == arm),
-                           "response"].to_numpy(float)
-            if len(pts):
-                jit = (rng.random(len(pts)) - 0.5) * 0.16
-                ax.scatter(pts, np.full(len(pts), y) + jit, s=4,
-                           color=group_color(arm), alpha=0.28, lw=0, zorder=2)
-            xerr = np.array([[max(r.median_response - r.ci_low, 0)],
-                             [max(r.ci_high - r.median_response, 0)]])
-            ax.errorbar(r.median_response, y, xerr=xerr,
-                        fmt=("D" if is_ctrl else "o"), ms=(4 if is_ctrl else 3.5),
-                        color=group_color(arm), capsize=2, elinewidth=0.8,
-                        markerfacecolor=group_color(arm), markeredgecolor=group_color(arm))
-            if not is_ctrl and vc_idx is not None and (arm, metric) in vc_idx.index:
-                s = _stars(vc_idx.loc[(arm, metric), "q_bh"])
-                if s:
-                    ax.text(r.ci_high + 0.02, y, s, va="center", ha="left",
-                            fontsize=6.5, color=group_color(arm))
-    ax.axvline(0, ls="--", color="0.5", lw=0.8)
-    ax.set_yticks(yticks); ax.set_yticklabels(ylabels, fontsize=6.5)
-    ax.set_ylim(min(yticks) - 0.6, max(yticks) + 0.6)
-    if len(summ):     # clip to CI range so outliers don't squash the medians
-        lo = float(summ.ci_low.min()); hi = float(summ.ci_high.max())
-        pad = 0.25 * (hi - lo) + 0.1
-        ax.set_xlim(lo - pad, hi + pad)
-    ax.set_xlabel("response (log2 post/pre; Δ for bounded)", fontsize=7)
-    ax.set_title(title, loc="left", fontweight="bold")
+    plot_did_forest(ax, resp, metrics, FOCUS_ARMS,
+                    xlabel="response (log2 post/pre; Δ for bounded)",
+                    title=title, legend_loc="upper left", footnote=False)
 
 
 def build_f7b(tidy, analysis_root):
     import matplotlib.pyplot as plt
 
-    row = _pick(tidy)
-    fig, axes = plt.subplots(2, 2, figsize=(9.0, 7.2))
-    _panel_cartography(axes[0, 0], analysis_root, row)
-    _panel_directed_graph(axes[0, 1], analysis_root, row)
-    _forest(axes[1, 0], tidy, NODE_METRICS, "C  Node-metric response vs Control")
-    _forest(axes[1, 1], tidy, DIR_METRICS, "D  Directed-metric response vs Control")
-    tag = "" if row is None else f"  ·  example {row.well_uid.split('|')[0]} DIV{int(row.DIV)}"
-    fig.suptitle(f"Figure 7b — Node-level & directed (TE) connectivity, "
-                 f"well_uid unit{tag}", fontsize=9, y=1.0)
-    fig.tight_layout()
-    return fig, {"example": None if row is None else row.well_uid}
+    from .trajectory import pick_example_well, pick_early_late, plot_trajectory
+
+    ex = pick_example_well(tidy, "IVH_Late", metric="mean_sttc")
+    e_row, l_row = pick_early_late(tidy, ex) if ex else (None, None)
+
+    def _lab(row, when):
+        return when if row is None else f"{when} DIV{int(row.DIV)} tau{int(row.tau):+d}"
+
+    fig = plt.figure(figsize=(9.2, 10.4))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.0, 0.85],
+                          hspace=0.5, wspace=0.28)
+
+    # Row 0: A cartography early | late  +  B directed graph early | late
+    gsa = gs[0, 0].subgridspec(1, 2, wspace=0.08)
+    axa0 = fig.add_subplot(gsa[0, 0]); axa1 = fig.add_subplot(gsa[0, 1])
+    _panel_cartography(axa0, analysis_root, e_row, _lab(e_row, "early"))
+    _panel_cartography(axa1, analysis_root, l_row, _lab(l_row, "late"))
+    axa1.sharey(axa0)
+    axa0.annotate("A  Node cartography — early vs late (P vs z)", xy=(0, 1.15),
+                  xycoords="axes fraction", fontweight="bold", fontsize=9)
+    gsb = gs[0, 1].subgridspec(1, 2, wspace=0.08)
+    axb0 = fig.add_subplot(gsb[0, 0]); axb1 = fig.add_subplot(gsb[0, 1])
+    _panel_directed_graph(axb0, analysis_root, e_row)
+    _panel_directed_graph(axb1, analysis_root, l_row)
+    for a, when in [(axb0, "early"), (axb1, "late")]:
+        a.set_title("", loc="left"); a.set_title(when, fontsize=7)
+    axb0.annotate("B  Directed TE graph — early vs late", xy=(0, 1.15),
+                  xycoords="axes fraction", fontweight="bold", fontsize=9)
+
+    # Row 1: C node forest | D directed forest
+    _forest(fig.add_subplot(gs[1, 0]), tidy, NODE_METRICS,
+            "C  Node-metric response vs Control (DiD, chip-level)")
+    _forest(fig.add_subplot(gs[1, 1]), tidy, DIR_METRICS,
+            "D  Directed-metric response vs Control (DiD, chip-level)")
+
+    # Row 2: E trajectories vs tau
+    arms = ["Control"] + FOCUS_ARMS
+    gse = gs[2, :].subgridspec(1, 3, wspace=0.35)
+    for ci, metric in enumerate(["participation_mean", "rich_club", "flow_hierarchy"]):
+        axe = fig.add_subplot(gse[0, ci])
+        plot_trajectory(axe, tidy, metric, arms, legend=(ci == 0))
+        if ci == 0:
+            axe.annotate("E  Node/directed metrics vs treatment day", xy=(0, 1.15),
+                         xycoords="axes fraction", fontweight="bold", fontsize=9)
+    fig.suptitle("Figure 7b — Node-level & directed (TE) connectivity; "
+                 "chip = biological replicate"
+                 + ("" if ex is None else f"  ·  {ex.split('|')[0]} (IVH_Late)"),
+                 fontsize=9, y=1.0)
+    caption(fig,
+        "Node-level & directed connectivity. (A) Node cartography (participation "
+        "coefficient P vs within-module degree z) of one representative treated "
+        "well, early vs late; dashed lines = hub thresholds. (B) Directed "
+        "transfer-entropy (TE) graph for the same well early vs late (arrows = "
+        "inferred information flow). (C, D) Difference-in-differences vs Control "
+        "for node-level (C) and directed (D) metrics at the biological-replicate "
+        "level: bold points = 3 per-chip means, faint = wells; marker = mean of "
+        "chip means, whisker = 95% t-CI over 3 chips (df=2); ★ = FDR q<0.05, △ = "
+        "suggestive (consistent 3/3 chips, p<0.05 uncorrected). (E) Group "
+        "trajectories vs treatment day (tau): line = per-arm median across wells, "
+        "ribbon = 95% bootstrap CI (well-level). TE = Schreiber (2000) transfer "
+        "entropy, effective/bias-corrected. Unit: chip (n=3 per arm).")
+    return fig, {"example": ex}
 
 
 def render(tidy, analysis_root, figure_root):

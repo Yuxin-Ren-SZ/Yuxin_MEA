@@ -33,7 +33,7 @@ import pandas as pd
 from . import load
 from . import stats as S
 from .report_style import (
-    METRIC_LABELS, group_color, ordered_groups, save_fig,
+    METRIC_LABELS, caption, group_color, ordered_groups, save_fig,
 )
 
 # STTC graph-topology panel. (mean_degree omitted — ≈ edge_density·(n−1), so
@@ -41,7 +41,7 @@ from .report_style import (
 FOREST_METRICS = ["mean_sttc", "edge_density", "clustering_coeff",
                   "modularity", "global_efficiency", "small_worldness"]
 # Focus arms (drop NPH / AraC / H2O2_10uM), matching F5.
-FOCUS_ARMS = ["IVH_Early", "IVH_Late", "H2O2_20uM"]
+FOCUS_ARMS = ["IVH_Early", "IVH_Late"]
 
 
 # --------------------------------------------------------------------------- #
@@ -108,7 +108,7 @@ def _pairs_dist_sttc(analysis_root, row):
 
 # STTC-vs-distance decay: focus groups, matched DIV to remove the maturation axis.
 DIST_BINS = np.arange(0.0, 3200.0, 300.0)
-_B_GROUPS = ["Control", "IVH_Early", "IVH_Late", "H2O2_20uM"]
+_B_GROUPS = ["Control", "IVH_Early", "IVH_Late"]
 _B_DIV = (14, 24)
 
 
@@ -324,69 +324,6 @@ def _stars(q):
     return "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else ""
 
 
-def _panel_forest(ax, summ, vc, resp=None):
-    rng = np.random.default_rng(0)
-    treated = [a for a in ordered_groups(summ.arm.unique()) if a in FOCUS_ARMS]
-    arms = ["Control"] + treated
-    arm_off = np.linspace(0.32, -0.32, len(arms))
-    vc_idx = vc.set_index(["arm", "metric"]) if len(vc) else None
-    tier_idx = summ.set_index(["arm", "metric"])["tier"] if "tier" in summ else None
-    yticks, ylabels = [], []
-    for mi, metric in enumerate(FOREST_METRICS):
-        y0 = -mi
-        yticks.append(y0); ylabels.append(METRIC_LABELS.get(metric, metric))
-        for ai, arm in enumerate(arms):
-            r = summ[(summ.metric == metric) & (summ.arm == arm)]
-            if r.empty:
-                continue
-            r = r.iloc[0]
-            y = y0 + arm_off[ai]
-            is_ctrl = arm == "Control"
-            exploratory = str(getattr(r, "tier", "confirmatory")) == "exploratory"
-            if resp is not None:                      # raw per-well points behind
-                pts = resp.loc[(resp.metric == metric) & (resp.arm == arm),
-                               "response"].to_numpy(float)
-                if len(pts):
-                    jit = (rng.random(len(pts)) - 0.5) * 0.16
-                    ax.scatter(pts, np.full(len(pts), y) + jit, s=4,
-                               color=group_color(arm), alpha=0.28, lw=0, zorder=2)
-            xerr = np.array([[max(r.median_response - r.ci_low, 0)],
-                             [max(r.ci_high - r.median_response, 0)]])
-            face = "none" if exploratory else group_color(arm)
-            ax.errorbar(
-                r.median_response, y, xerr=xerr,
-                fmt=("D" if is_ctrl else "o"), ms=(4.5 if is_ctrl else 4),
-                color=group_color(arm), capsize=2, elinewidth=0.9,
-                markerfacecolor=face, markeredgecolor=group_color(arm),
-                zorder=(4 if is_ctrl else 3),
-            )
-            if not is_ctrl and vc_idx is not None and (arm, metric) in vc_idx.index:
-                s = _stars(vc_idx.loc[(arm, metric), "q_bh"])
-                if s:
-                    ax.text(r.ci_high + 0.05, y, s, va="center", ha="left",
-                            fontsize=7, color=group_color(arm))
-    ax.axvline(0, ls="--", color="0.5", lw=0.8, zorder=1)
-    ax.set_yticks(yticks); ax.set_yticklabels(ylabels)
-    ax.set_ylim(min(yticks) - 0.6, max(yticks) + 0.6)
-    # clip the view to the bootstrap-CI range so a few near-zero-baseline
-    # outliers (huge log2) don't squash the medians + point cloud
-    if len(summ):
-        lo = float(summ.ci_low.min()); hi = float(summ.ci_high.max())
-        pad = 0.25 * (hi - lo) + 0.15
-        ax.set_xlim(lo - pad, hi + pad)
-    ax.set_xlabel("within-well response  (log2 post/pre; Δ for STTC/modularity)")
-    ax.set_title("D  Connectivity response vs Control maturation", loc="left",
-                 fontweight="bold")
-    handles = [ax.plot([], [], marker="D", ls="", color="k",
-                       label="Control (maturation)")[0]]
-    handles += [ax.plot([], [], marker="o", ls="", color=group_color(a), label=a)[0]
-                for a in treated]
-    handles.append(ax.plot([], [], marker="o", ls="", mfc="none", mec="0.4",
-                           color="0.4", label="open = exploratory (single-chip/<5 wells)")[0])
-    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.16),
-              fontsize=5.5, ncol=2, frameon=False)
-
-
 # --------------------------------------------------------------------------- #
 # Build
 # --------------------------------------------------------------------------- #
@@ -396,62 +333,82 @@ _TREATED_EXAMPLE = "IVH_Late"     # representative treated arm for panels A/C
 def build_f7(tidy, analysis_root):
     import matplotlib.pyplot as plt
 
+    from .forest import plot_did_forest
+
     resp = S.well_response(tidy, metrics=FOREST_METRICS)
     resp = resp[resp.arm.isin(["Control"] + FOCUS_ARMS)]
-    summ = S.arm_response_summary(resp) if not resp.empty else pd.DataFrame()
-    vc = S.arm_response_vs_control(resp) if not resp.empty else pd.DataFrame()
 
-    # ONE representative (Control, IVH_Late) pair — same chip, matched DIV, each
-    # near its group median — shared by A and C so it's a fair comparison.
-    c_row, t_row = _pick_matched_pair(tidy, _TREATED_EXAMPLE)
+    # One representative treated (IVH_Late) well, EARLY (tau≈0) vs LATE (tau≈14) —
+    # shared by A and B so maps/graphs show the post-treatment change over time.
+    from .trajectory import pick_example_well, pick_early_late, plot_trajectory
+    ex = pick_example_well(tidy, _TREATED_EXAMPLE, metric="mean_sttc")
+    e_row, l_row = pick_early_late(tidy, ex) if ex else (None, None)
 
-    def _lab(row, grp):
-        if row is None:
-            return grp
-        return f"{grp} · {row.well_uid.split('|')[0]} DIV{int(row.DIV)}"
+    def _lab(row, when):
+        return when if row is None else f"{when} · DIV{int(row.DIV)} tau{int(row.tau):+d}"
 
-    c_lab = _lab(c_row, "Control")
-    t_lab = _lab(t_row, _TREATED_EXAMPLE)
+    e_lab, l_lab = _lab(e_row, "early"), _lab(l_row, "late")
+    chip = "" if ex is None else f"  ·  {ex.split('|')[0]} (IVH_Late)"
 
-    # The chip is a WIDE rectangle (~3800×2050 µm), so the map/graph rows get the
-    # full width and each map uses equal aspect.
-    fig = plt.figure(figsize=(9.2, 9.6))
-    gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.0, 1.7],
-                          hspace=0.42, wspace=0.26)
+    fig = plt.figure(figsize=(9.2, 11.0))
+    gs = fig.add_gridspec(4, 2, height_ratios=[1.0, 1.0, 1.5, 0.9],
+                          hspace=0.5, wspace=0.26)
 
-    # Row 0 — Panel A: two wide activity fields (same pair)
+    # Row 0 — A: activity fields early | late
     gsa = gs[0, :].subgridspec(1, 2, wspace=0.1)
-    axa0 = fig.add_subplot(gsa[0, 0]); axa1 = fig.add_subplot(gsa[0, 1])
-    _panel_field(axa0, analysis_root, c_row, c_lab)
-    _panel_field(axa1, analysis_root, t_row, t_lab)
-    axa0.annotate("A  Activity field (firing-rate map on the electrode plane)",
-                  xy=(0, 1.12), xycoords="axes fraction", fontweight="bold",
-                  fontsize=9)
+    _panel_field(fig.add_subplot(gsa[0, 0]), analysis_root, e_row, e_lab)
+    _panel_field(fig.add_subplot(gsa[0, 1]), analysis_root, l_row, l_lab)
+    fig.axes[-2].annotate("A  Activity field — early vs late (same well)",
+                          xy=(0, 1.12), xycoords="axes fraction",
+                          fontweight="bold", fontsize=9)
 
-    # Row 1 — Panel C: two wide STTC graphs (same pair as A)
+    # Row 1 — B: STTC graphs early | late
     gsc = gs[1, :].subgridspec(1, 2, wspace=0.1)
-    axc0 = fig.add_subplot(gsc[0, 0]); axc1 = fig.add_subplot(gsc[0, 1])
-    _panel_graph(axc0, analysis_root, c_row, c_lab)
-    _panel_graph(axc1, analysis_root, t_row, t_lab)
-    axc0.annotate("B  STTC connectivity graph (same wells as A; edge α ∝ STTC)",
-                  xy=(0, 1.12), xycoords="axes fraction", fontweight="bold",
-                  fontsize=9)
+    _panel_graph(fig.add_subplot(gsc[0, 0]), analysis_root, e_row, e_lab)
+    _panel_graph(fig.add_subplot(gsc[0, 1]), analysis_root, l_row, l_lab)
+    fig.axes[-2].annotate("B  STTC graph — early vs late (edge α ∝ STTC)",
+                          xy=(0, 1.12), xycoords="axes fraction",
+                          fontweight="bold", fontsize=9)
 
-    # Row 2 — Panel B (STTC-distance) | Panel D (forest)
-    axb = fig.add_subplot(gs[2, 0])
-    _panel_sttc_distance(axb, analysis_root, tidy)
+    # Row 2 — C (STTC-distance) | D (forest)
+    _panel_sttc_distance(fig.add_subplot(gs[2, 0]), analysis_root, tidy)
     axd = fig.add_subplot(gs[2, 1])
-    if summ.empty:
-        _placeholder(axd, "no paired wells\nfor connectivity metrics")
-        axd.set_title("D  Connectivity response vs Control", loc="left",
-                      fontweight="bold")
-    else:
-        _panel_forest(axd, summ, vc, resp)
+    fdata = plot_did_forest(
+        axd, resp, FOREST_METRICS, FOCUS_ARMS,
+        xlabel="within-well response  (log2 post/pre; Δ for STTC/modularity)",
+        title="D  Connectivity response vs Control (DiD, chip-level)",
+        legend_loc="upper left")
+
+    # Row 3 — E: connectivity trajectories vs tau (three metrics)
+    arms = ["Control"] + FOCUS_ARMS
+    gse = gs[3, :].subgridspec(1, 3, wspace=0.35)
+    for ci, metric in enumerate(["mean_sttc", "edge_density", "modularity"]):
+        axe = fig.add_subplot(gse[0, ci])
+        plot_trajectory(axe, tidy, metric, arms, legend=(ci == 0),
+                        ref=(0.0 if metric in ("mean_sttc", "modularity") else None))
+        if ci == 0:
+            axe.annotate("E  Connectivity metrics vs treatment day",
+                         xy=(0, 1.15), xycoords="axes fraction",
+                         fontweight="bold", fontsize=9)
 
     fig.suptitle(
-        "Figure 7 — Spatial activity maps & functional connectivity (STTC), "
-        "well_uid unit", fontsize=9, y=1.0)
-    return fig, {"response": resp, "summary": summ, "vs_control": vc}
+        f"Figure 7 — Spatial activity maps & functional connectivity (STTC); "
+        f"chip = biological replicate{chip}", fontsize=9, y=1.0)
+    caption(fig,
+        "Spatial activity & functional connectivity. (A) Firing-rate activity "
+        "field of one representative treated (IVH_Late) well, early (τ≈0) vs late "
+        "(τ≈14). (B) STTC functional-connectivity graph for the same well early "
+        "vs late (nodes = units at electrode positions; edge opacity ∝ STTC). "
+        "(C) STTC vs inter-unit distance, cross-sectional at matched DIV "
+        "(exploratory, chip-confounded). (D) Difference-in-differences vs Control "
+        "at the biological-replicate level: bold points = 3 per-chip means, faint "
+        "= wells; marker = mean of chip means, whisker = 95% t-CI over 3 chips "
+        "(df=2); ★ = FDR q<0.05, △ = suggestive (consistent 3/3 chips, p<0.05 "
+        "uncorrected). (E) Group trajectories vs treatment day (tau): line = "
+        "per-arm median across wells, ribbon = 95% bootstrap CI (well-level). "
+        "STTC = spike-time tiling coefficient (Cutts & Eglen 2014). Unit: chip "
+        "(n=3 per arm).")
+    return fig, {"response": resp, "example": ex, **(fdata or {})}
 
 
 def render(tidy, analysis_root, figure_root):

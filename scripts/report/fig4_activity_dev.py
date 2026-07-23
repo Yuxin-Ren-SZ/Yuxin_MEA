@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from . import load as L
-from .report_style import METRIC_LABELS, OKABE_ITO, save_fig
+from .report_style import METRIC_LABELS, OKABE_ITO, caption, save_fig
 
 DIV_BIN_EDGES = list(range(4, 37, 4))  # width-4 bins spanning DIV 4-34
 TRAJ_METRICS = ["median_firing_rate", "nb_rate"]
@@ -138,6 +138,15 @@ def build_f4(tidy, analysis_root):
 
     fig.suptitle("Figure 4 — Network activity & development (well_uid unit)",
                  fontsize=9, y=0.99)
+    caption(fig,
+        "Network activity and its developmental maturation across the cohort. "
+        "(A) Representative spike rasters of one well, early (immature, low DIV) "
+        "vs late, illustrating the activity increase with age. (B) Firing-rate "
+        "maturation and (C) network-burst maturation vs developmental age (DIV): "
+        "each line is a group, tracking the median metric across wells as the "
+        "culture matures. This establishes the maturation baseline against which "
+        "the treatment difference-in-differences (F5-F8) is read. Points "
+        "aggregate recordings to the well first (median).")
     return fig, {"raster_well": wuid}
 
 

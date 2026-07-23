@@ -202,6 +202,41 @@ def apply_style() -> None:
 # --------------------------------------------------------------------------- #
 # Export
 # --------------------------------------------------------------------------- #
+# When False, :func:`caption` records the text on the figure but does not draw
+# it — used by the PPTX exporter, which places the caption in an editable text
+# box instead of baking it into the image.
+_CAPTION_DRAW = True
+
+# When set to a list, :func:`save_fig` appends ``(name, subdir, fig)`` and skips
+# writing to disk — the PPTX exporter uses this to grab every figure object.
+_COLLECT: list | None = None
+
+
+def caption(fig, text: str, *, fontsize: float = 6.0, color: str = "0.25") -> None:
+    """Attach a wrapped explanatory caption just below the figure box.
+
+    The full (unwrapped) text is always stored on ``fig._report_caption`` so the
+    PPTX exporter can reuse it. When :data:`_CAPTION_DRAW` is True it is also
+    drawn just below the figure (``y < 0`` in figure coords), captured by
+    ``save_fig``'s ``bbox_inches="tight"`` crop so it never overlaps the panels.
+    Line length is capped (70-130 chars) so very wide figures still wrap at a
+    readable width rather than running the full canvas. Call once, right before
+    :func:`save_fig`.
+    """
+    import textwrap
+
+    if not text:
+        return
+    fig._report_caption = " ".join(text.split())
+    if not _CAPTION_DRAW:
+        return
+    w_in = float(fig.get_size_inches()[0])
+    ncols = min(130, max(70, int(w_in * 13)))     # readable line length, capped
+    wrapped = "\n".join(textwrap.wrap(fig._report_caption, ncols))
+    fig.text(0.5, -0.012, wrapped, ha="center", va="top", fontsize=fontsize,
+             color=color, linespacing=1.4)
+
+
 def save_fig(
     fig,
     name: str,
@@ -210,13 +245,17 @@ def save_fig(
     formats: Sequence[str] = ("pdf", "svg", "png"),
 ) -> list[Path]:
     """Save a matplotlib figure to ``<figure_root>/report/<subdir>/`` in each
-    requested format. Returns the written paths.
+    requested format. Returns the written paths. Saved with a tight bounding box
+    (+ small pad) so below-figure captions (see :func:`caption`) are included.
     """
+    if _COLLECT is not None:            # PPTX export: hand the live figure over,
+        _COLLECT.append((name, subdir, fig))   # skip disk write (keeps the good
+        return []                              # captioned PNGs untouched)
     out_dir = report_dir(figure_root, subdir)
     written: list[Path] = []
     for ext in formats:
         p = out_dir / f"{name}.{ext}"
-        fig.savefig(p)
+        fig.savefig(p, bbox_inches="tight", pad_inches=0.12)
         written.append(p)
     return written
 

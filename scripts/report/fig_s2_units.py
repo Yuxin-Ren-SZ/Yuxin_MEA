@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from . import load as L
-from .report_style import OKABE_ITO, save_fig
+from .report_style import OKABE_ITO, caption, save_fig
 
 # curation thresholds (auto_curation defaults).
 _THRESH = {
@@ -113,6 +113,15 @@ def build_s2(tidy, analysis_root):
                  f"(n={units.attrs.get('n_wells', '?')} wells pooled)",
                  fontsize=9, y=1.01)
     fig.tight_layout()
+    caption(fig,
+        "Spike-sorting quality control, single units pooled across a spread of "
+        "wells. Panels show extracellular waveform templates and the "
+        "distributions of the quality metrics used to curate units before "
+        "analysis — presence ratio, refractory-period (ISI) contamination, "
+        "median amplitude, and firing rate — plus a peak-to-trough-duration vs "
+        "firing-rate scatter (a putative cell-type axis). Establishes that the "
+        "units feeding the burst and connectivity measures are well-isolated; "
+        "not a treatment comparison.")
     return fig, units
 
 

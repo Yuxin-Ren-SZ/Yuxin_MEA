@@ -24,7 +24,7 @@ import pandas as pd
 
 from . import load as L
 from . import stats as S
-from .report_style import save_fig
+from .report_style import caption, save_fig
 
 # UMAP params mirror the pipeline; n_components=2 for display.
 _UMAP_KW = dict(n_neighbors=30, min_dist=0.0, n_components=2, random_state=42)
@@ -183,6 +183,16 @@ def build_umap_migration(tidy, analysis_root):
     fig.suptitle("Figure 6b — Post-treatment network-state dynamics "
                  "(per-well pooled UMAP; fixed axes across treatment days)",
                  fontsize=8.5, y=1.0)
+    caption(fig,
+        "Post-treatment network-state migration. One row per arm (a chip-matched "
+        "CX138 trio: Control well015, IVH_Early well001, IVH_Late well014); each "
+        "column is a developmental stage, auto-spaced from the treatment day "
+        "(tau 0) to the well's latest recording. Every point is a time bin "
+        "embedded in that well's pooled UMAP (all days fit together, so the axes "
+        "are fixed across columns and the drift is comparable); colour = network "
+        "state (burst vs rest). Shows how the resting-state cluster migrates and "
+        "the trajectory reshapes after treatment. Illustrative single-well "
+        "panels, not a group statistic.")
     return fig, {arm: (None if d is None else
                        {int(t): int((d["tau"] == t).sum())
                         for t in _auto_days(d["tau"])})

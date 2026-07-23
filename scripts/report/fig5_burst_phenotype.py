@@ -28,80 +28,15 @@ import pandas as pd
 
 from . import stats as S
 from .report_style import (
-    METRIC_LABELS, group_color, ordered_groups, save_fig,
+    METRIC_LABELS, caption, group_color, ordered_groups, save_fig,
 )
 
 # Arms shown in F5 (Control is always the reference; not listed here).
-FOCUS_ARMS = ["IVH_Early", "IVH_Late", "H2O2_20uM"]
+FOCUS_ARMS = ["IVH_Early", "IVH_Late"]
 FOREST_METRICS = [
     "nb_rate", "nb_duration_mean", "nb_spikes_per_burst_mean",
     "nb_ibi_mean", "median_firing_rate",
 ]
-
-
-def _stars(q: float) -> str:
-    if np.isnan(q):
-        return ""
-    return "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else ""
-
-
-def _panel_forest(ax, summ, vc, resp) -> None:
-    rng = np.random.default_rng(0)
-    treated = [a for a in ordered_groups(summ.arm.unique())
-               if a in FOCUS_ARMS]
-    arms = ["Control"] + treated
-    arm_off = np.linspace(0.30, -0.30, len(arms))
-    vc_idx = vc.set_index(["arm", "metric"]) if len(vc) else None
-    yticks, ylabels = [], []
-    for mi, metric in enumerate(FOREST_METRICS):
-        y0 = -mi
-        yticks.append(y0)
-        ylabels.append(METRIC_LABELS.get(metric, metric))
-        for ai, arm in enumerate(arms):
-            r = summ[(summ.metric == metric) & (summ.arm == arm)]
-            if r.empty:
-                continue
-            r = r.iloc[0]
-            y = y0 + arm_off[ai]
-            is_ctrl = arm == "Control"
-            # raw per-well responses (jittered) behind the median±CI
-            pts = resp.loc[(resp.metric == metric) & (resp.arm == arm),
-                           "response"].to_numpy(float)
-            if len(pts):
-                jit = (rng.random(len(pts)) - 0.5) * 0.13
-                ax.scatter(pts, np.full(len(pts), y) + jit, s=5,
-                           color=group_color(arm), alpha=0.30, lw=0, zorder=2)
-            xerr = np.array([[max(r.median_response - r.ci_low, 0)],
-                             [max(r.ci_high - r.median_response, 0)]])
-            ax.errorbar(
-                r.median_response, y, xerr=xerr,
-                fmt=("D" if is_ctrl else "o"), ms=(4.5 if is_ctrl else 4),
-                color=group_color(arm), capsize=2, elinewidth=0.9,
-                markerfacecolor=group_color(arm), markeredgecolor=group_color(arm),
-                zorder=(4 if is_ctrl else 3),
-            )
-            if not is_ctrl and vc_idx is not None and (arm, metric) in vc_idx.index:
-                s = _stars(vc_idx.loc[(arm, metric), "q_bh"])
-                if s:
-                    ax.text(r.ci_high + 0.05, y, s, va="center", ha="left",
-                            fontsize=7, color=group_color(arm))
-    ax.axvline(0, ls="--", color="0.5", lw=0.8, zorder=1)
-    ax.set_yticks(yticks)
-    ax.set_yticklabels(ylabels)
-    ax.set_ylim(min(yticks) - 0.6, max(yticks) + 0.6)
-    ax.set_xlabel("within-well response  log2(post / pre)")
-    ax.set_title("A  Response vs developmental maturation", loc="left",
-                 fontweight="bold")
-    # make the comparison behind the stars explicit
-    ax.text(0.0, -0.135,
-            "* / ** / *** = q<0.05 / 0.01 / 0.001, treated arm vs Control "
-            "(difference-in-differences, Mann-Whitney + BH-FDR)",
-            transform=ax.transAxes, fontsize=5.5, color="0.35", va="top")
-    handles = [ax.plot([], [], marker="D", ls="", color="k",
-                       label="Control (maturation)")[0]]
-    handles += [ax.plot([], [], marker="o", ls="", color=group_color(a), label=a)[0]
-                for a in treated]
-    ax.legend(handles=handles, loc="upper left", fontsize=6, ncol=1)
 
 
 def _load_rosglo(path) -> pd.DataFrame:
@@ -148,24 +83,55 @@ def _panel_rosglo(ax, table=None) -> None:
     ax.set_title("B  ROS-Glo (oxidative stress)", loc="left", fontweight="bold")
 
 
+# Metrics shown as tau-trajectories (row B).
+TRAJ_METRICS = ["nb_rate", "nb_duration_mean", "median_firing_rate"]
+_ALL_ARMS = ["Control"] + FOCUS_ARMS
+
+
 def build_f5(tidy, rosglo_table=None):
     import matplotlib.pyplot as plt
 
-    resp = S.well_response(tidy, metrics=FOREST_METRICS)
-    resp = resp[resp.arm.isin(["Control"] + FOCUS_ARMS)]
-    summ = S.arm_response_summary(resp)
-    vc = S.arm_response_vs_control(resp)
+    from .forest import plot_did_forest
+    from .trajectory import plot_trajectory
 
-    fig, (axf, axr) = plt.subplots(
-        1, 2, figsize=(8.6, 4.2), gridspec_kw={"width_ratios": [2.3, 0.8]})
-    _panel_forest(axf, summ, vc, resp)
+    resp = S.well_response(tidy, metrics=FOREST_METRICS)
+    resp = resp[resp.arm.isin(_ALL_ARMS)]
+
+    fig = plt.figure(figsize=(9.2, 6.6))
+    gs = fig.add_gridspec(2, 3, height_ratios=[1.25, 1.0], hspace=0.42, wspace=0.32)
+    # Row A: DiD forest (wide) + ROS-Glo
+    axf = fig.add_subplot(gs[0, :2]); axr = fig.add_subplot(gs[0, 2])
+    fdata = plot_did_forest(
+        axf, resp, FOREST_METRICS, FOCUS_ARMS,
+        xlabel="within-well response  log2(post / pre)",
+        title="A  Response vs developmental maturation (DiD, chip-level)")
     _panel_rosglo(axr, rosglo_table)
+    # Row B: tau-trajectories (the time-course the forest's pooled 'post' hides)
+    for ci, metric in enumerate(TRAJ_METRICS):
+        ax = fig.add_subplot(gs[1, ci])
+        plot_trajectory(ax, tidy, metric, _ALL_ARMS, legend=(ci == 0))
+        if ci == 0:
+            ax.annotate("C  Network-burst trajectories vs treatment day",
+                        xy=(0, 1.12), xycoords="axes fraction", fontweight="bold",
+                        fontsize=9)
     fig.suptitle(
         "Figure 5 — IVH & oxidative-stress network-burst change vs Control "
-        "maturation (difference-in-differences, well_uid unit)",
-        fontsize=8.5, y=1.02)
-    fig.tight_layout()
-    return fig, {"response": resp, "summary": summ, "vs_control": vc}
+        "maturation (DiD + tau-trajectories; chip = biological replicate)",
+        fontsize=8.5, y=1.0)
+    caption(fig,
+        "Network-burst phenotype. (A) Within-well difference-in-differences vs "
+        "Control: each treated arm's pre→post change (log2 post/pre) minus "
+        "Control's maturation change, per metric. Bold points = the 3 per-chip "
+        "means (biological replicates), faint = wells; marker = mean of chip "
+        "means, whisker = 95% t-CI over the 3 chips (df=2); Control diamond = "
+        "maturation baseline. ★ = FDR q<0.05 (none); △ = suggestive (same "
+        "direction on all 3 chips, uncorrected p<0.05, not FDR-significant at "
+        "n=3). (B) ROS-Glo oxidative-stress assay placeholder (supply "
+        "--rosglo-table). (C) Group trajectories vs treatment day (tau) for the "
+        "raw metric: line = per-arm median across wells, ribbon = 95% bootstrap "
+        "CI (well-level), dotted vertical = treatment day (tau 0). Unit of "
+        "replication: chip (n=3 per arm); IVH_Early / IVH_Late vs Control.")
+    return fig, {"response": resp, **(fdata or {})}
 
 
 def render(tidy, figure_root, rosglo_table=None):

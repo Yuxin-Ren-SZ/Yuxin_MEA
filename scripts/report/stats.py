@@ -184,6 +184,174 @@ def arm_response_summary(resp: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Biological-replicate (chip) accounting
+# --------------------------------------------------------------------------- #
+# The physical well is the *technical* replicate; the chip (``sample_id``,
+# CX118/CX138/CX169) is the biological replicate. Wells within a chip share one
+# plating / CSF-application batch, so treating them as independent inflates n
+# (pseudo-replication; Lazic 2010, BMC Neurosci). The functions below respect the
+# hierarchy two ways: per-chip means for plotting, and a well-nested-in-chip
+# linear mixed model for the difference-in-differences inference.
+def multichip_arms(resp: pd.DataFrame) -> list[str]:
+    """Non-Control arms measured on >=2 chips (the only ones a chip-level model
+    can estimate). Single-chip arms (AraC, NPH) are perfectly confounded with
+    their one chip, so their coefficient is meaningless — excluded."""
+    per = resp[resp.arm != "Control"].groupby("arm").chip.nunique()
+    return [a for a in per.index if per[a] >= MIN_CHIPS_CONFIRMATORY]
+
+
+def chip_response(resp: pd.DataFrame) -> pd.DataFrame:
+    """Per (chip, arm, metric): mean of the well responses = one *biological*
+    point. This is what "all data points" plots (wells collapsed to their chip)."""
+    return (resp.groupby(["chip", "arm", "metric"], as_index=False)
+            .response.mean())
+
+
+def within_chip_did(resp: pd.DataFrame) -> pd.DataFrame:
+    """Per chip × treated arm × metric: the chip's own treated-vs-Control DiD
+    ``(arm chip-mean − that chip's Control chip-mean)``.
+
+    This is the transparent companion to the mixed model: its mean should match
+    the LMM coefficient, and the **sign-consistency of the 2-3 per-chip DiDs is
+    the real n=3 story** (a same-sign, tight set is a genuine biological effect;
+    a mixed-sign set is null however small the Wald p). Only chips that carry
+    both the arm and a Control well contribute.
+    """
+    cr = chip_response(resp)
+    ctrl = (cr[cr.arm == "Control"][["chip", "metric", "response"]]
+            .rename(columns={"response": "ctrl_response"}))
+    tr = cr[cr.arm != "Control"].merge(ctrl, on=["chip", "metric"], how="inner")
+    tr["did"] = tr.response - tr.ctrl_response
+    return tr[["chip", "arm", "metric", "response", "ctrl_response", "did"]]
+
+
+def arm_response_summary_chip(resp: pd.DataFrame) -> pd.DataFrame:
+    """Per arm × metric at the biological-replicate (chip) level: mean of the
+    chip means + a t-CI (df = n_chips − 1) over chips.
+
+    Replaces the well-bootstrap CI in :func:`arm_response_summary`, which is
+    pseudo-replicated (too tight). Column ``median_response`` is kept for
+    drop-in use by the forest panels but now holds the **chip-level mean**.
+    """
+    from scipy.stats import t as tdist
+
+    cr = chip_response(resp)
+    rows = []
+    for (arm, m), sub in cr.groupby(["arm", "metric"]):
+        x = sub.response.to_numpy(float)
+        x = x[~np.isnan(x)]
+        n = len(x)
+        mean = float(np.mean(x)) if n else np.nan
+        if n >= 2:
+            sem = float(np.std(x, ddof=1) / np.sqrt(n))
+            h = float(tdist.ppf(0.975, n - 1)) * sem
+            lo, hi = mean - h, mean + h
+        else:
+            lo = hi = mean
+        rows.append(dict(arm=arm, metric=m, n_chips=n,
+                         median_response=mean, ci_low=lo, ci_high=hi))
+    return pd.DataFrame(rows)
+
+
+def _ttest_did_vs_zero(x: np.ndarray) -> float:
+    """One-sample t-test that the per-chip DiDs differ from 0; NaN if < 2 chips
+    or all identical. df = n_chips − 1 — the honest biological-replicate df."""
+    from scipy.stats import ttest_1samp
+
+    x = x[~np.isnan(x)]
+    if len(x) < 2 or np.allclose(x, x[0]):
+        return np.nan
+    return float(ttest_1samp(x, 0.0).pvalue)
+
+
+def arm_response_vs_control_lmm(
+    resp: pd.DataFrame, focus_arms: list[str] | None = None,
+) -> pd.DataFrame:
+    """Difference-in-differences at the biological-replicate (chip) level.
+
+    **Inference = the cluster-summary test**, not a Wald p from an intercept-only
+    mixed model. Treatment is applied *within* chip (every chip carries Control +
+    treated wells), so ``response ~ arm + (1|chip)`` is random-**intercept** only:
+    the arm effect is a pure within-chip contrast whose SE the intercept-only
+    model draws from the **well-level residual df (~13), not the 3 chips** — that
+    is pseudo-replication wearing a mixed-model coat (statsmodels also gives no
+    small-sample df correction, so the Wald p is 40-400× too small at n≈3 here).
+    Generalising to new chips needs a random *slope* ``(arm|chip)``, which 3
+    groups cannot identify; its finite-sample equivalent is a **one-sample t-test
+    of the per-chip DiDs against 0** (:func:`within_chip_did`, df = n_chips − 1).
+    That is ``p_vs_control`` / ``q_bh`` here — the number a reviewer will expect.
+
+    The mixed model is still fit, but only for the **point estimate**
+    (``lmm_coef``, which matches ``did_chipmean``); its anti-conservative
+    ``lmm_p`` is kept for transparency, never for significance. ``chip_consistent``
+    = same sign on all chips; ``suggestive`` = consistent AND uncorrected
+    ``p_vs_control`` < 0.05 (a pilot-level signal that does *not* survive FDR at
+    n=3). Single-chip arms (AraC, NPH) are excluded. BH-FDR over confirmatory rows.
+    """
+    import warnings
+
+    import statsmodels.formula.api as smf
+
+    wc = within_chip_did(resp)
+    ok_arms = set(multichip_arms(resp))
+    arms = ([a for a in focus_arms if a in ok_arms] if focus_arms is not None
+            else sorted(ok_arms))
+    rows = []
+    for m, d0 in resp.groupby("metric"):
+        d = d0[d0.arm.isin(["Control"] + arms)].dropna(subset=["response"]).copy()
+        coefs: dict[str, float] = {}
+        lmm_ps: dict[str, float] = {}
+        re_var = np.nan
+        singular = True
+        if d.arm.nunique() >= 2 and d.chip.nunique() >= 2:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    res = smf.mixedlm(
+                        "response ~ C(arm, Treatment('Control'))",
+                        d, groups=d["chip"]).fit(reml=False)
+                re_var = float(res.cov_re.iloc[0, 0])
+                singular = re_var <= 1e-8 * max(float(res.scale), 1e-12)
+                for a in arms:
+                    key = f"C(arm, Treatment('Control'))[T.{a}]"
+                    if key in res.params.index:
+                        coefs[a] = float(res.params[key])
+                        lmm_ps[a] = float(res.pvalues[key])
+            except Exception:  # singular / non-convergence -> companion carries it
+                pass
+        for a in arms:
+            sub = d0[d0.arm == a]
+            cd = wc.loc[(wc.metric == m) & (wc.arm == a), "did"].to_numpy(float)
+            cd = cd[~np.isnan(cd)]
+            n_wells = int(sub.response.notna().sum())
+            n_chips = int(sub.chip.nunique())
+            rows.append(dict(
+                arm=a, metric=m, n_wells=n_wells, n_chips=n_chips,
+                n_chips_paired=len(cd),
+                did=float(np.mean(cd)) if len(cd) else np.nan,   # honest estimate
+                did_chipmean=float(np.mean(cd)) if len(cd) else np.nan,
+                lmm_coef=coefs.get(a, np.nan), lmm_p=lmm_ps.get(a, np.nan),
+                chip_consistent=bool(len(cd) >= 2 and
+                                     (np.all(cd > 0) or np.all(cd < 0))),
+                re_var=re_var, singular=bool(singular),
+                p_vs_control=_ttest_did_vs_zero(cd),      # cluster-summary p
+                tier=("confirmatory"
+                      if (n_chips >= MIN_CHIPS_CONFIRMATORY
+                          and n_wells >= MIN_WELLS_CONFIRMATORY)
+                      else "exploratory"),
+            ))
+    out = pd.DataFrame(rows)
+    out["q_bh"] = np.nan
+    if not out.empty:
+        conf = (out.tier == "confirmatory") & out.p_vs_control.notna()
+        if conf.any():
+            out["q_bh"] = _bh_fdr(out.p_vs_control.where(conf, np.nan).to_numpy())
+        out["suggestive"] = (out.chip_consistent & out.p_vs_control.notna()
+                             & (out.p_vs_control < 0.05) & ~(out.q_bh < 0.05))
+    return out
+
+
 def cliffs_delta(a: np.ndarray, b: np.ndarray) -> float:
     """Cliff's delta effect size (a vs b); NaN if either side empty."""
     a = a[~np.isnan(a)]; b = b[~np.isnan(b)]
