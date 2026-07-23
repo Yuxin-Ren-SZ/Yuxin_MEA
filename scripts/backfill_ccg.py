@@ -22,6 +22,12 @@ Idempotent: a well that already has ``ccg.npz`` is skipped unless ``--force``.
 CCG params come from the config's ``connectivity`` section (falling back to the
 task defaults), so a backfilled well matches what a fresh run would produce.
 
+Wells are independent (separate output dirs, atomic writes), so ``--jobs N``
+fans them across processes. The work is NAS-read-bound (loading each well's
+``curated_spike_times.npy``), so processes overlap I/O rather than saturating a
+CPU — 8-11 is a reasonable range. Keep the per-well ``ConnectivityConfig``
+``n_jobs`` at 1: this is the outer parallelism.
+
 Note: adding the ``ccg_*`` params to the connectivity config changes that task's
 params hash, so ``--verify-provenance`` will report CONFIG-CHANGED for wells that
 predate them. Backfilling does not clear that flag — it only makes the artifacts
@@ -160,6 +166,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="recompute wells that already have ccg.npz")
     ap.add_argument("--dry-run", action="store_true",
                     help="list what would be backfilled, write nothing")
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="processes fanning wells in parallel (NAS-read-bound; "
+                    "8-11 is reasonable). 1 = serial.")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -197,27 +206,45 @@ def main(argv: list[str] | None = None) -> int:
         dirs = [d for d in dirs if args.recording_filter in str(d)]
     logger.info("%d wells with an edges table", len(dirs))
 
+    # Skip already-current wells up front (cheap stat) so the work list — and any
+    # --limit — counts only wells that actually need computing.
     counts: dict[str, int] = {}
-    failed = 0
-    done = 0
+    todo: list[Path] = []
     for conn_dir in dirs:
         if (conn_dir / "ccg.npz").exists() and not args.force:
             counts["skip-current"] = counts.get("skip-current", 0) + 1
-            continue
-        if args.limit and done >= args.limit:
-            break
+        else:
+            todo.append(conn_dir)
+    if args.limit:
+        todo = todo[: args.limit]
+    logger.info("%d wells to backfill (%d already current)",
+                len(todo), counts.get("skip-current", 0))
+
+    def _one(conn_dir: Path) -> tuple[str, Path, str]:
         try:
             status = backfill_well(
                 conn_dir, _curation_dir(conn_dir, conn_root, curation_root),
                 cfg, dry_run=args.dry_run,
             )
+            return status, conn_dir, ""
         except Exception as exc:  # noqa: BLE001 — one bad well must not stop the run
-            logger.warning("%s: %s", conn_dir, exc)
-            status = "failed"
-            failed += 1
+            return "failed", conn_dir, str(exc)
+
+    if args.jobs and args.jobs != 1 and len(todo) > 1:
+        from joblib import Parallel, delayed
+        results = Parallel(n_jobs=args.jobs, backend="loky")(
+            delayed(_one)(d) for d in todo)
+    else:
+        results = [_one(d) for d in todo]
+
+    failed = 0
+    for status, conn_dir, msg in results:
         counts[status] = counts.get(status, 0) + 1
-        done += 1
-        logger.debug("%s %s", status, conn_dir)
+        if status == "failed":
+            failed += 1
+            logger.warning("%s: %s", conn_dir, msg)
+        else:
+            logger.debug("%s %s", status, conn_dir)
 
     logger.info("done: %s", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     return 1 if failed else 0
