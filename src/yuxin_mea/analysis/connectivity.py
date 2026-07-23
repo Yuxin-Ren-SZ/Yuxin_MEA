@@ -13,6 +13,19 @@ Pipeline per well:
   3. ``graph_metrics`` — thresholded adjacency → networkx topology scalars.
   4. ``edges`` — significant edges paired with inter-unit distance for the
      distance-vs-connectivity decay curve and the electrode-plane graph render.
+  5. ``compute_ccg`` — a lag-resolved cross-correlogram per significant edge, with
+     a partially-hollow-Gaussian baseline (Stark & Abeles, *J Neurosci Methods*
+     2009) so the broad network-burst co-activation bump is stripped before any
+     peak is called.
+
+STTC is symmetric and lag-free; the CCG is what answers *which* unit leads and at
+what latency. Sign convention, fixed everywhere::
+
+    reference = u, target = v; the histogram is of (t_v - t_u).
+    A peak at POSITIVE lag means v fires AFTER u, i.e. u leads v.
+
+``edges`` stores only the upper triangle, so this convention is the only thing
+making a peak lag interpretable — do not change it without changing the readers.
 
 House style mirrors :mod:`yuxin_mea.analysis.burst_detector`: a frozen
 ``ConnectivityConfig`` (+ ``from_task_params``), a ``ConnectivityResults``
@@ -55,6 +68,16 @@ class ConnectivityConfig:
     min_spikes_per_unit: int = 5
     random_state: int = 42
     n_jobs: int = 1  # intra-well joblib; keep 1 (pipeline parallelism = CLI --jobs)
+    # ---- cross-correlograms (significant edges only) ----------------------
+    ccg_enable: bool = True
+    ccg_window: float = 0.1     # +/- half-width (s); dt sweep tops out at 50 ms
+    ccg_bin: float = 0.001      # bin width (s) -> 201 bins at the default window
+    ccg_hollow_sigma: float = 0.01   # baseline kernel sigma (s)
+    ccg_hollow_frac: float = 0.6     # centre-bin hollowing (Stark & Abeles 2009)
+    ccg_alpha: float = 0.001         # per-bin Poisson tail threshold
+    ccg_syn_lo: float = 0.0008       # causal window low edge (s)
+    ccg_syn_hi: float = 0.008        # causal window high edge (s)
+    ccg_max_pairs: int = 5000        # cap; over it keep the highest-STTC edges
 
     @classmethod
     def from_task_params(cls, params: dict) -> "ConnectivityConfig":
@@ -87,9 +110,14 @@ class ConnectivityResults:
     ``sttc_sweep``  : ``{dt_s: (n, n) matrix}`` for each swept window.
     ``adjacency``   : ``(n, n)`` boolean significance mask (thresholded null).
     ``graph_metrics`` : well-level topology scalars (schema = :func:`graph_metrics`).
-    ``edges``       : significant edges ``[u, v, sttc, dist_um]`` (upper triangle).
+    ``edges``       : significant edges ``[u, v, sttc, dist_um]`` (upper triangle)
+    plus the per-edge ``ccg_*`` columns when CCGs ran.
     ``unit_ids``    : row/col order for the matrices.
     ``diagnostics`` : dt_primary, n_units, n_edges, thresh_method, n_shuffle, T.
+    ``ccg_counts``/``ccg_baseline`` : ``(n_pairs, n_bins)`` raw counts and the
+    hollow-Gaussian baseline. Rows are keyed by ``ccg_pairs`` — **never** by
+    position in ``edges``, which can be longer when ``ccg_max_pairs`` trips.
+    ``ccg_pairs``   : ``(n_pairs, 2)`` ``(u, v)`` = (reference, target).
     """
 
     sttc_matrix: np.ndarray
@@ -99,6 +127,13 @@ class ConnectivityResults:
     edges: pd.DataFrame
     unit_ids: list
     diagnostics: dict
+    ccg_counts: np.ndarray | None = None
+    ccg_baseline: np.ndarray | None = None
+    ccg_lags_ms: np.ndarray | None = None
+    ccg_pairs: np.ndarray | None = None
+    ccg_n_ref_spikes: np.ndarray | None = None
+    ccg_n_tgt_spikes: np.ndarray | None = None
+    ccg_meta: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +337,288 @@ def sttc_significance(
 
 
 # ---------------------------------------------------------------------------
+# Cross-correlograms
+# ---------------------------------------------------------------------------
+CCG_COLUMNS = ["ccg_peak_lag_ms", "ccg_peak_z", "ccg_sig", "ccg_syn_dir",
+               "ccg_asymmetry"]
+
+_LAM_FLOOR = 1e-6  # keeps z finite in near-empty bins (p-value needs no floor)
+
+
+def ccg_lags(bin_s: float = 0.001, window_s: float = 0.1) -> np.ndarray:
+    """Bin centres (s) for a ±``window_s`` correlogram: symmetric, odd count."""
+    n_half = int(round(window_s / bin_s))
+    return np.arange(-n_half, n_half + 1, dtype=float) * bin_s
+
+
+def ccg_pair(
+    ref: np.ndarray,
+    tgt: np.ndarray,
+    bin_s: float = 0.001,
+    window_s: float = 0.1,
+) -> np.ndarray:
+    """Cross-correlogram counts of ``t_tgt − t_ref`` over ±``window_s``.
+
+    A peak at positive lag means ``tgt`` fires *after* ``ref`` (``ref`` leads).
+    Bin *centres* are ``ccg_lags(bin_s, window_s)``, so a delta at exactly +5 ms
+    lands in the +5 ms bin.
+
+    ``tgt`` **must be sorted** — ``np.searchsorted`` returns garbage (without
+    raising) otherwise. :func:`compute_ccg` sorts once per unit before calling.
+    """
+    ref = np.asarray(ref, dtype=float)
+    tgt = np.asarray(tgt, dtype=float)
+    n_half = int(round(window_s / bin_s))
+    n_bins = 2 * n_half + 1
+    if ref.size == 0 or tgt.size == 0:
+        return np.zeros(n_bins, dtype=np.int32)
+
+    # Half a bin of slack so the outermost bins collect their full width.
+    edge = window_s + 0.5 * bin_s
+    lo = np.searchsorted(tgt, ref - edge, side="left")
+    hi = np.searchsorted(tgt, ref + edge, side="right")
+    deltas = [tgt[a:b] - t for t, a, b in zip(ref.tolist(), lo.tolist(), hi.tolist())
+              if b > a]
+    if not deltas:
+        return np.zeros(n_bins, dtype=np.int32)
+    idx = np.rint(np.concatenate(deltas) / bin_s).astype(np.int64) + n_half
+    idx = idx[(idx >= 0) & (idx < n_bins)]
+    return np.bincount(idx, minlength=n_bins).astype(np.int32)
+
+
+def _hollow_gaussian(sigma_bins: float, hollow_frac: float) -> np.ndarray:
+    """Gaussian kernel with a partially hollowed centre bin, summing to 1.
+
+    Stark & Abeles (2009): hollowing the centre keeps a sharp peak from
+    predicting its own baseline, so the slow (network-burst) component survives
+    the convolution while a monosynaptic bump does not.
+    """
+    sigma_bins = max(float(sigma_bins), 1e-3)
+    half = max(1, int(round(3.0 * sigma_bins)))
+    x = np.arange(-half, half + 1, dtype=float)
+    k = np.exp(-0.5 * (x / sigma_bins) ** 2)
+    k[half] *= (1.0 - float(hollow_frac))
+    s = k.sum()
+    return k / s if s > 0 else k
+
+
+def ccg_stats(
+    counts: np.ndarray,
+    lags_s: np.ndarray,
+    config: "ConnectivityConfig | None" = None,
+) -> dict:
+    """Hollow-Gaussian baseline + per-bin Poisson test for one correlogram.
+
+    Returns ``baseline`` (same shape as ``counts``) plus the scalars persisted
+    per edge: ``peak_lag_ms``, ``peak_z``, ``sig``, ``syn_dir``, ``asymmetry``.
+
+    ``sig``/``syn_dir`` are decided *inside the causal window*
+    ``[ccg_syn_lo, ccg_syn_hi]`` on either side of zero — the broad central bump
+    that every burst-dominated MEA pair carries is not evidence of anything.
+    ``asymmetry`` is ``(Σ⁺ − Σ⁻)/(Σ⁺ + Σ⁻)`` over that window: +1 = u leads v
+    exclusively, −1 = the reverse, 0 = symmetric.
+    """
+    from scipy.stats import poisson
+
+    cfg = config or ConnectivityConfig()
+    counts = np.asarray(counts, dtype=float)
+    lags_s = np.asarray(lags_s, dtype=float)
+    empty = {
+        "baseline": np.zeros_like(counts),
+        "peak_lag_ms": float("nan"), "peak_z": float("nan"),
+        "sig": False, "syn_dir": "", "asymmetry": float("nan"),
+    }
+    if counts.size == 0 or counts.sum() <= 0:
+        return empty
+
+    k = _hollow_gaussian(cfg.ccg_hollow_sigma / cfg.ccg_bin, cfg.ccg_hollow_frac)
+    # Normalise by the kernel mass actually available: without this the first and
+    # last bins get a baseline biased low purely by truncation.
+    denom = np.convolve(np.ones(counts.size), k, mode="same")
+    lam = np.convolve(counts, k, mode="same") / np.where(denom > 0, denom, 1.0)
+    lam_f = np.maximum(lam, _LAM_FLOOR)
+    z = (counts - lam) / np.sqrt(lam_f)
+    p = poisson.sf(counts - 1, lam_f)
+
+    ipk = int(np.argmax(z))
+    pos = (lags_s >= cfg.ccg_syn_lo) & (lags_s <= cfg.ccg_syn_hi)
+    neg = (lags_s <= -cfg.ccg_syn_lo) & (lags_s >= -cfg.ccg_syn_hi)
+    sig_pos = bool(np.any(p[pos] < cfg.ccg_alpha)) if pos.any() else False
+    sig_neg = bool(np.any(p[neg] < cfg.ccg_alpha)) if neg.any() else False
+    if sig_pos and sig_neg:
+        zp = float(np.max(z[pos]))
+        zn = float(np.max(z[neg]))
+        syn_dir = "u->v" if zp >= zn else "v->u"
+    elif sig_pos:
+        syn_dir = "u->v"
+    elif sig_neg:
+        syn_dir = "v->u"
+    else:
+        syn_dir = ""
+
+    s_pos = float(counts[pos].sum())
+    s_neg = float(counts[neg].sum())
+    total = s_pos + s_neg
+    asym = (s_pos - s_neg) / total if total > 0 else float("nan")
+
+    return {
+        "baseline": lam,
+        "peak_lag_ms": float(lags_s[ipk] * 1000.0),
+        "peak_z": float(z[ipk]),
+        "sig": sig_pos or sig_neg,
+        "syn_dir": syn_dir,
+        "asymmetry": asym,
+    }
+
+
+def compute_ccg(
+    spike_times: dict,
+    edges: pd.DataFrame,
+    config: "ConnectivityConfig | None" = None,
+) -> dict:
+    """Correlograms for every edge in ``edges`` (reference = ``u``, target = ``v``).
+
+    Returns a dict with ``counts``/``baseline`` ``(n_pairs, n_bins)``, ``lags_ms``,
+    ``pairs`` ``(n_pairs, 2)``, the per-pair spike counts, a ``per_pair``
+    DataFrame (``u``, ``v`` + :data:`CCG_COLUMNS`) and ``meta``.
+
+    When ``len(edges) > ccg_max_pairs`` only the highest-STTC edges are computed,
+    so ``n_pairs`` can be *smaller* than ``len(edges)``: join on ``(u, v)``,
+    never on row position.
+    """
+    cfg = config or ConnectivityConfig()
+    lags_s = ccg_lags(cfg.ccg_bin, cfg.ccg_window)
+    n_bins = int(lags_s.size)
+    out = {
+        "counts": np.zeros((0, n_bins), dtype=np.int32),
+        "baseline": np.zeros((0, n_bins), dtype=np.float32),
+        "lags_ms": (lags_s * 1000.0).astype(np.float64),
+        "pairs": np.zeros((0, 2)),
+        "n_ref_spikes": np.zeros(0, dtype=np.int64),
+        "n_tgt_spikes": np.zeros(0, dtype=np.int64),
+        "per_pair": pd.DataFrame(columns=["u", "v", *CCG_COLUMNS]),
+        "meta": {
+            "ccg_enabled": bool(cfg.ccg_enable),
+            "ccg_bin_ms": float(cfg.ccg_bin * 1000.0),
+            "ccg_window_ms": float(cfg.ccg_window * 1000.0),
+            "ccg_syn_lo_ms": float(cfg.ccg_syn_lo * 1000.0),
+            "ccg_syn_hi_ms": float(cfg.ccg_syn_hi * 1000.0),
+            "ccg_n_pairs": 0,
+            "ccg_pairs_capped": 0,
+        },
+    }
+    if not cfg.ccg_enable or edges is None or not len(edges):
+        return out
+
+    ed = edges.reset_index(drop=True)
+    keep = np.arange(len(ed))
+    capped = 0
+    if len(ed) > cfg.ccg_max_pairs > 0:
+        # Highest-STTC edges win the budget; keep them in table order afterwards.
+        rank = np.argsort(-ed["sttc"].to_numpy(dtype=float), kind="mergesort")
+        keep = np.sort(rank[: cfg.ccg_max_pairs])
+        capped = int(len(ed) - keep.size)
+
+    # Sort every unit's train exactly once. A manually merged unit is two sorted
+    # trains concatenated — i.e. NOT sorted — and searchsorted would be silently
+    # wrong on it.
+    needed = set(ed["u"].tolist()) | set(ed["v"].tolist())
+    trains = {
+        u: np.sort(np.asarray(spike_times[u], dtype=float))
+        for u in needed if u in spike_times
+    }
+
+    counts, baseline, pairs, n_ref, n_tgt, rows = [], [], [], [], [], []
+    for i in keep.tolist():
+        u = ed.at[i, "u"]
+        v = ed.at[i, "v"]
+        ref = trains.get(u)
+        tgt = trains.get(v)
+        if ref is None or tgt is None:
+            continue
+        c = ccg_pair(ref, tgt, bin_s=cfg.ccg_bin, window_s=cfg.ccg_window)
+        st = ccg_stats(c, lags_s, cfg)
+        counts.append(c)
+        baseline.append(np.asarray(st["baseline"], dtype=np.float32))
+        pairs.append((u, v))
+        n_ref.append(ref.size)
+        n_tgt.append(tgt.size)
+        rows.append({
+            "u": u, "v": v,
+            "ccg_peak_lag_ms": st["peak_lag_ms"], "ccg_peak_z": st["peak_z"],
+            "ccg_sig": st["sig"], "ccg_syn_dir": st["syn_dir"],
+            "ccg_asymmetry": st["asymmetry"],
+        })
+
+    if counts:
+        out["counts"] = np.vstack(counts).astype(np.int32)
+        out["baseline"] = np.vstack(baseline).astype(np.float32)
+        out["pairs"] = np.asarray(pairs)
+        out["n_ref_spikes"] = np.asarray(n_ref, dtype=np.int64)
+        out["n_tgt_spikes"] = np.asarray(n_tgt, dtype=np.int64)
+        out["per_pair"] = pd.DataFrame(rows, columns=["u", "v", *CCG_COLUMNS])
+    out["meta"]["ccg_n_pairs"] = int(len(counts))
+    out["meta"]["ccg_pairs_capped"] = capped
+    return out
+
+
+def attach_ccg(edges: pd.DataFrame, per_pair: pd.DataFrame) -> pd.DataFrame:
+    """Left-join the per-pair CCG columns onto ``edges`` on ``(u, v)``.
+
+    Edges dropped by ``ccg_max_pairs`` keep NaN/``pd.NA`` in every ``ccg_*``
+    column — they are "not computed", not "not significant".
+    """
+    if edges is None:
+        return edges
+    if per_pair is None or not len(per_pair):
+        out = edges.copy()
+        for c in CCG_COLUMNS:
+            out[c] = pd.NA if c in ("ccg_sig", "ccg_syn_dir") else np.nan
+    else:
+        out = edges.merge(per_pair, on=["u", "v"], how="left")
+    out["ccg_sig"] = out["ccg_sig"].astype("boolean")
+    return out
+
+
+def ccg_summary(per_pair: pd.DataFrame) -> dict:
+    """Well-level CCG scalars merged into ``graph_metrics.json``.
+
+    ``ccg_flow_asymmetry`` is the mean **absolute** asymmetry over significant
+    pairs — signed asymmetry would average to ~0 because the ``(u, v)`` order is
+    just the upper-triangle index order, not a direction. 0 = purely symmetric
+    (co-activation), 1 = every significant pair is one-directional.
+
+    **``frac_ccg_sig`` has a floor.** Measured on a real 116-unit well (4527
+    edges): 43 significant pairs observed vs 8-17 on circularly-shifted trains,
+    i.e. ~3-5x enrichment over the empirical null but a false-positive floor
+    around 0.2-0.4%. Read differences between wells against that floor, not
+    against zero. (The naive binomial expectation over the causal-window bins is
+    much higher than the shuffled count because the hollow-Gaussian baseline is
+    adaptive — neighbouring bins are not independent Poisson draws.)
+    """
+    empty = {
+        "n_ccg_sig_pairs": 0, "frac_ccg_sig": float("nan"),
+        "mean_abs_ccg_lag_ms": float("nan"), "ccg_flow_asymmetry": float("nan"),
+    }
+    if per_pair is None or not len(per_pair):
+        return empty
+    sig = per_pair["ccg_sig"].to_numpy(dtype=bool)
+    lag = per_pair["ccg_peak_lag_ms"].to_numpy(dtype=float)
+    asym = per_pair["ccg_asymmetry"].to_numpy(dtype=float)
+    n_sig = int(sig.sum())
+    return {
+        "n_ccg_sig_pairs": n_sig,
+        "frac_ccg_sig": float(sig.mean()),
+        "mean_abs_ccg_lag_ms": (
+            float(np.nanmean(np.abs(lag[sig]))) if n_sig else float("nan")
+        ),
+        "ccg_flow_asymmetry": (
+            float(np.nanmean(np.abs(asym[sig]))) if n_sig else float("nan")
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Graph metrics
 # ---------------------------------------------------------------------------
 def graph_metrics(W: np.ndarray, adjacency: np.ndarray | None = None,
@@ -449,6 +766,11 @@ def compute_connectivity(
         rows.append({"u": ua, "v": ub, "sttc": float(W[a, b]), "dist_um": dist})
     edges = pd.DataFrame(rows, columns=["u", "v", "sttc", "dist_um"])
 
+    # Correlograms for the surviving edges (lag-resolved view of the same pairs).
+    ccg = compute_ccg(spike_times, edges, config=cfg)
+    edges = attach_ccg(edges, ccg["per_pair"])
+    gm.update(ccg_summary(ccg["per_pair"]))
+
     diagnostics = {
         "dt_primary": float(cfg.dt),
         "dt_sweep": [float(d) for d in cfg.dt_sweep],
@@ -459,6 +781,7 @@ def compute_connectivity(
         "thresh_value": float(thresh),
         "n_shuffle": int(cfg.n_shuffle),
         "T": float(T),
+        **ccg["meta"],
     }
     return ConnectivityResults(
         sttc_matrix=W,
@@ -468,6 +791,13 @@ def compute_connectivity(
         edges=edges,
         unit_ids=list(unit_ids),
         diagnostics=diagnostics,
+        ccg_counts=ccg["counts"],
+        ccg_baseline=ccg["baseline"],
+        ccg_lags_ms=ccg["lags_ms"],
+        ccg_pairs=ccg["pairs"],
+        ccg_n_ref_spikes=ccg["n_ref_spikes"],
+        ccg_n_tgt_spikes=ccg["n_tgt_spikes"],
+        ccg_meta=ccg["meta"],
     )
 
 
@@ -481,12 +811,17 @@ def empty_connectivity_results(
     """
     cfg = config or ConnectivityConfig()
     W = np.zeros((0, 0), dtype=float)
+    ccg = compute_ccg({}, None, config=cfg)  # zero-row arrays, full schema
+    edges = attach_ccg(
+        pd.DataFrame(columns=["u", "v", "sttc", "dist_um"]), ccg["per_pair"],
+    )
     return ConnectivityResults(
         sttc_matrix=W,
         sttc_sweep={float(d): W for d in cfg.dt_sweep},
         adjacency=np.zeros((0, 0), dtype=bool),
-        graph_metrics=graph_metrics(W),
-        edges=pd.DataFrame(columns=["u", "v", "sttc", "dist_um"]),
+        # Empty and full wells must share one graph_metrics schema.
+        graph_metrics={**graph_metrics(W), **ccg_summary(ccg["per_pair"])},
+        edges=edges,
         unit_ids=[],
         diagnostics={
             "dt_primary": float(cfg.dt),
@@ -497,7 +832,15 @@ def empty_connectivity_results(
             "thresh_value": float("nan"),
             "n_shuffle": int(cfg.n_shuffle), "T": 0.0,
             "empty_reason": reason,
+            **ccg["meta"],
         },
+        ccg_counts=ccg["counts"],
+        ccg_baseline=ccg["baseline"],
+        ccg_lags_ms=ccg["lags_ms"],
+        ccg_pairs=ccg["pairs"],
+        ccg_n_ref_spikes=ccg["n_ref_spikes"],
+        ccg_n_tgt_spikes=ccg["n_tgt_spikes"],
+        ccg_meta=ccg["meta"],
     )
 
 
@@ -522,8 +865,9 @@ def write_connectivity(results: ConnectivityResults, output_dir: Path) -> None:
 
         sttc_matrix.npy      (n, n) at primary dt
         sttc_sweep.npz       one array per dt (keys "dt_<ms>") + unit_ids
-        graph_metrics.json   well-level scalars
-        edges.parquet        significant edges [u, v, sttc, dist_um]
+        graph_metrics.json   well-level scalars (+ the ccg_* summary)
+        edges.parquet        significant edges [u, v, sttc, dist_um] + ccg_* columns
+        ccg.npz              correlogram counts/baseline, keyed by `pairs` (u, v)
         diagnostics.json     dt_primary, n_units, n_edges, thresh_method, n_shuffle
     """
     output_dir = Path(output_dir)
@@ -535,5 +879,29 @@ def write_connectivity(results: ConnectivityResults, output_dir: Path) -> None:
     sweep_arrays["unit_ids"] = np.asarray(results.unit_ids)
     np.savez(output_dir / "sttc_sweep.npz", **sweep_arrays)
     results.edges.to_parquet(output_dir / "edges.parquet")
+    if results.ccg_counts is not None:
+        write_ccg_npz(results, output_dir / "ccg.npz")
     _atomic_json_write(results.graph_metrics, output_dir / "graph_metrics.json")
     _atomic_json_write(results.diagnostics, output_dir / "diagnostics.json")
+
+
+def write_ccg_npz(results: ConnectivityResults, dest: Path) -> None:
+    """Persist the correlogram block. ``pairs`` is the join key, not row order.
+
+    Compressed: a dense well (~4.5k edges x 201 bins) is 7.4 MB raw and 3.6 MB
+    compressed, for 0.16 s of write and 0.02 s of read — worth it at ~1900 wells.
+    """
+    meta = results.ccg_meta or {}
+    np.savez_compressed(
+        dest,
+        counts=results.ccg_counts,
+        baseline=results.ccg_baseline,
+        lags_ms=results.ccg_lags_ms,
+        pairs=results.ccg_pairs,
+        n_ref_spikes=results.ccg_n_ref_spikes,
+        n_tgt_spikes=results.ccg_n_tgt_spikes,
+        bin_ms=np.asarray(meta.get("ccg_bin_ms", float("nan"))),
+        window_ms=np.asarray(meta.get("ccg_window_ms", float("nan"))),
+        syn_lo_ms=np.asarray(meta.get("ccg_syn_lo_ms", float("nan"))),
+        syn_hi_ms=np.asarray(meta.get("ccg_syn_hi_ms", float("nan"))),
+    )

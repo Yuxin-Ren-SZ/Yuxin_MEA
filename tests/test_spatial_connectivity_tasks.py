@@ -84,16 +84,38 @@ class TestConnectivityTask:
                 {**base, "n_shuffle": 20, "dt": 0.02,
                  "dt_sweep": [0.01, 0.02, 0.05]},
             )
-            for f in ("sttc_matrix.npy", "sttc_sweep.npz",
-                      "graph_metrics.json", "edges.parquet", "diagnostics.json"):
+            for f in ("sttc_matrix.npy", "sttc_sweep.npz", "graph_metrics.json",
+                      "edges.parquet", "ccg.npz", "diagnostics.json"):
                 assert (out / f).exists(), f
             W = np.load(out / "sttc_matrix.npy")
             assert W.shape == (12, 12)
             gm = json.loads((out / "graph_metrics.json").read_text())
             assert set(["mean_sttc", "edge_density", "modularity",
-                        "small_worldness"]).issubset(gm)
+                        "small_worldness", "frac_ccg_sig",
+                        "mean_abs_ccg_lag_ms"]).issubset(gm)
             edges = pd.read_parquet(out / "edges.parquet")
-            assert list(edges.columns) == ["u", "v", "sttc", "dist_um"]
+            assert list(edges.columns) == [
+                "u", "v", "sttc", "dist_um", "ccg_peak_lag_ms", "ccg_peak_z",
+                "ccg_sig", "ccg_syn_dir", "ccg_asymmetry",
+            ]
+            with np.load(out / "ccg.npz") as z:
+                # ccg.npz rows are keyed by `pairs`, and here nothing was capped.
+                assert z["counts"].shape == (len(edges), 201)
+                assert z["pairs"].shape == (len(edges), 2)
+                assert z["bin_ms"].item() == 1.0
+
+    def test_ccg_can_be_disabled(self):
+        with TemporaryDirectory() as t:
+            tmp = Path(t)
+            base = _stage(tmp, n_units=8)
+            out = ConnectivityTask().run(
+                _RK, _WELL_ID, tmp / "x.h5",
+                {**base, "n_shuffle": 10, "ccg_enable": False},
+            )
+            with np.load(out / "ccg.npz") as z:
+                assert z["counts"].shape[0] == 0
+            diag = json.loads((out / "diagnostics.json").read_text())
+            assert diag["ccg_enabled"] is False
 
     def test_sparse_well_is_complete_empty(self):
         with TemporaryDirectory() as t:
@@ -107,3 +129,5 @@ class TestConnectivityTask:
             assert diag["n_units"] == 0 and "empty_reason" in diag
             # Empty artifacts must still be readable.
             assert pd.read_parquet(out / "edges.parquet").empty
+            with np.load(out / "ccg.npz") as z:
+                assert z["counts"].shape == (0, 201)

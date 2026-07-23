@@ -105,13 +105,54 @@ def sttc_significance(spikes, dt, T, n_shuffle=100) -> np.ndarray:
 * **Spatial embedding**: pair STTC with `loc_x/loc_y` to render the graph on the
   electrode plane and to compute a distance-vs-connectivity decay curve.
 
+### Cross-correlograms (lag-resolved companion to STTC)
+
+STTC is symmetric and lag-free, so it cannot say which unit leads. Each
+*significant* edge additionally gets a ±100 ms / 1 ms correlogram:
+
+```python
+def ccg_pair(ref, tgt, bin_s, window_s) -> np.ndarray:
+    """Counts of (t_tgt - t_ref). Positive lag = ref leads. `tgt` must be sorted."""
+def ccg_stats(counts, lags_s, cfg) -> dict:
+    """Partially-hollow-Gaussian baseline (Stark & Abeles 2009) + per-bin Poisson
+    test -> peak_lag_ms, peak_z, sig, syn_dir, asymmetry."""
+```
+
+* **Sign convention**: reference = `u`, target = `v`, histogram of `t_v − t_u`; a
+  peak at positive lag means `v` fires after `u`, i.e. **u leads v**. `edges`
+  holds only the upper triangle, so this convention is what makes a lag readable.
+* **Baseline**: every MEA pair carries a broad central bump from network-burst
+  co-activation. The hollow-Gaussian predictor keeps that slow component and not
+  the sharp peak, so `ccg_sig` reflects short-latency structure, not bursting.
+* **Causal window**: `sig`/`syn_dir`/`asymmetry` are decided inside
+  `[0.8, 8] ms` on either side of zero; `peak_lag_ms`/`peak_z` are global.
+* **Cap**: `ccg_max_pairs` (5000) bounds the per-well cost; over it only the
+  highest-STTC edges are computed, so `ccg.npz` can be **shorter** than
+  `edges.parquet` — join on `pairs`, never on row position.
+* **`frac_ccg_sig` has a floor**: on a real 116-unit well (CX169/260613,
+  rec0003/well019, 4527 edges) 43 pairs were flagged vs **8–17 on
+  circularly-shifted trains** — ~3–5× enrichment over the empirical null, but a
+  false-positive floor near 0.2–0.4%. Compare wells against that floor, not zero.
+  Per-well spike counts are low (23k spikes over 116 units), so power is limited;
+  a low `frac_ccg_sig` is not evidence of absent coupling.
+
 ### Output contract `connectivity_data/…/connectivity/`
 
 * `sttc_matrix.npy` — `(n_units, n_units)` at primary dt.
 * `sttc_sweep.npz` — matrices for each dt.
-* `graph_metrics.json` — well-level scalars (schema = `graph_metrics` keys).
-* `edges.parquet` — significant edges: `u, v, sttc, dist_um`.
-* `diagnostics.json` — `dt_primary, n_units, n_edges, thresh_method, n_shuffle`.
+* `graph_metrics.json` — well-level scalars (schema = `graph_metrics` keys) plus
+  `n_ccg_sig_pairs, frac_ccg_sig, mean_abs_ccg_lag_ms, ccg_flow_asymmetry`.
+* `edges.parquet` — significant edges: `u, v, sttc, dist_um` plus
+  `ccg_peak_lag_ms, ccg_peak_z, ccg_sig, ccg_syn_dir, ccg_asymmetry`
+  (NaN/NA where the `ccg_max_pairs` cap skipped the edge).
+* `ccg.npz` — `counts`/`baseline` `(n_pairs, n_bins)`, `lags_ms`,
+  `pairs` `(n_pairs, 2)` = `(reference, target)`, `n_ref_spikes`, `n_tgt_spikes`,
+  `bin_ms`, `window_ms`, `syn_lo_ms`, `syn_hi_ms`.
+* `diagnostics.json` — `dt_primary, n_units, n_edges, thresh_method, n_shuffle`
+  plus `ccg_enabled, ccg_bin_ms, ccg_window_ms, ccg_n_pairs, ccg_pairs_capped`.
+
+Wells computed before CCGs existed have no `ccg.npz`; `scripts/backfill_ccg.py`
+adds it in place without redoing the shuffle null.
 
 ### Compute cost — the one to watch
 `sttc_matrix` is **O(n_units² · median_spikes)** per well; with the shuffle null
