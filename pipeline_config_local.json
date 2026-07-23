@@ -87,6 +87,12 @@
       "firing_rate_min": 0.05,
       "amplitude_median_max": -20.0
     },
+    "manual_curation": {
+      "manual_curation_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/manual_curation_data",
+      "analyzer_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/analyzer_data",
+      "applied_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/manual_curation_applied",
+      "split_feature": "amplitude"
+    },
     "burst_detection": {
       "curation_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/curation_data",
       "analyzer_output_root": "./analyzer_data",
@@ -171,6 +177,28 @@
       "thresh_percentile": 95.0,
       "random_state": 42,
       "n_jobs": 1
+    },
+    "criticality": {
+      "curation_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/curation_data",
+      "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/criticality_data",
+      "min_spikes": 200,
+      "min_avalanches": 30,
+      "bin_mode": "mean_iei",
+      "fixed_bin_s": 0.004,
+      "mr_max_bin_s": 0.05,
+      "mr_kmax": 150,
+      "seed": 0
+    },
+    "directed_connectivity": {
+      "curation_output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/curation_data",
+      "output_root": "/mnt/Vol20tb2/SadeghLab/yuxin/analysis/directed_connectivity_data",
+      "bin_s": 0.005,
+      "max_units": 64,
+      "min_units": 5,
+      "min_spikes_per_unit": 20,
+      "n_shuffle": 20,
+      "thresh_percentile": 99.0,
+      "seed": 0
     }
   }
 }

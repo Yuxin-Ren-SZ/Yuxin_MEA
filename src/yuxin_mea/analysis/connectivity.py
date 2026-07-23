@@ -90,6 +90,10 @@ class ConnectivityResults:
     ``edges``       : significant edges ``[u, v, sttc, dist_um]`` (upper triangle).
     ``unit_ids``    : row/col order for the matrices.
     ``diagnostics`` : dt_primary, n_units, n_edges, thresh_method, n_shuffle, T.
+    ``node_metrics``/``node_scalars`` : per-node cartography + its well-level
+    roll-up (schema = :func:`yuxin_mea.analysis.graph_nodes.compute_node_metrics`).
+    Both are ``None`` when the node pass could not run — see
+    ``diagnostics["node_metrics_error"]``.
     """
 
     sttc_matrix: np.ndarray
@@ -99,6 +103,8 @@ class ConnectivityResults:
     edges: pd.DataFrame
     unit_ids: list
     diagnostics: dict
+    node_metrics: pd.DataFrame | None = None
+    node_scalars: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +397,36 @@ def graph_metrics(W: np.ndarray, adjacency: np.ndarray | None = None,
 
 
 # ---------------------------------------------------------------------------
+# Node-level pass
+# ---------------------------------------------------------------------------
+def _node_pass(
+    edges: pd.DataFrame, unit_ids, diagnostics: dict
+) -> tuple[pd.DataFrame | None, dict | None]:
+    """Node cartography for the thresholded graph — best-effort.
+
+    Runs on the edge table this module just built, so it costs a networkx pass and
+    no extra STTC. Deliberately **not** parameterised: adding a param to
+    ``ConnectivityTask`` would change the task's stored config and invalidate every
+    COMPLETE well, forcing a full STTC recompute (see the task's params_schema).
+
+    Failure is contained rather than fatal — :mod:`.graph_nodes` imports
+    ``community`` (python-louvain), which is an optional conda-managed dependency
+    that ``graph_metrics`` itself does not need. A missing dep, or any other
+    failure, must not sink an otherwise-good connectivity result; it is recorded
+    in ``diagnostics["node_metrics_error"]`` so it stays visible instead of
+    silently producing a well with no node metrics.
+    """
+    try:
+        from yuxin_mea.analysis.graph_nodes import compute_node_metrics
+
+        res = compute_node_metrics(edges, node_ids=unit_ids)
+    except Exception as exc:  # noqa: BLE001 — advisory pass, never fatal
+        diagnostics["node_metrics_error"] = f"{type(exc).__name__}: {exc}"
+        return None, None
+    return res.node_metrics, res.scalars
+
+
+# ---------------------------------------------------------------------------
 # Entry point + writer
 # ---------------------------------------------------------------------------
 def compute_connectivity(
@@ -460,6 +496,7 @@ def compute_connectivity(
         "n_shuffle": int(cfg.n_shuffle),
         "T": float(T),
     }
+    node_metrics, node_scalars = _node_pass(edges, unit_ids, diagnostics)
     return ConnectivityResults(
         sttc_matrix=W,
         sttc_sweep=sweep,
@@ -468,6 +505,8 @@ def compute_connectivity(
         edges=edges,
         unit_ids=list(unit_ids),
         diagnostics=diagnostics,
+        node_metrics=node_metrics,
+        node_scalars=node_scalars,
     )
 
 
@@ -481,13 +520,19 @@ def empty_connectivity_results(
     """
     cfg = config or ConnectivityConfig()
     W = np.zeros((0, 0), dtype=float)
+    empty_edges = pd.DataFrame(columns=["u", "v", "sttc", "dist_um"])
+    # Node results for a sparse well: the same empty shape compute_node_metrics
+    # returns for <3 nodes, so the bundle stays internally consistent.
+    empty_nodes, empty_node_scalars = _node_pass(empty_edges, [], {})
     return ConnectivityResults(
         sttc_matrix=W,
         sttc_sweep={float(d): W for d in cfg.dt_sweep},
         adjacency=np.zeros((0, 0), dtype=bool),
         graph_metrics=graph_metrics(W),
-        edges=pd.DataFrame(columns=["u", "v", "sttc", "dist_um"]),
+        edges=empty_edges,
         unit_ids=[],
+        node_metrics=empty_nodes,
+        node_scalars=empty_node_scalars,
         diagnostics={
             "dt_primary": float(cfg.dt),
             "dt_sweep": [float(d) for d in cfg.dt_sweep],
@@ -525,6 +570,8 @@ def write_connectivity(results: ConnectivityResults, output_dir: Path) -> None:
         graph_metrics.json   well-level scalars
         edges.parquet        significant edges [u, v, sttc, dist_um]
         diagnostics.json     dt_primary, n_units, n_edges, thresh_method, n_shuffle
+        node_metrics.parquet per-node cartography (omitted if the node pass failed)
+        node_scalars.json    well-level node roll-up (likewise)
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -537,3 +584,10 @@ def write_connectivity(results: ConnectivityResults, output_dir: Path) -> None:
     results.edges.to_parquet(output_dir / "edges.parquet")
     _atomic_json_write(results.graph_metrics, output_dir / "graph_metrics.json")
     _atomic_json_write(results.diagnostics, output_dir / "diagnostics.json")
+    # Written only when the node pass produced something; a failed pass leaves the
+    # files absent (and its reason in diagnostics) rather than writing a stub that
+    # readers would mistake for a real, empty graph.
+    if results.node_metrics is not None:
+        results.node_metrics.to_parquet(output_dir / "node_metrics.parquet")
+    if results.node_scalars is not None:
+        _atomic_json_write(results.node_scalars, output_dir / "node_scalars.json")
