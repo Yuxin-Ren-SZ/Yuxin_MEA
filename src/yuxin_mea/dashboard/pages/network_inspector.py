@@ -4,7 +4,7 @@ Navigation mirrors the Plate viewer: pick a recording, paint the 4x6 plate grid
 with a well-level metric, click a well to open its detail modal. The modal is
 tabbed over the stages that actually ran for that well:
 
-    Connectivity · Nodes · Criticality · Directed · Spatial
+    Connectivity · CCG · Nodes · Criticality · Directed · Spatial
 
 All data comes from :mod:`yuxin_mea.analysis.network_inspector` (plain
 ``np.load`` / ``pd.read_parquet`` / ``json`` — no SpikeInterface, no torch). The
@@ -19,6 +19,8 @@ Two absences are normal here and are surfaced rather than hidden:
   overridden.
 * ``node_metrics.parquet`` has no committed producer, so the Nodes tab is empty
   for wells that predate the ad-hoc backfill.
+* ``ccg.npz`` postdates the first connectivity pass, so the CCG tab is empty for
+  wells that have not been re-run or backfilled (``scripts/backfill_ccg.py``).
 """
 from __future__ import annotations
 
@@ -53,6 +55,7 @@ _ROOT_INPUTS = (
 
 _TABS = (
     ("connectivity", "Connectivity"),
+    ("ccg", "CCG"),
     ("nodes", "Nodes"),
     ("criticality", "Criticality"),
     ("directed", "Directed"),
@@ -302,6 +305,27 @@ def _tab_body(ni, bundle, tab: str):
                  _graph(ni.fig_sttc_graph(bundle))),
             _row(_graph(ni.fig_sttc_distance(bundle)),
                  _graph(ni.fig_dt_sweep(bundle))),
+        ])
+    if tab == "ccg":
+        if bundle.ccg_counts is None or not len(bundle.ccg_counts):
+            return html.Div([
+                html.Div("No correlograms for this well.", style=_MONO),
+                html.Div("ccg.npz is written by the connectivity stage; wells "
+                         "computed before CCGs landed need a re-run or "
+                         "scripts/backfill_ccg.py.",
+                         style={**_MONO, "marginTop": "6px"}),
+            ])
+        return html.Div([
+            _row(_graph(ni.fig_ccg_heatmap(bundle)),
+                 _graph(ni.fig_ccg_small_multiples(bundle))),
+            html.Div("Reference = u, target = v: a peak at positive lag means v "
+                     "fires after u, i.e. u leads. MEA activity is network-burst "
+                     "dominated, so every CCG carries a broad central "
+                     "co-activation bump — the hollow-Gaussian baseline (grey "
+                     "line) strips it, and only the shaded causal window decides "
+                     "ccg_sig. A peak sitting at zero means co-activation, not a "
+                     "directed interaction.",
+                     style={**_MONO, "marginTop": "8px"}),
         ])
     if tab == "nodes":
         if bundle.node_metrics is None or not len(bundle.node_metrics):
@@ -577,7 +601,7 @@ def _open_well(_cells, _prev, _next, active_well, context):
     present = set(bundle.stages_present)
     tabs = []
     for key, label in _TABS:
-        stage = "connectivity" if key == "nodes" else key
+        stage = "connectivity" if key in ("nodes", "ccg") else key
         mark = "" if stage in present else " ·"
         tabs.append(dcc.Tab(
             label=f"{label}{mark}", value=key, className="tab--regular",

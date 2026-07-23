@@ -167,6 +167,8 @@ PLATE_METRICS: dict[str, str] = {
     "participation_mean": "connectivity", "mean_betweenness": "connectivity",
     "assortativity": "connectivity", "rich_club": "connectivity",
     "degree_cv": "connectivity", "degree_skew": "connectivity",
+    "n_ccg_sig_pairs": "connectivity", "frac_ccg_sig": "connectivity",
+    "mean_abs_ccg_lag_ms": "connectivity", "ccg_flow_asymmetry": "connectivity",
     "branching_ratio_mr": "criticality", "branching_ratio_naive": "criticality",
     "dcc": "criticality", "aval_tau": "criticality", "aval_alpha": "criticality",
     "gamma_fit": "criticality", "n_avalanches": "criticality",
@@ -200,6 +202,13 @@ METRIC_LABELS = {
     "prop_planarity": "propagation planarity",
     "mean_prop_delay_ms": "propagation delay (ms)",
     "n_nodes": "n units", "n_edges": "n edges",
+    "n_ccg_sig_pairs": "n CCG-significant pairs",
+    "frac_ccg_sig": "frac CCG-significant",
+    "mean_abs_ccg_lag_ms": "mean |CCG lag| (ms)",
+    "ccg_flow_asymmetry": "CCG asymmetry (mean |.|)",
+    "ccg_enabled": "CCG enabled", "ccg_bin_ms": "CCG bin (ms)",
+    "ccg_window_ms": "CCG window (ms)", "ccg_n_pairs": "CCG pairs computed",
+    "ccg_pairs_capped": "CCG pairs skipped (cap)",
 }
 
 
@@ -418,6 +427,12 @@ class NetworkBundle:
     # node metrics (optional even when connectivity is present)
     node_metrics: pd.DataFrame | None = None
     node_scalars: dict | None = None
+    # correlograms (present only for wells computed/backfilled after CCGs landed)
+    ccg_counts: np.ndarray | None = None
+    ccg_baseline: np.ndarray | None = None
+    ccg_lags_ms: np.ndarray | None = None
+    ccg_pairs: np.ndarray | None = None
+    ccg_meta: dict | None = None
     # criticality
     criticality_metrics: dict | None = None
     powerlaw_fits: dict | None = None
@@ -481,6 +496,19 @@ def load_network_bundle(
         # Optional: no committed producer (see module docstring).
         b.node_metrics = _read_parquet(conn / "node_metrics.parquet")
         b.node_scalars = _read_json(conn / "node_scalars.json")
+        # Optional: wells computed before CCGs landed have no ccg.npz.
+        ccg = _read_npz(conn / "ccg.npz")
+        if ccg is not None and ccg.get("counts") is not None:
+            b.ccg_counts = ccg.get("counts")
+            b.ccg_baseline = ccg.get("baseline")
+            b.ccg_lags_ms = ccg.get("lags_ms")
+            b.ccg_pairs = ccg.get("pairs")
+            # npz scalars come back as 0-d arrays.
+            b.ccg_meta = {
+                k: float(ccg[k].item())
+                for k in ("bin_ms", "window_ms", "syn_lo_ms", "syn_hi_ms")
+                if k in ccg
+            }
 
     crit = b.dirs.get("criticality")
     if crit is not None:
@@ -512,7 +540,8 @@ _BUNDLE_MEMO: dict[tuple, NetworkBundle] = {}
 _MEMO_MAX = 24
 
 _SIG_FILES = {
-    "connectivity": ("graph_metrics.json", "sttc_matrix.npy", "node_metrics.parquet"),
+    "connectivity": ("graph_metrics.json", "sttc_matrix.npy", "node_metrics.parquet",
+                     "ccg.npz"),
     "criticality": ("criticality_metrics.json", "avalanches.parquet"),
     "directed": ("directed_metrics.json", "te_matrix.npy"),
     "spatial_map": ("spatial_metrics.json", "activity_field.npy"),
@@ -959,6 +988,178 @@ def fig_dt_sweep(bundle: NetworkBundle, height: int = 320) -> go.Figure:
         title={"text": "Mean STTC vs tiling window", "font": {"size": 12}},
         xaxis={"title": {"text": "dt (ms)", "font": {"size": 11}}},
         yaxis={"title": {"text": "mean off-diagonal STTC", "font": {"size": 11}}},
+    )
+    return fig
+
+
+# --------------------------------------------------------------------------- #
+# Correlogram figures
+# --------------------------------------------------------------------------- #
+_NO_CCG = ("no correlograms for this well<br>"
+           "<span style='font-size:11px'>ccg.npz absent — re-run the connectivity "
+           "stage or scripts/backfill_ccg.py</span>")
+
+
+def _ccg_edge_stats(bundle: NetworkBundle) -> pd.DataFrame | None:
+    """Per-row CCG stats aligned to ``bundle.ccg_counts`` **by (u, v)**.
+
+    ``edges.parquet`` can be longer than ``ccg.npz`` (the ``ccg_max_pairs`` cap),
+    so never zip the two by position — join on the pair key.
+    """
+    if bundle.ccg_counts is None or bundle.ccg_pairs is None:
+        return None
+    pairs = np.asarray(bundle.ccg_pairs)
+    if pairs.ndim != 2 or pairs.shape[0] != bundle.ccg_counts.shape[0]:
+        return None
+    out = pd.DataFrame({"row": np.arange(pairs.shape[0]),
+                        "u": pairs[:, 0], "v": pairs[:, 1]})
+    e = bundle.edges
+    cols = [c for c in ("ccg_peak_lag_ms", "ccg_peak_z", "ccg_sig", "ccg_syn_dir",
+                        "sttc") if e is not None and c in e.columns]
+    if cols:
+        out = out.merge(e[["u", "v", *cols]], on=["u", "v"], how="left")
+    return out
+
+
+def _ccg_z(counts: np.ndarray, baseline: np.ndarray | None) -> np.ndarray:
+    """Per-bin z of counts against the hollow-Gaussian baseline (floored)."""
+    counts = np.asarray(counts, float)
+    if baseline is None or np.shape(baseline) != np.shape(counts):
+        return counts
+    lam = np.maximum(np.asarray(baseline, float), 1e-6)
+    return (counts - lam) / np.sqrt(lam)
+
+
+def _ccg_interest(stats: pd.DataFrame) -> np.ndarray:
+    """Row order for display: significant edges first, then by peak z."""
+    z = (stats["ccg_peak_z"].to_numpy(dtype=float)
+         if "ccg_peak_z" in stats.columns else np.zeros(len(stats)))
+    z = np.nan_to_num(z, nan=-np.inf)
+    if "ccg_sig" in stats.columns:
+        sig = stats["ccg_sig"].fillna(False).to_numpy(dtype=bool)
+    else:
+        sig = np.zeros(len(stats), dtype=bool)
+    return np.lexsort((-z, ~sig))
+
+
+def fig_ccg_heatmap(
+    bundle: NetworkBundle, max_rows: int = 400, height: int = 380
+) -> go.Figure:
+    """Every edge's correlogram as one row, z-scored, sorted by peak lag.
+
+    Reference = ``u``, target = ``v``: a band right of zero means ``u`` leads.
+    A dense well has thousands of edges, which would ship tens of MB of JSON to
+    the browser — above ``max_rows`` the significant edges (then the strongest
+    peaks) are kept and the title says how many were dropped.
+    """
+    stats = _ccg_edge_stats(bundle)
+    if stats is None or not len(stats):
+        return _empty_figure(_NO_CCG, height)
+
+    n_total = len(stats)
+    dropped = 0
+    if n_total > max_rows:
+        stats = stats.iloc[_ccg_interest(stats)[:max_rows]]
+        dropped = n_total - len(stats)
+
+    Z = _ccg_z(bundle.ccg_counts, bundle.ccg_baseline)
+    lags = np.asarray(bundle.ccg_lags_ms, float)
+    lag = stats["ccg_peak_lag_ms"].to_numpy(dtype=float) \
+        if "ccg_peak_lag_ms" in stats.columns else np.zeros(len(stats))
+    order = np.argsort(np.nan_to_num(lag, nan=np.inf), kind="mergesort")
+    rows = stats["row"].to_numpy()[order]
+    Z = Z[rows]
+    labels = [f"{int(u)}→{int(v)}" for u, v in
+              zip(stats["u"].to_numpy()[order], stats["v"].to_numpy()[order])]
+
+    lim = float(np.nanpercentile(np.abs(Z), 99)) if Z.size else 1.0
+    lim = lim if np.isfinite(lim) and lim > 0 else 1.0
+    fig = go.Figure(go.Heatmap(
+        z=Z, x=lags, y=labels, colorscale=DIV_SCALE, zmid=0.0,
+        zmin=-lim, zmax=lim,
+        colorbar={"title": {"text": "z", "font": {"size": 11}}, "thickness": 12},
+        hovertemplate="%{y}<br>lag %{x:.0f} ms<br>z %{z:.2f}<extra></extra>",
+    ))
+    fig.add_vline(x=0.0, line={"color": _INK3, "width": 1, "dash": "dot"})
+    title = f"CCG z-map · {len(labels)} edges, sorted by peak lag"
+    if dropped:
+        title += f" ({dropped} weaker edges not shown of {n_total})"
+    fig.update_layout(
+        height=height, margin={"l": 76, "r": 16, "t": 34, "b": 44},
+        title={"text": title, "font": {"size": 12}},
+        xaxis={"title": {"text": "lag (ms) — positive = u leads v",
+                         "font": {"size": 11}}, "showgrid": False},
+        yaxis={"title": {"text": "edge u→v", "font": {"size": 11}},
+               "showgrid": False,
+               "showticklabels": len(labels) <= 40},
+    )
+    return fig
+
+
+def fig_ccg_small_multiples(
+    bundle: NetworkBundle, n: int = 12, height: int = 380
+) -> go.Figure:
+    """Top-``n`` correlograms — significant edges first — with the baseline drawn.
+
+    The shaded band is the causal window that decides ``ccg_sig``/``ccg_syn_dir``;
+    everything outside it (especially the bump at zero) is co-activation, not
+    evidence of a directed interaction.
+    """
+    from plotly.subplots import make_subplots
+
+    stats = _ccg_edge_stats(bundle)
+    if stats is None or not len(stats):
+        return _empty_figure(_NO_CCG, height)
+
+    # A dense well's largest z values sit at ±70 ms — burst structure, not
+    # coupling. Rank the causally-significant edges first so the panel opens on
+    # what ccg_sig actually flagged.
+    pick = stats.iloc[_ccg_interest(stats)[: max(1, int(n))]]
+
+    counts = np.asarray(bundle.ccg_counts, float)
+    base = bundle.ccg_baseline
+    lags = np.asarray(bundle.ccg_lags_ms, float)
+    n_show = len(pick)
+    ncol = min(4, n_show)
+    nrow = int(np.ceil(n_show / ncol))
+    titles = []
+    for _, r in pick.iterrows():
+        lag = r.get("ccg_peak_lag_ms")
+        tag = f" · {lag:+.0f} ms" if lag is not None and np.isfinite(lag) else ""
+        titles.append(f"{int(r['u'])}→{int(r['v'])}{tag}")
+    fig = make_subplots(rows=nrow, cols=ncol, subplot_titles=titles,
+                        horizontal_spacing=0.05, vertical_spacing=0.12)
+
+    # Shade the window that actually decided ccg_sig for *this* well.
+    meta = bundle.ccg_meta or {}
+    syn_lo = float(meta.get("syn_lo_ms") or 0.8)
+    syn_hi = float(meta.get("syn_hi_ms") or 8.0)
+    for k, (_, r) in enumerate(pick.iterrows()):
+        i = int(r["row"])
+        row, col = k // ncol + 1, k % ncol + 1
+        fig.add_trace(go.Bar(
+            x=lags, y=counts[i], marker={"color": "rgba(42,120,214,0.55)"},
+            hovertemplate="lag %{x:.0f} ms<br>%{y} spikes<extra></extra>",
+            showlegend=False,
+        ), row=row, col=col)
+        if base is not None and np.shape(base) == np.shape(counts):
+            fig.add_trace(go.Scatter(
+                x=lags, y=np.asarray(base, float)[i], mode="lines",
+                line={"color": _INK, "width": 1.5}, hoverinfo="skip",
+                showlegend=False,
+            ), row=row, col=col)
+        for lo, hi in ((syn_lo, syn_hi), (-syn_hi, -syn_lo)):
+            fig.add_vrect(x0=lo, x1=hi, line_width=0, fillcolor=_ACCENT,
+                          opacity=0.08, row=row, col=col)
+
+    fig.update_annotations(font={"size": 10})
+    fig.update_xaxes(title=None, showgrid=False, tickfont={"size": 9})
+    fig.update_yaxes(title=None, showgrid=False, tickfont={"size": 9})
+    fig.update_layout(
+        height=max(height, 150 * nrow), margin={"l": 44, "r": 16, "t": 46, "b": 40},
+        bargap=0.0,
+        title={"text": f"Top {n_show} correlograms — significant first "
+                       f"(counts vs baseline)", "font": {"size": 12}},
     )
     return fig
 

@@ -48,8 +48,39 @@ def _conn_dir(root: Path, well: str) -> Path:
     return root / "connectivity_data" / RK / REC / well / "connectivity"
 
 
+def _write_ccg(d: Path, edges: pd.DataFrame, n_pairs: int | None = None) -> pd.DataFrame:
+    """Stage a ccg.npz for the first ``n_pairs`` edges; returns edges + ccg cols.
+
+    ``n_pairs`` below ``len(edges)`` reproduces the ``ccg_max_pairs`` cap, where
+    ccg.npz is SHORTER than edges.parquet and the two can only be joined on (u, v).
+    """
+    lags_ms = np.arange(-100, 101, dtype=float)
+    take = len(edges) if n_pairs is None else min(n_pairs, len(edges))
+    rng = np.random.default_rng(3)
+    counts = rng.poisson(4.0, size=(take, lags_ms.size)).astype(np.int32)
+    peak_bins = [100 + 4 + (k % 3) for k in range(take)]
+    for k, pb in enumerate(peak_bins):
+        counts[k, pb] += 200
+    baseline = np.full((take, lags_ms.size), 4.0, dtype=np.float32)
+    pairs = edges[["u", "v"]].to_numpy()[:take]
+    np.savez(d / "ccg.npz", counts=counts, baseline=baseline, lags_ms=lags_ms,
+             pairs=pairs, n_ref_spikes=np.full(take, 500),
+             n_tgt_spikes=np.full(take, 500), bin_ms=np.asarray(1.0),
+             window_ms=np.asarray(100.0), syn_lo_ms=np.asarray(0.8),
+             syn_hi_ms=np.asarray(8.0))
+    out = edges.copy()
+    out["ccg_peak_lag_ms"] = [float(peak_bins[i] - 100) if i < take else np.nan
+                              for i in range(len(out))]
+    out["ccg_peak_z"] = [50.0 - i if i < take else np.nan for i in range(len(out))]
+    out["ccg_sig"] = pd.array([i < take for i in range(len(out))], dtype="boolean")
+    out["ccg_syn_dir"] = ["u->v" if i < take else None for i in range(len(out))]
+    out["ccg_asymmetry"] = [0.7 if i < take else np.nan for i in range(len(out))]
+    return out
+
+
 def _write_connectivity(root: Path, well: str, n: int, *, with_nodes: bool,
-                        with_positions: bool = True) -> None:
+                        with_positions: bool = True, with_ccg: bool = False,
+                        ccg_pairs: int | None = None) -> None:
     d = _conn_dir(root, well)
     d.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(abs(hash(well)) % 2**32)
@@ -71,18 +102,29 @@ def _write_connectivity(root: Path, well: str, n: int, *, with_nodes: bool,
                 rows.append({"u": i, "v": j, "sttc": float(W[i, j]),
                              "dist_um": float(50 * abs(i - j))
                              if with_positions else float("nan")})
-    pd.DataFrame(rows, columns=["u", "v", "sttc", "dist_um"]).to_parquet(
-        d / "edges.parquet")
-    _write_json(d / "graph_metrics.json", {
+    edges = pd.DataFrame(rows, columns=["u", "v", "sttc", "dist_um"])
+    gm = {
         "mean_sttc": float(W.mean()) if n else 0.0, "edge_density": 0.3,
         "mean_degree": 4.0, "clustering_coeff": 0.5, "modularity": 0.2,
         "global_efficiency": 0.6, "small_worldness": 1.2,
         "n_nodes": n, "n_edges": len(rows),
-    })
-    _write_json(d / "diagnostics.json", {
+    }
+    diag = {
         "dt_primary": 0.02, "dt_sweep": [0.005, 0.01, 0.02, 0.05],
         "n_units": n, "n_edges": len(rows), "T": 300.0,
-    })
+    }
+    if with_ccg and len(edges):
+        edges = _write_ccg(d, edges, ccg_pairs)
+        n_ccg = len(edges) if ccg_pairs is None else min(ccg_pairs, len(edges))
+        gm.update({"n_ccg_sig_pairs": n_ccg,
+                   "frac_ccg_sig": n_ccg / len(edges),
+                   "mean_abs_ccg_lag_ms": 5.0, "ccg_flow_asymmetry": 0.7})
+        diag.update({"ccg_enabled": True, "ccg_bin_ms": 1.0,
+                     "ccg_window_ms": 100.0, "ccg_n_pairs": n_ccg,
+                     "ccg_pairs_capped": len(edges) - n_ccg})
+    edges.to_parquet(d / "edges.parquet")
+    _write_json(d / "graph_metrics.json", gm)
+    _write_json(d / "diagnostics.json", diag)
     if with_nodes and n:
         roles = ["connector_hub", "provincial_hub", "peripheral", "leaf"]
         nm = pd.DataFrame({
@@ -186,7 +228,7 @@ def analysis_root(tmp_path: Path) -> Path:
     root = tmp_path / "analysis"
     root.mkdir()
 
-    _write_connectivity(root, FULL, 8, with_nodes=True)
+    _write_connectivity(root, FULL, 8, with_nodes=True, with_ccg=True)
     _write_criticality(root, FULL)
     _write_directed(root, FULL, 8)
     _write_spatial(root, FULL)
@@ -201,8 +243,10 @@ def analysis_root(tmp_path: Path) -> Path:
     _write_connectivity(root, EMPTY, 0, with_nodes=False)
     _write_curation(root, EMPTY, 0, with_positions=True)
 
-    # positions absent: quality_metrics.pkl carries no loc_x / loc_y
-    _write_connectivity(root, NO_POS, 6, with_nodes=True, with_positions=False)
+    # positions absent: quality_metrics.pkl carries no loc_x / loc_y. Its CCG
+    # block is capped, so ccg.npz is shorter than edges.parquet.
+    _write_connectivity(root, NO_POS, 6, with_nodes=True, with_positions=False,
+                        with_ccg=True, ccg_pairs=2)
     _write_directed(root, NO_POS, 6)
     _write_curation(root, NO_POS, 6, with_positions=False)
 
@@ -330,6 +374,7 @@ def test_bundle_cache_busts_on_mtime(analysis_root: Path):
 # --------------------------------------------------------------------------- #
 _BUILDERS = [
     "fig_sttc_matrix", "fig_sttc_graph", "fig_sttc_distance", "fig_dt_sweep",
+    "fig_ccg_heatmap", "fig_ccg_small_multiples",
     "fig_cartography", "fig_node_degree", "fig_avalanche_dist", "fig_crackling",
     "fig_te_matrix", "fig_te_graph", "fig_activity_field", "fig_burst_propagation",
 ]
@@ -350,6 +395,38 @@ def test_position_dependent_figures_report_missing_positions(analysis_root: Path
         fig = getattr(ni, builder)(b)
         text = " ".join(a.text or "" for a in fig.layout.annotations)
         assert "no unit positions" in text, builder
+
+
+def test_ccg_absent_renders_an_empty_state(analysis_root: Path):
+    """Wells computed before CCGs landed have no ccg.npz — that must not raise."""
+    b = ni.load_network_bundle(_dirs_for(analysis_root, NO_CRIT), well_id=NO_CRIT)
+    assert b.ccg_counts is None
+    for builder in ("fig_ccg_heatmap", "fig_ccg_small_multiples"):
+        fig = getattr(ni, builder)(b)
+        text = " ".join(a.text or "" for a in fig.layout.annotations)
+        assert "no correlograms" in text, builder
+
+
+def test_ccg_figures_use_the_pair_key_not_row_order(analysis_root: Path):
+    """NO_POS is staged capped: ccg.npz has 2 rows, edges.parquet has more."""
+    b = ni.load_network_bundle(_dirs_for(analysis_root, NO_POS), well_id=NO_POS)
+    assert b.ccg_counts.shape[0] == 2 < len(b.edges)
+    heat = ni.fig_ccg_heatmap(b)
+    assert len(heat.data[0].y) == 2                     # one row per computed pair
+    assert len(heat.data[0].z) == 2
+    small = ni.fig_ccg_small_multiples(b, n=12)
+    # bar + baseline line per computed pair — never one per edge
+    assert len(small.data) == 4
+
+
+def test_ccg_heatmap_sorts_rows_by_peak_lag(analysis_root: Path):
+    b = ni.load_network_bundle(_dirs_for(analysis_root, FULL), well_id=FULL)
+    fig = ni.fig_ccg_heatmap(b)
+    lags = b.edges.set_index(
+        b.edges["u"].astype(str) + "→" + b.edges["v"].astype(str)
+    )["ccg_peak_lag_ms"]
+    shown = [lags[label] for label in fig.data[0].y]
+    assert shown == sorted(shown)
 
 
 def test_full_well_figures_carry_data(analysis_root: Path):

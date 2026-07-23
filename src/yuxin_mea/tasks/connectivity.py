@@ -4,7 +4,11 @@ Reads ``curated_spike_times.npy`` and ``quality_metrics.pkl`` (for the edge
 distance column) from the ``auto_curation`` output, computes the STTC matrix +
 dt sweep + circular-shuffle significance + graph topology metrics, and writes
 ``sttc_matrix.npy`` + ``sttc_sweep.npz`` + ``graph_metrics.json`` +
-``edges.parquet`` + ``diagnostics.json`` per well.
+``edges.parquet`` + ``ccg.npz`` + ``diagnostics.json`` per well.
+
+Correlograms run on the edges that survive the significance threshold (reference
+= ``u``, target = ``v``, positive lag = ``u`` leads); they are cheap next to the
+shuffle null, so they are on by default.
 
 STTC is computed over the full recording (``dependencies=["auto_curation"]``);
 restricting to burst epochs is a future config toggle (would add a
@@ -43,6 +47,16 @@ class ConnectivityTask(BaseAnalysisTask):
             "n_shuffle": 100,
             "thresh_percentile": 95.0,
             "random_state": 42,
+            # ---- Cross-correlograms --------------------------------------
+            "ccg_enable": True,
+            "ccg_window": 0.1,
+            "ccg_bin": 0.001,
+            "ccg_hollow_sigma": 0.01,
+            "ccg_hollow_frac": 0.6,
+            "ccg_alpha": 0.001,
+            "ccg_syn_lo": 0.0008,
+            "ccg_syn_hi": 0.008,
+            "ccg_max_pairs": 5000,
             # ---- Parallelism ---------------------------------------------
             "n_jobs": 1,
         }
@@ -99,6 +113,58 @@ class ConnectivityTask(BaseAnalysisTask):
                 "int", defaults["random_state"],
                 "Seed base for the circular-shift null (reproducible edges).",
                 min=0,
+            ),
+            "ccg_enable": ParamSpec(
+                "bool", defaults["ccg_enable"],
+                "Compute a cross-correlogram for every significant STTC edge "
+                "(ccg.npz + the ccg_* columns on edges.parquet).",
+            ),
+            "ccg_window": ParamSpec(
+                "float", defaults["ccg_window"],
+                "Correlogram half-width (seconds). 0.1 = +/-100 ms.",
+                min=0.0,
+            ),
+            "ccg_bin": ParamSpec(
+                "float", defaults["ccg_bin"],
+                "Correlogram bin width (seconds). 0.001 = 1 ms -> 201 bins at "
+                "the default window.",
+                min=0.0,
+            ),
+            "ccg_hollow_sigma": ParamSpec(
+                "float", defaults["ccg_hollow_sigma"],
+                "Sigma (seconds) of the partially-hollow Gaussian that estimates "
+                "the slow baseline — the network-burst co-activation bump every "
+                "MEA pair carries.",
+                min=0.0,
+            ),
+            "ccg_hollow_frac": ParamSpec(
+                "float", defaults["ccg_hollow_frac"],
+                "Centre-bin hollowing fraction (Stark & Abeles 2009). 0.6 keeps a "
+                "sharp peak from predicting its own baseline.",
+                min=0.0, max=1.0,
+            ),
+            "ccg_alpha": ParamSpec(
+                "float", defaults["ccg_alpha"],
+                "Per-bin Poisson tail threshold against the baseline; a bin below "
+                "it inside the causal window flags the edge.",
+                min=0.0, max=1.0,
+            ),
+            "ccg_syn_lo": ParamSpec(
+                "float", defaults["ccg_syn_lo"],
+                "Low edge (seconds) of the causal window used for the "
+                "significance flag, direction and asymmetry.",
+                min=0.0,
+            ),
+            "ccg_syn_hi": ParamSpec(
+                "float", defaults["ccg_syn_hi"],
+                "High edge (seconds) of the causal window.",
+                min=0.0,
+            ),
+            "ccg_max_pairs": ParamSpec(
+                "int", defaults["ccg_max_pairs"],
+                "Cap on correlograms per well; above it only the highest-STTC "
+                "edges are computed and the rest keep NaN ccg_* columns.",
+                min=1,
             ),
             "n_jobs": ParamSpec(
                 "int", defaults["n_jobs"],
