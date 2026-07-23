@@ -29,6 +29,7 @@ _NAV_META: dict[str, tuple[str, str]] = {
     "Plate viewer": ("network", "▤"),
     "Burst inspector": ("network", "◎"),
     "Burst diagnostic": ("network", "∿"),
+    "Network inspector": ("network", "⌗"),
     "Unit inspector": ("single-unit", "⊙"),
     "Settings": ("system", "{}"),
 }
