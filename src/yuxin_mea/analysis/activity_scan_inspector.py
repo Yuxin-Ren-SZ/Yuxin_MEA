@@ -487,26 +487,65 @@ _RASTER_SUBDIR = "activity_png"
 
 
 def _thumbnail_path(cache_dir: Path, results_dir: Path, metric: str,
-                    active_min_rate_hz: float) -> Path:
+                    active_min_rate_hz: float,
+                    vrange: tuple[float, float] | None) -> Path:
     stat = results_dir / "maps.npz"
     try:
         sig = stat.stat()
-        token = f"{results_dir}|{metric}|{active_min_rate_hz}|{sig.st_mtime_ns}|{sig.st_size}"
+        base = f"{results_dir}|{metric}|{sig.st_mtime_ns}|{sig.st_size}"
     except OSError:
-        token = f"{results_dir}|{metric}|{active_min_rate_hz}"
-    name = hashlib.sha1(token.encode()).hexdigest()[:16]
+        base = f"{results_dir}|{metric}"
+    # Only the active mask depends on the threshold; keying the continuous maps
+    # on it would regenerate 24 identical PNGs on every slider move. The shared
+    # colour range is what those maps depend on, so it goes in the key instead.
+    if metric == "active":
+        base += f"|thr{active_min_rate_hz}"
+    elif vrange is not None:
+        base += f"|v{vrange[0]:.4g},{vrange[1]:.4g}"
+    name = hashlib.sha1(base.encode()).hexdigest()[:16]
     return cache_dir / _RASTER_SUBDIR / f"{name}.png"
+
+
+def plate_value_range(results_list, metric: str) -> tuple[float, float] | None:
+    """Shared (vmin, vmax) across a recording's wells for one continuous map.
+
+    A plate overview exists to compare wells, so every thumbnail must share a
+    colour scale — per-well normalization makes a nearly-dead well's few active
+    electrodes look as hot as a fully-active well. The active mask is 0/1 and
+    needs no range.
+    """
+    if metric == "active":
+        return None
+    pooled: list[np.ndarray] = []
+    for res in results_list:
+        if res is None:
+            continue
+        grid = displayed_map(res, metric)
+        finite = grid[np.isfinite(grid)]
+        if finite.size:
+            pooled.append(finite)
+    if not pooled:
+        return None
+    allv = np.concatenate(pooled)
+    vmin = float(np.nanpercentile(allv, 2))
+    vmax = float(np.nanpercentile(allv, 98))
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+    return vmin, vmax
 
 
 def render_well_png(results, metric: str, out_path: str | Path, *,
                     active_min_rate_hz: float | None = None,
+                    vrange: tuple[float, float] | None = None,
                     w_px: int = 220, h_px: int = 130) -> Path:
     """Rasterise one well's map to a small PNG for the plate grid (read-only).
 
     Uses the matplotlib object API (``Figure`` + ``FigureCanvasAgg``), never
     pyplot — pyplot's global figure registry is unsafe on a Dash server serving
     concurrent callbacks. NaN cells are left transparent so the page background
-    shows through as 'unscanned'.
+    shows through as 'unscanned'. ``vrange`` is the recording-wide colour scale
+    (see :func:`plate_value_range`); without it the map self-normalises, which is
+    only right for a single well in isolation.
     """
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.colors import LinearSegmentedColormap
@@ -529,11 +568,14 @@ def render_well_png(results, metric: str, out_path: str | Path, *,
     ax = fig.add_axes([0, 0, 1, 1])
     ax.axis("off")
     if masked.count():
-        finite = grid[np.isfinite(grid)]
-        vmin = float(np.nanpercentile(finite, 2))
-        vmax = float(np.nanpercentile(finite, 98))
-        if vmax <= vmin:
-            vmax = vmin + 1e-6
+        if vrange is not None:
+            vmin, vmax = vrange
+        else:
+            finite = grid[np.isfinite(grid)]
+            vmin = float(np.nanpercentile(finite, 2))
+            vmax = float(np.nanpercentile(finite, 98))
+            if vmax <= vmin:
+                vmax = vmin + 1e-6
         ax.imshow(masked, origin="lower", aspect="auto", cmap=cmap,
                   vmin=vmin, vmax=vmax, interpolation="nearest")
     fig.savefig(out_path, transparent=True, dpi=100)
@@ -541,16 +583,18 @@ def render_well_png(results, metric: str, out_path: str | Path, *,
 
 
 def well_png_data_uri(results, metric: str, cache_dir: Path, results_dir: Path,
-                      active_min_rate_hz: float | None = None) -> str:
+                      active_min_rate_hz: float | None = None,
+                      vrange: tuple[float, float] | None = None) -> str:
     """Cached base64 PNG for a well thumbnail; empty string when nothing to draw."""
     if results is None:
         return ""
     thr = (active_min_rate_hz if active_min_rate_hz is not None
            else results.stats.get("active_min_rate_hz", 0.1))
-    path = _thumbnail_path(Path(cache_dir), Path(results_dir), metric, thr)
+    path = _thumbnail_path(Path(cache_dir), Path(results_dir), metric, thr, vrange)
     if not path.exists():
         try:
-            render_well_png(results, metric, path, active_min_rate_hz=thr)
+            render_well_png(results, metric, path, active_min_rate_hz=thr,
+                            vrange=vrange)
         except Exception as exc:  # noqa: BLE001 — a bad thumbnail must not break the grid
             logger.warning("thumbnail render failed for %s: %s", results_dir, exc)
             return ""
@@ -559,3 +603,28 @@ def well_png_data_uri(results, metric: str, cache_dir: Path, results_dir: Path,
     except OSError:
         return ""
     return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
+
+def well_subtitle(results, metric: str, active_min_rate_hz: float) -> str:
+    """One-line caption under a thumbnail, matching the map on show.
+
+    Recomputed from the slider for the active mask so the caption tracks the map
+    beside it, rather than reporting the frozen 0.1 Hz active fraction.
+    """
+    if results is None:
+        return "n/a"
+    e = results.electrodes
+    if metric == "active":
+        fr = e["firing_rate_hz"].to_numpy(dtype=float)
+        fr = fr[np.isfinite(fr)]
+        frac = float((fr >= active_min_rate_hz).mean()) if fr.size else float("nan")
+        return f"{frac*100:.0f}% active" if frac == frac else "—"
+    col = {"firing_rate": "firing_rate_hz", "amplitude": "amp_median_uv",
+           "noise": "noise_uv"}[metric]
+    v = e[col].to_numpy(dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        return "—"
+    med = float(np.median(np.abs(v) if metric == "amplitude" else v))
+    unit = MAP_SPECS[metric]["unit"]
+    return f"med {med:.2g} {unit}".strip()

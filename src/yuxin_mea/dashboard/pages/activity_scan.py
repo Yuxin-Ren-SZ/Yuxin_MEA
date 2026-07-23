@@ -359,20 +359,24 @@ def _render_grid(_n, rec_key, map_metric, threshold, root):
                 None, "")
 
     spec = vi.MAP_SPECS[map_metric]
+    # Load every well once, then paint all thumbnails on ONE shared colour scale
+    # so the plate reads as a cross-well comparison (a quiet well must look dim
+    # next to an active one, not self-normalised to the same brightness).
+    loaded = {well: vi.load_well(analysis_root, rec_key, well, override)
+              for well in wells}
+    vrange = vi.plate_value_range(list(loaded.values()), map_metric)
+
     cells = []
     for well in wells:
         rdir = vi.well_dir(analysis_root, rec_key, well, override)
-        results = vi.load_well(analysis_root, rec_key, well, override)
+        results = loaded[well]
         uri = ""
         subtitle = "n/a"
         if results is not None:
             if cache_root:
                 uri = vi.well_png_data_uri(results, map_metric, Path(cache_root),
-                                           rdir, threshold)
-            active = results.stats.get("active_frac")
-            subtitle = (f"{active*100:.0f}% active"
-                        if isinstance(active, (int, float)) and active == active
-                        else "—")
+                                           rdir, threshold, vrange)
+            subtitle = vi.well_subtitle(results, map_metric, threshold)
         thumb = (html.Img(src=uri, style={"width": "100%", "borderRadius": "4px",
                                           "background": "var(--bg-deep)"})
                  if uri else
@@ -394,7 +398,13 @@ def _render_grid(_n, rec_key, map_metric, threshold, root):
             style=_CELL_BASE, title=f"Open {vi.well_name(well)} ({well})",
         ))
 
-    legend = f"{spec['label']} · {len(wells)} well(s) · active cut {threshold:g} Hz"
+    if map_metric == "active":
+        legend = f"{spec['label']} · {len(wells)} well(s) · active cut {threshold:g} Hz"
+    elif vrange is not None:
+        legend = (f"{spec['label']} · {len(wells)} well(s) · shared scale "
+                  f"{vrange[0]:.3g}–{vrange[1]:.3g} {spec['unit']}".rstrip())
+    else:
+        legend = f"{spec['label']} · {len(wells)} well(s)"
     context = {"recording_key": rec_key, "root": override or "",
                "wells": wells, "threshold": threshold, "map_metric": map_metric}
     return html.Div(cells, style=_GRID_STYLE), context, legend

@@ -181,3 +181,37 @@ def test_thumbnail_data_uri_and_cache(output_tree: Path, tmp_path: Path):
     uri2 = vi.well_png_data_uri(res, "firing_rate", cache, rdir)
     assert uri2 == uri
     assert len(list((cache / vi._RASTER_SUBDIR).glob("*.png"))) == 1
+
+
+def test_continuous_thumbnail_ignores_threshold(output_tree: Path, tmp_path: Path):
+    """Moving the active-cut slider must not regenerate the FR/amp/noise PNGs."""
+    res = vi.load_well(output_tree, REC, "well000")
+    rdir = vi.well_dir(output_tree, REC, "well000")
+    cache = tmp_path / "cache"
+    vi.well_png_data_uri(res, "firing_rate", cache, rdir, 0.1)
+    vi.well_png_data_uri(res, "firing_rate", cache, rdir, 1.5)   # different threshold
+    assert len(list((cache / vi._RASTER_SUBDIR).glob("*.png"))) == 1
+    # the active mask, by contrast, is threshold-dependent -> two PNGs
+    vi.well_png_data_uri(res, "active", cache, rdir, 0.1)
+    vi.well_png_data_uri(res, "active", cache, rdir, 1.5)
+    assert len(list((cache / vi._RASTER_SUBDIR).glob("*.png"))) == 3
+
+
+def test_shared_plate_range_pools_wells(output_tree: Path):
+    wells = [vi.load_well(output_tree, REC, w)
+             for w in vi.wells_in_recording(output_tree, REC)]
+    rng = vi.plate_value_range(wells, "firing_rate")
+    assert rng is not None and rng[1] > rng[0]
+    # the shared range must cover every well's max (within the 98th pctile clip)
+    per_well_max = max(w.electrodes["firing_rate_hz"].max() for w in wells)
+    assert rng[1] <= per_well_max + 1e-6
+    assert vi.plate_value_range(wells, "active") is None
+
+
+def test_well_subtitle_tracks_threshold(output_tree: Path):
+    res = vi.load_well(output_tree, REC, "well000")
+    lo = vi.well_subtitle(res, "active", 0.01)
+    hi = vi.well_subtitle(res, "active", 5.0)
+    assert lo.endswith("active") and hi.endswith("active")
+    assert int(lo.split("%")[0]) >= int(hi.split("%")[0])
+    assert "µV" in vi.well_subtitle(res, "noise", 0.1)
