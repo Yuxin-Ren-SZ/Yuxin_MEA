@@ -54,6 +54,26 @@ def test_panel_names_unique():
     assert not dupes, f"duplicate panel NAMEs: {dupes}"
 
 
+def test_every_panel_is_composed_into_exactly_one_figure():
+    """``LAYOUTS`` must cover the panels on disk, in both directions.
+
+    A panel no layout references still renders to ``panels/`` and is then absent
+    from every figure sheet and from the deck — it exists but nobody sees it. A
+    layout naming a panel that does not exist degrades quietly to a gap. Neither
+    is visible without this check; the two sets happen to match today, and
+    nothing was keeping them that way.
+    """
+    from scripts.report.assemble_figure import LAYOUTS
+
+    on_disk = {importlib.import_module(f"{panels_pkg.__name__}.{m}").NAME
+               for m in PANEL_MODULES}
+    composed = {name for rows in LAYOUTS.values() for row in rows for name in row}
+    assert not on_disk - composed, (
+        f"panels no figure composes: {sorted(on_disk - composed)}")
+    assert not composed - on_disk, (
+        f"layouts naming panels that do not exist: {sorted(composed - on_disk)}")
+
+
 def test_render_panel_writes_image_and_caption_without_drawing_it(tmp_path):
     """The image must stay clean; the caption goes to its own file."""
     mod = types.SimpleNamespace(

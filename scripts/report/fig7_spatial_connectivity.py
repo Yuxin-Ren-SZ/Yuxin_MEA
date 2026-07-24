@@ -32,9 +32,7 @@ import pandas as pd
 
 from . import load
 from . import stats as S
-from .report_style import (
-    METRIC_LABELS, MUTED, caption, group_color, ordered_groups, save_fig,
-)
+from .report_style import group_color
 
 # STTC graph-topology panel. (mean_degree omitted — ≈ edge_density·(n−1), so
 # redundant, and its unbounded log2 response squashes the shared x-axis.)
@@ -346,105 +344,3 @@ def _stars(q):
 # Build
 # --------------------------------------------------------------------------- #
 _TREATED_EXAMPLE = "IVH_Late"     # representative treated arm for panels A/C
-
-
-def build_f7(tidy, analysis_root):
-    import matplotlib.pyplot as plt
-
-    from .forest import group_columns_grid
-
-    resp = S.well_response(tidy, metrics=FOREST_METRICS)
-    resp = resp[resp.arm.isin(["Control"] + FOCUS_ARMS)]
-
-    # One representative treated (IVH_Late) well, EARLY (tau≈0) vs LATE (tau≈14) —
-    # shared by A and B so maps/graphs show the post-treatment change over time.
-    from .trajectory import pick_example_well, pick_early_late, plot_trajectory
-    ex = pick_example_well(tidy, _TREATED_EXAMPLE, metric="mean_sttc")
-    e_row, l_row = pick_early_late(tidy, ex) if ex else (None, None)
-
-    def _lab(row, when):
-        return when if row is None else f"{when} · DIV{int(row.DIV)} tau{int(row.tau):+d}"
-
-    e_lab, l_lab = _lab(e_row, "early"), _lab(l_row, "late")
-    chip = "" if ex is None else f"  ·  {ex.split('|')[0]} (IVH_Late)"
-
-    # Each metric gets its OWN subplot with its OWN y-axis — the metrics differ
-    # wildly in scale (mean STTC ~0.17 vs edge density ~0.58 vs modularity ~0.07),
-    # so a shared-axis forest squashes them. No metric is highlighted: at n=3 none
-    # even reaches a suggestive signal (no metric is direction-consistent across
-    # the 3 chips), so foregrounding one would misrepresent the data.
-    metrics = ["mean_sttc", "edge_density", "clustering_coeff",
-               "modularity", "global_efficiency", "small_worldness"]
-
-    fig = plt.figure(figsize=(9.8, 12.0))
-    outer = fig.add_gridspec(3, 1, height_ratios=[2.05, 0.82, 0.95], top=0.90,
-                             bottom=0.05, hspace=0.5)
-
-    # A: DiD small multiples, one panel per metric (own axis), groups on x.
-    gsa = outer[0].subgridspec(2, 3, hspace=0.55, wspace=0.42)
-    cells = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
-    did_axes = [fig.add_subplot(gsa[r, c]) for r, c in cells]
-    fdata = group_columns_grid(
-        did_axes, resp, metrics, FOCUS_ARMS, highlight_metric=None,
-        effect_labels=True, ylabel="response (log₂ or Δ)",
-        ylabel_axes=[did_axes[0], did_axes[3]])
-    a_top = outer[0].get_position(fig).y1
-    fig.text(0.09, a_top + 0.028,
-             "A  Connectivity difference-in-differences vs Control — one panel "
-             "per metric (own axis)", fontweight="bold", fontsize=9, va="bottom")
-
-    # B: two trajectories vs treatment day.
-    arms = ["Control"] + FOCUS_ARMS
-    gsb = outer[1].subgridspec(1, 2, wspace=0.3)
-    for ci, metric in enumerate(["modularity", "mean_sttc"]):
-        axb = fig.add_subplot(gsb[0, ci])
-        plot_trajectory(axb, tidy, metric, arms, legend=(ci == 0), ref=0.0)
-    fig.text(0.09, outer[1].get_position(fig).y1 + 0.012,
-             "B  Connectivity metrics vs treatment day", fontweight="bold",
-             fontsize=9, va="bottom")
-
-    # C: demoted muted illustrative strip — activity fields + STTC graphs
-    # (early vs late) + STTC-vs-distance (cross-sectional, chip-confounded).
-    gsc = outer[2].subgridspec(1, 5, wspace=0.24)
-    axc = [fig.add_subplot(gsc[0, i]) for i in range(5)]
-    _panel_field(axc[0], analysis_root, e_row, e_lab)
-    _panel_field(axc[1], analysis_root, l_row, l_lab)
-    _panel_graph(axc[2], analysis_root, e_row, "STTC early")
-    _panel_graph(axc[3], analysis_root, l_row, "STTC late")
-    _panel_sttc_distance(axc[4], analysis_root, tidy)
-    for a in axc[:4]:                     # activity/graph titles are centre-loc
-        a.set_title(a.get_title(), fontsize=6.5, color=MUTED)
-    axc[4].set_title("STTC vs distance", loc="left", fontsize=6.5, color=MUTED)
-    axc[4].get_legend() and axc[4].get_legend().remove()
-    fig.text(0.09, outer[2].get_position(fig).y1 + 0.006,
-             "C  Illustrative — single well (activity fields · STTC graphs · "
-             "distance), early vs late", fontweight="bold", fontsize=8,
-             color=MUTED, ha="left", va="bottom")
-
-    fig.suptitle(
-        f"Figure 7 — Spatial activity maps & functional connectivity (STTC); "
-        f"chip = biological replicate{chip}", fontsize=9, y=0.965)
-    caption(fig,
-        "Spatial activity & functional connectivity. (A) Difference-in-differences "
-        "vs Control, ONE panel per graph metric on its OWN y-axis (the metrics "
-        "span very different scales): groups side-by-side, bold points = 3 per-chip "
-        "means (biological replicates), faint = wells, bar = mean of chip means, "
-        "whisker = 95% t-CI (df=2), dashed line = no change. ★ = FDR q<0.05, △ = "
-        "suggestive (direction-consistent 3/3 chips, uncorrected p<0.05): NO F7 "
-        "metric reaches either bar at n=3 (none is even direction-consistent "
-        "across chips; all p>0.3), so no metric is flagged or highlighted — the "
-        "connectivity DiD is null in this pilot. (B) Group trajectories vs "
-        "treatment day (tau): modularity and mean STTC; line = per-arm median "
-        "across wells, ribbon = 95% bootstrap CI. (C) Demoted illustrative strip "
-        "(single well): firing-rate activity field and STTC graph (edge opacity ∝ "
-        "STTC), early vs late, plus STTC-vs-distance (cross-sectional at matched "
-        "DIV, chip-confounded). Modularity = Newman weighted Q of the STTC graph "
-        "(greedy community detection); STTC = spike-time tiling coefficient (Cutts "
-        "& Eglen 2014). Unit: chip (n=3 per arm).")
-    return fig, {"response": resp, "example": ex, **(fdata or {})}
-
-
-def render(tidy, analysis_root, figure_root):
-    fig, data = build_f7(tidy, analysis_root)
-    paths = save_fig(fig, "F7_spatial_connectivity", figure_root, subdir="main")
-    return paths, data

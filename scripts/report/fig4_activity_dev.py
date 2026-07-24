@@ -15,8 +15,7 @@ import numpy as np
 import pandas as pd
 
 from . import load as L
-from .report_style import (
-    METRIC_LABELS, MUTED, caption, group_color, ordered_groups, save_fig)
+from .report_style import METRIC_LABELS, group_color, ordered_groups
 
 DIV_BIN_EDGES = list(range(4, 37, 4))  # width-4 bins spanning DIV 4-34
 TRAJ_METRICS = ["median_firing_rate", "nb_rate"]
@@ -113,73 +112,3 @@ def _panel_raster(ax, analysis_root, row, title: str, max_units: int = 40,
     ax.set_xlabel("time (s)")
     ax.set_ylabel("unit")
     ax.set_title(title, fontsize=7)
-
-
-def build_f4(tidy, analysis_root):
-    import matplotlib.pyplot as plt
-
-    fig = plt.figure(figsize=(9.0, 5.6))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.1], hspace=0.45, wspace=0.3)
-
-    # Row A: representative rasters (early vs late) — demoted, illustrative.
-    wuid = _pick_raster_well(tidy)
-    axr0 = fig.add_subplot(gs[0, 0])
-    axr1 = fig.add_subplot(gs[0, 1])
-    if wuid is not None:
-        sub = tidy[tidy.well_uid == wuid].sort_values("DIV")
-        r_early, r_late = sub.iloc[0], sub.iloc[-1]
-        _panel_raster(axr0, analysis_root, r_early,
-                      f"illustrative · single well — DIV {int(r_early.DIV)} (immature)")
-        _panel_raster(axr1, analysis_root, r_late,
-                      f"illustrative · single well — DIV {int(r_late.DIV)} (mature)")
-        for a in (axr0, axr1):                 # mute the demoted example titles
-            a.set_title(a.get_title(), fontsize=7, color=MUTED)
-            for sp in a.spines.values():
-                sp.set_color("0.7")
-    axr0.annotate("A  Representative rasters — illustrative, single well",
-                  xy=(0, 1.14), xycoords="axes fraction", fontweight="bold",
-                  fontsize=9, annotation_clip=False)
-
-    # DIV window that the treatment DiD (F5-F8) samples = the post-treatment span.
-    div_band = None
-    if "tau" in tidy.columns:
-        post = tidy[tidy.tau >= 0]
-        if not post.empty:
-            div_band = (float(post.DIV.min()), float(post.DIV.max()))
-
-    # Row B/C: developmental trajectories (per group, group palette).
-    axt0 = fig.add_subplot(gs[1, 0])
-    axt1 = fig.add_subplot(gs[1, 1])
-    _panel_trajectory(axt0, tidy, "median_firing_rate", div_band=div_band)
-    axt0.set_title("B  Firing-rate maturation", loc="left", fontweight="bold")
-    _panel_trajectory(axt1, tidy, "nb_rate", div_band=div_band)
-    axt1.set_title("C  Network-burst maturation", loc="left", fontweight="bold")
-
-    fig.suptitle("Figure 4 — Network activity & development · the maturation "
-                 "baseline the treatment DiD (F5-F8) is read against",
-                 fontsize=9, y=0.99)
-    band_txt = ("" if div_band is None else
-                f" The shaded DIV band ({int(div_band[0])}-{int(div_band[1])}) "
-                "marks the post-treatment window sampled by F5-F8.")
-    caption(fig,
-        "Network activity and its developmental maturation across the cohort. "
-        "(A) Representative spike rasters of one well, early (immature, low DIV) "
-        "vs late — illustrative single-well examples, not a group statistic. "
-        "(B) Firing-rate maturation and (C) network-burst maturation vs "
-        "developmental age (DIV): each line is a treatment arm (group palette, "
-        "Control neutral / IVH amber-sienna), tracking the median metric across "
-        "wells (95% bootstrap CI ribbon) as the culture matures. Each arm pools "
-        "ALL of that arm's recordings across DIV — including each treated well's "
-        "pre-treatment recordings — so the lines show per-arm development, not a "
-        "treatment contrast; any pre-band (DIV < treatment) separation is baseline "
-        "well-to-well variation, and the treatment effect is read only as the "
-        "difference-in-differences in F5-F8." + band_txt +
-        " This establishes the maturation baseline against which that DiD is read. "
-        "Points aggregate recordings to the well first (median).")
-    return fig, {"raster_well": wuid}
-
-
-def render(tidy, analysis_root, figure_root):
-    fig, meta = build_f4(tidy, analysis_root)
-    paths = save_fig(fig, "F4_activity_development", figure_root, subdir="main")
-    return paths, meta

@@ -24,8 +24,7 @@ import pandas as pd
 
 from . import load as L
 from . import stats as S
-from .report_style import (
-    MUTED, STATE_BURST, STATE_REST, caption, group_color, save_fig)
+from .report_style import MUTED, STATE_BURST, STATE_REST, caption, group_color
 
 # UMAP params mirror the pipeline; n_components=2 for display.
 _UMAP_KW = dict(n_neighbors=30, min_dist=0.0, n_components=2, random_state=42)
@@ -226,86 +225,3 @@ def build_umap_migration(tidy, analysis_root):
                        {int(t): int((d["tau"] == t).sum())
                         for t in _auto_days(d["tau"])})
                  for arm, (d, _) in pooled.items()}
-
-
-def render(tidy, analysis_root, figure_root):
-    fig, meta = build_umap_migration(tidy, analysis_root)
-    return save_fig(fig, "F6b_umap_migration", figure_root, subdir="main"), meta
-
-
-# --------------------------------------------------------------------------- #
-# Candidate gallery — one pooled-UMAP-by-DIV thumbnail per candidate well, so a
-# representative chip-matched (Control, IVH_Early, IVH_Late) trio can be picked.
-# --------------------------------------------------------------------------- #
-def _pool_worker(payload):
-    """Picklable worker: pool one well (own tidy subset) → (well_uid, dict)."""
-    import pandas as pd
-    analysis_root, records, well_uid, fit_sample, max_recordings = payload
-    sub = pd.DataFrame.from_records(records)
-    try:
-        d = _pool_well(sub, analysis_root, well_uid, fit_sample, max_recordings)
-    except Exception:
-        d = None
-    return well_uid, d
-
-
-def render_candidate_gallery(tidy, analysis_root, figure_root, chip: str,
-                             arms=("Control", "IVH_Early", "IVH_Late"),
-                             fit_sample: int = 3000, max_recordings: int = 8,
-                             workers: int = 8):
-    import matplotlib.pyplot as plt
-    from concurrent.futures import ProcessPoolExecutor
-
-    wi = S.well_index(tidy)
-    per_arm = {a: sorted(wi[(wi.arm == a) & (wi.chip == chip)].well_uid) for a in arms}
-    all_wells = [w for a in arms for w in per_arm[a]]
-    cols = ["well_uid", "DIV", "tau", "recording_key", "rec_name",
-            "well_id", "sample_id", "canonical_group"]
-    payloads = [(analysis_root,
-                 tidy.loc[tidy.well_uid == w, cols].to_dict("records"),
-                 w, fit_sample, max_recordings) for w in all_wells]
-    pooled: dict = {}
-    with ProcessPoolExecutor(max_workers=workers) as ex:
-        for wuid, d in ex.map(_pool_worker, payloads):
-            pooled[wuid] = d
-
-    ncols = max((len(v) for v in per_arm.values()), default=1)
-    nrows = len(arms)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(2.2 * ncols, 2.4 * nrows),
-                             squeeze=False)
-    divs_all = tidy[tidy.sample_id == chip].DIV
-    vmin, vmax = int(divs_all.min()), int(divs_all.max())
-    sc = None
-    for ri, arm in enumerate(arms):
-        wells = per_arm[arm]
-        for ci in range(ncols):
-            ax = axes[ri, ci]
-            ax.set_xticks([]); ax.set_yticks([])
-            if ci >= len(wells):
-                ax.set_visible(False)
-                continue
-            w = wells[ci]
-            d = pooled.get(w)
-            wid = w.split("|")[-1]
-            if d is None:
-                ax.text(0.5, 0.5, f"{wid}\nno traces", ha="center", va="center",
-                        transform=ax.transAxes, fontsize=6)
-                continue
-            sc = ax.scatter(d["emb"][:, 0], d["emb"][:, 1], s=1.5, c=d["div"],
-                            cmap="viridis", vmin=vmin, vmax=vmax, lw=0, alpha=0.7,
-                            rasterized=True)
-            ax.scatter(d["emb"][d["is_burst"], 0], d["emb"][d["is_burst"], 1],
-                       s=2, c=_BURST_C, lw=0, alpha=0.7, rasterized=True)
-            post = np.unique(d["tau"][d["tau"] >= 0])
-            ax.set_title(f"{wid}  DIV{int(d['div'].min())}-{int(d['div'].max())}\n"
-                         f"maxDay{int(post.max()) if len(post) else 'NA'}",
-                         fontsize=6)
-            if ci == 0:
-                ax.set_ylabel(arm, fontsize=8, fontweight="bold")
-    if sc is not None:
-        cb = fig.colorbar(sc, ax=axes, shrink=0.5, pad=0.02)
-        cb.set_label("DIV", fontsize=7); cb.ax.tick_params(labelsize=6)
-    fig.suptitle(f"F6b candidate gallery — {chip} (red = burst bins; "
-                 f"DIV colour; pick one chip-matched trio)", fontsize=9, y=1.0)
-    return save_fig(fig, f"F6b_gallery_{chip}", figure_root, subdir="gallery",
-                    formats=("png",))

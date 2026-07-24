@@ -382,36 +382,3 @@ def save_fig(
         fig.savefig(p, bbox_inches="tight", pad_inches=0.12)
         written.append(p)
     return written
-
-
-def save_plotly(
-    fig,
-    name: str,
-    figure_root: Path,
-    subdir: str = "main",
-    formats: Sequence[str] = ("pdf", "png"),
-    width: int = 1600,
-    height: int = 1200,
-    scale: float = 2.0,
-) -> list[Path]:
-    """Export a Plotly figure to static vector/raster via kaleido.
-
-    Falls back to an HTML dump (and a clear message) if kaleido is missing, so
-    a plate-raster panel never hard-fails the whole report build.
-    """
-    out_dir = report_dir(figure_root, subdir)
-    written: list[Path] = []
-    try:
-        for ext in formats:
-            p = out_dir / f"{name}.{ext}"
-            fig.write_image(str(p), width=width, height=height, scale=scale)
-            written.append(p)
-    except Exception as exc:  # kaleido missing / render failure
-        html_path = out_dir / f"{name}.html"
-        fig.write_html(str(html_path))
-        written.append(html_path)
-        print(
-            f"[report_style] static export failed for {name!r} ({exc}); "
-            f"wrote interactive HTML instead -> {html_path}"
-        )
-    return written

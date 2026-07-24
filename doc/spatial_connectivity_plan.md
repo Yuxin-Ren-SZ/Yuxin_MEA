@@ -1,7 +1,19 @@
 # Spatial activity maps & functional connectivity — implementation plan
 
-Status: **design / not yet built.** Reserved as report figure **F7** (placeholder
-in the current draft). Build immediately after the draft is frozen.
+Status: **built and superseded — kept as the design record.** This document
+describes the plan as of 2026-07, and parts of it no longer match the code:
+
+* F7 is now the panels `f7a`–`f7s` under `scripts/report/panels/`, not the single
+  composed builder `fig7_spatial_connectivity.py` this doc proposes. That module
+  survives only for the per-axes helpers the panels import out of it.
+* The unit of *inference* moved from the well to the **chip** — wells inside a
+  chip share one plating and one CSF application, so a well-level test was
+  pseudo-replication. Where this doc says "well-level, chip = replicate", read
+  `scripts/report/README.md` instead; wells are aggregated first and the test
+  runs across chips.
+
+The motivation, the STTC definition and the on-disk artifact layout below are
+still accurate.
 
 ## Motivation
 

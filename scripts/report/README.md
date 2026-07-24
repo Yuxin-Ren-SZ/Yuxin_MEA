@@ -26,6 +26,10 @@ python -m scripts.report.panel_pptx
 
 # the immunofluorescence panel takes image files (blank frames until supplied)
 python -m scripts.report.panels.f3c_icc --images map2_d0.tif ... --px-per-um 1.5
+
+# the supplement (S1-S5) is still one figure per builder, not panels
+python -m scripts.report.make_report --qpcr-dir /path/to/qPCR
+python -m scripts.report.build_pptx --qpcr-dir /path/to/qPCR
 ```
 
 Output layout under `<figure_root>/report/`:
@@ -35,9 +39,15 @@ panels/     F4c_firing_rate.{png,pdf,svg}       the panel itself, no caption
 panels/     F5b_did_nb_rate_stats.csv           the p and q behind its glyphs
 captions/   F4c_firing_rate.txt                 the caption, as text
 figures/    F4_sheet.png, F4_captions.txt       assembled review sheet
+supp/       S2_unit_qc_waveforms.{png,pdf,svg}  the supplement, captions baked in
 pptx/       report_panels.pptx                  portrait Letter deck, editable text
+pptx/       report_supp.pptx                    the supplement deck
 _cache/                                          shared derived tables (safe to delete)
 ```
+
+Superseded output from earlier generations of this code lives beside the tree, in
+`<figures_base>/report_archive/<date>/`, with a README saying what each directory
+was and what replaced it. Nothing under `report/` is stale.
 
 ## Writing a panel
 
@@ -76,7 +86,7 @@ minute-long burst-archetype clustering or the pooled UMAP.
 | F6 | `f6a` `f6b` UMAP, `f6c–f6e` archetypes | feature-space and developmental embeddings; cohort-wide burst archetypes with composition, feature profile and ≥3 example rasters each |
 | F7 | `f7a–f7c` CCG, `f7d` STTC graphs, `f7e` activity fields, `f7f` distance, `f7g–f7m` graph DiD, `f7n/f7o` burst modulation, `f7p–f7s` node + directed | connectivity, from single-pair correlograms up to graph, node and directed metrics |
 | F8 | `f8a/f8b` trajectories, `f8c–f8g` DiD, `f8h/f8i` avalanches | neuronal-avalanche criticality |
-| S1–S6 | `fig_s*.py` (still composed figures) | method comparison, unit QC, rasters, cross-group at matched DIV, reference genes, qPCR trajectories |
+| S1–S5 | `fig_s*.py` (composed, built by `make_report`) | method comparison, unit QC, rasters, cross-group at matched DIV, reference genes |
 
 Main figures show **Control, IVH_Early, IVH_Late** only. H2O2, NPH and AraC stay
 in the supplement (S4) — NPH and AraC exist on one chip each, so they cannot
@@ -154,6 +164,9 @@ responses, `well_response_by_tau`, `did_at_endpoint`, `primary_endpoint` ·
 `trajectory.py` — τ trajectories and the shared `tau_band` experiment-window
 marker · `raster.py` — firing-rate-sorted rasters · `panel_data.py` — cached data
 context and the FDR families · `panel_base.py` — the panel runner ·
-`panels/` — one module per subplot · `render_panels.py`, `assemble_figure.py` —
-drivers · `build_pptx.py`, `make_report.py` — the older composed-figure path,
-still used for S1–S6.
+`panels/` — one module per subplot · `render_panels.py`, `assemble_figure.py`,
+`panel_pptx.py` — the main-figure drivers · `make_report.py`, `build_pptx.py` —
+the supplement (S1–S5), which is still composed one figure per builder. The
+`fig*.py` modules are those builders plus the per-axes helpers the panels import
+out of them; their composed `render()` entry points are gone, so each figure has
+exactly one producer.

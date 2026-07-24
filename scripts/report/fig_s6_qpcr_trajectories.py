@@ -28,7 +28,7 @@ import pandas as pd
 
 from .fig3_qpcr import (celltype_ordered_genes, control_reference, gene_label,
                         treatment_effects)
-from .report_style import caption, group_color, ordered_groups, save_fig
+from .report_style import caption, group_color, ordered_groups
 
 #: A QC-failed point is still drawn in place if it sits within this fraction of
 #: the QC-pass span beyond the axis; further out it would flatten the panel, so
@@ -218,9 +218,3 @@ def build_s6(tidy: pd.DataFrame, genes: list[str] | None = None):
         "Control). Descriptive, n=1 chip (CX169), technical duplicates only — no "
         "error bars or statistics.")
     return fig
-
-
-def render(figure_root, qpcr_dir, genes=None):
-    from .fig3_qpcr import load_qpcr_dir
-    fig = build_s6(load_qpcr_dir(qpcr_dir), genes)
-    return save_fig(fig, "S6_qpcr_trajectories", figure_root, subdir="supp")

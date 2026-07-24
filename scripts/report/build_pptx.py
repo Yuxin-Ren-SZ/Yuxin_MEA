@@ -1,12 +1,16 @@
-"""Assemble the report figures into editable multi-page PowerPoint decks.
+"""Assemble the **supplementary** figures into an editable PowerPoint deck.
 
-Each figure becomes one slide: the plot **panels** as a high-resolution image
-(>=300 dpi as displayed, >=600 for detail-heavy figures) plus the figure
-**title** and **caption** as native, editable PowerPoint text boxes — not baked
-into the image, so they can be re-typed and re-laid-out later. Two decks:
+Each figure becomes one slide: the plot as a high-resolution image (>=300 dpi as
+displayed, >=600 for detail-heavy figures) plus the figure **title** and
+**caption** as native, editable PowerPoint text boxes — not baked into the image,
+so they can be re-typed and re-laid-out later.
 
-    <figure_root>/report/pptx/report_main.pptx   (F3-F8 + F6b/F6c/F6d)
-    <figure_root>/report/pptx/report_supp.pptx   (S1-S6)
+    <figure_root>/report/pptx/report_supp.pptx   (S1-S5)
+
+The main figures are panels now and their deck is built by ``panel_pptx.py``.
+This module used to advertise a ``report_main.pptx`` as well; that branch had
+been unreachable since the main list emptied, so it is gone rather than left
+promising a file it could not produce.
 
 The run has two passes:
 
@@ -18,7 +22,7 @@ The run has two passes:
   * **assemble** — reads the cached assets and lays out the two decks. Layout-only
     tweaks can rerun just this pass with ``--assemble-only`` (fast; no builders).
 
-F1/F2 need user assets and are skipped unless provided.
+S5 needs ``--qpcr-dir`` and skips without it.
 
 Usage::
 
@@ -106,13 +110,8 @@ def _render_pass(cli, figure_root: Path) -> list[dict]:
     asset_dir = report_dir(figure_root) / "pptx" / "_assets"
     asset_dir.mkdir(parents=True, exist_ok=True)
 
-    args = argparse.Namespace(
-        config=cli.config, figures=["all"], qpcr_dir=cli.qpcr_dir,
-        qpcr_table=None, qpcr_genes=cli.qpcr_genes,
-        rosglo_table=cli.rosglo_table, f1_assets=cli.f1_assets,
-        f2_images=cli.f2_images, f2_labels=cli.f2_labels,
-        f2_scalebar_um=cli.f2_scalebar_um, f2_px_per_um=cli.f2_px_per_um,
-        verbose=False)
+    args = argparse.Namespace(config=cli.config, figures=["all"],
+                              qpcr_dir=cli.qpcr_dir, verbose=False)
 
     prev_draw = report_style._CAPTION_DRAW
     report_style._CAPTION_DRAW = False
@@ -177,25 +176,22 @@ def _assemble(figure_root: Path, manifest: list[dict] | None = None) -> list[Pat
     asset_dir = report_dir(figure_root) / "pptx" / "_assets"
     if manifest is None:
         manifest = json.loads((asset_dir / "manifest.json").read_text())
-    decks = {"main": _new_deck(), "supp": _new_deck()}
-    counts = {"main": 0, "supp": 0}
+    # One deck. There used to be a "main" deck here too, but the main figures
+    # became panels and ``panel_pptx`` builds their deck; this branch had been
+    # unreachable ever since, quietly promising a file it could not produce.
+    deck, n = _new_deck(), 0
     for entry in manifest:
-        deck = decks.get(entry["subdir"])
-        if deck is None:
-            continue
         _add_slide(deck, entry, asset_dir)
-        counts[entry["subdir"]] += 1
+        n += 1
 
     out_dir = report_dir(figure_root) / "pptx"
-    written = []
-    for subdir, deck in decks.items():
-        if not counts[subdir]:
-            continue
-        p = out_dir / f"report_{subdir}.pptx"
-        deck.save(str(p))
-        written.append(p)
-        logger.info("[pptx] wrote %s (%d slides)", p, counts[subdir])
-    return written
+    if not n:
+        logger.warning("[pptx] no supplement figures collected; no deck written")
+        return []
+    p = out_dir / "report_supp.pptx"
+    deck.save(str(p))
+    logger.info("[pptx] wrote %s (%d slides)", p, n)
+    return [p]
 
 
 def build(cli) -> list[Path]:
@@ -211,14 +207,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", default=None)
-    p.add_argument("--qpcr-dir", default=None)
-    p.add_argument("--qpcr-genes", nargs="*", default=None)
-    p.add_argument("--rosglo-table", default=None)
-    p.add_argument("--f1-assets", nargs="*", default=None)
-    p.add_argument("--f2-images", nargs="*", default=None)
-    p.add_argument("--f2-labels", nargs="*", default=None)
-    p.add_argument("--f2-scalebar-um", type=float, default=None)
-    p.add_argument("--f2-px-per-um", type=float, default=None)
+    p.add_argument("--qpcr-dir", default=None,
+                   help="qPCR plate root — S5 skips without it")
     p.add_argument("--assemble-only", action="store_true",
                    help="skip the render pass; reassemble decks from cached "
                         "pptx/_assets (fast, for layout tweaks)")

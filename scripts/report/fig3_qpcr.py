@@ -35,7 +35,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .report_style import caption, group_color, ordered_groups, report_dir, save_fig
+from .report_style import caption, group_color, ordered_groups
+
 
 _GENE_COLS = ["gene", "target", "marker"]
 _GROUP_COLS = ["group", "condition", "arm", "treatment", "canonical_group"]
@@ -827,40 +828,6 @@ def _heatmap_footnote(tidy: pd.DataFrame, interp: set[float]) -> str:
         parts.append(f"† {days}: no measured control that day (CT D14 failed) — "
                      "Control ΔCq linearly interpolated from the flanking days.")
     return "\n".join(parts)
-
-
-def build_f3_bars(qpcr: pd.DataFrame):
-    """Legacy grouped-bar form, used by the generic ``--qpcr-table`` path."""
-    import matplotlib.pyplot as plt
-
-    genes = list(dict.fromkeys(qpcr.gene))
-    groups = ordered_groups(qpcr.group.unique())
-    n_g = len(groups)
-    x = np.arange(len(genes))
-    width = 0.8 / max(n_g, 1)
-
-    fig, ax = plt.subplots(figsize=(max(5.0, 1.1 * len(genes) + 2), 3.4))
-    for gi, grp in enumerate(groups):
-        means, sems = [], []
-        for gene in genes:
-            v = qpcr[(qpcr.gene == gene) & (qpcr.group == grp)].value.to_numpy(float)
-            means.append(np.nanmean(v) if len(v) else np.nan)
-            sems.append(np.nanstd(v, ddof=1) / np.sqrt(len(v))
-                        if len(v) > 1 else 0.0)
-        ax.bar(x + gi * width - 0.4 + width / 2, means, width, yerr=sems,
-               capsize=2, color=group_color(grp), alpha=0.85, label=grp,
-               error_kw=dict(lw=0.8))
-    ax.set_xticks(x)
-    ax.set_xticklabels(genes, rotation=30, ha="right")
-    ax.set_ylabel("relative expression (mean ± SEM)")
-    ax.axhline(1.0, ls="--", color="0.6", lw=0.7)
-    ax.legend(fontsize=6, ncol=2, title="group", title_fontsize=6)
-    ax.set_title("Figure 3 — qPCR marker expression", loc="left",
-                 fontweight="bold")
-    fig.tight_layout()
-    return fig
-
-
 def synthetic_table(seed: int = 0) -> pd.DataFrame:
     """Small synthetic qPCR table for smoke-testing the builder."""
     rng = np.random.default_rng(seed)
@@ -874,26 +841,3 @@ def synthetic_table(seed: int = 0) -> pd.DataFrame:
                 rows.append(dict(gene=gene, group=grp,
                                  value=max(0.05, base * rng.normal(1, 0.15))))
     return pd.DataFrame(rows)
-
-
-def render(figure_root, table_path=None, qpcr_dir=None, genes=None):
-    """Directory input wins; then a generic table; else a synthetic placeholder.
-
-    Alongside the figure, writes both tables: the per-condition ΔΔCq
-    (``F3_qpcr_tidy.csv``) and the maturation-controlled effects
-    (``F3_qpcr_effects.csv``). The CSVs stay complete for the whole gene panel
-    regardless of what the figure is asked to draw.
-    """
-    if qpcr_dir:
-        tidy = load_qpcr_dir(qpcr_dir)
-        fig = build_f3(tidy, genes)
-        paths = save_fig(fig, "F3_qpcr", figure_root, subdir="main")
-        out = report_dir(figure_root, "main")
-        tidy.to_csv(out / "F3_qpcr_tidy.csv", index=False)
-        treatment_effects(tidy).to_csv(out / "F3_qpcr_effects.csv", index=False)
-        return paths + [out / "F3_qpcr_tidy.csv", out / "F3_qpcr_effects.csv"]
-
-    qpcr = load_qpcr(table_path) if table_path else synthetic_table()
-    fig = build_f3_bars(qpcr)
-    name = "F3_qpcr" if table_path else "F3_qpcr_SYNTHETIC_placeholder"
-    return save_fig(fig, name, figure_root, subdir="main")
