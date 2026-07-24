@@ -27,6 +27,7 @@ _NAV_META: dict[str, tuple[str, str]] = {
     "Pipeline": ("operations", "≡"),
     "Run": ("operations", "▸"),
     "Plate viewer": ("network", "▤"),
+    "Activity scan": ("network", "▩"),
     "Burst inspector": ("network", "◎"),
     "Burst diagnostic": ("network", "∿"),
     "Network inspector": ("network", "⌗"),
