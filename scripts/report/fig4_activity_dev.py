@@ -15,14 +15,14 @@ import numpy as np
 import pandas as pd
 
 from . import load as L
-from .report_style import METRIC_LABELS, OKABE_ITO, caption, save_fig
+from .report_style import (
+    METRIC_LABELS, MUTED, caption, group_color, ordered_groups, save_fig)
 
 DIV_BIN_EDGES = list(range(4, 37, 4))  # width-4 bins spanning DIV 4-34
 TRAJ_METRICS = ["median_firing_rate", "nb_rate"]
-_ROLE_STYLE = {
-    "control": dict(color=OKABE_ITO["grey"], label="untreated"),
-    "treatment": dict(color=OKABE_ITO["vermillion"], label="treated"),
-}
+# Developmental trajectories are drawn per treatment arm (group palette), so the
+# maturation curves map directly onto the group colours used in F5-F8.
+_TRAJ_ARMS = ["Control", "IVH_Early", "IVH_Late"]
 
 
 def _bin_center(div: pd.Series) -> pd.Series:
@@ -40,31 +40,36 @@ def _boot_median_ci(x: np.ndarray, seed: int, n: int = 2000) -> tuple[float, flo
 
 
 def _trajectory(tidy: pd.DataFrame, metric: str, seed: int = 0) -> pd.DataFrame:
-    """Per role × DIV-bin: group median + bootstrap CI across per-well medians."""
-    df = tidy.copy()
+    """Per arm × DIV-bin: group median + bootstrap CI across per-well medians."""
+    from . import stats as S
+
+    df = tidy.merge(S.well_index(tidy)[["well_uid", "arm"]], on="well_uid")
     df["divc"] = _bin_center(df.DIV)
-    # per well_uid × role × bin -> median (kills pseudo-replication)
-    per_well = (df.groupby(["role", "well_uid", "divc"])[metric]
+    per_well = (df.groupby(["arm", "well_uid", "divc"])[metric]
                 .median().reset_index())
     rows = []
-    for (role, divc), sub in per_well.groupby(["role", "divc"]):
+    for (arm, divc), sub in per_well.groupby(["arm", "divc"]):
         x = sub[metric].to_numpy(dtype=float)
         lo, hi = _boot_median_ci(x, seed=seed)
-        rows.append(dict(role=role, divc=divc, n_wells=len(sub),
+        rows.append(dict(arm=arm, divc=divc, n_wells=len(sub),
                          median=float(np.nanmedian(x)), lo=lo, hi=hi))
-    return pd.DataFrame(rows).sort_values(["role", "divc"])
+    return pd.DataFrame(rows).sort_values(["arm", "divc"])
 
 
-def _panel_trajectory(ax, tidy, metric: str) -> None:
+def _panel_trajectory(ax, tidy, metric: str, div_band=None) -> None:
     traj = _trajectory(tidy, metric)
-    for role, style in _ROLE_STYLE.items():
-        sub = traj[traj.role == role].dropna(subset=["divc"])
+    present = set(traj.arm.unique())
+    for arm in [a for a in ordered_groups(present) if a in _TRAJ_ARMS]:
+        sub = traj[traj.arm == arm].dropna(subset=["divc"])
         if sub.empty:
             continue
-        ax.plot(sub.divc, sub["median"], "-o", ms=3, color=style["color"],
-                label=style["label"], zorder=3)
-        ax.fill_between(sub.divc, sub.lo, sub.hi, color=style["color"],
-                        alpha=0.18, lw=0, zorder=1)
+        ax.plot(sub.divc, sub["median"], "-o", ms=3, color=group_color(arm),
+                label=arm, zorder=3)
+        ax.fill_between(sub.divc, sub.lo, sub.hi, color=group_color(arm),
+                        alpha=0.12, lw=0, zorder=1)
+    if div_band is not None:
+        ax.axvspan(div_band[0], div_band[1], color="0.55", alpha=0.10, lw=0,
+                   zorder=0)
     ax.set_xlabel("DIV")
     ax.set_ylabel(METRIC_LABELS.get(metric, metric))
     ax.legend(fontsize=6, loc="best")
@@ -116,7 +121,7 @@ def build_f4(tidy, analysis_root):
     fig = plt.figure(figsize=(9.0, 5.6))
     gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.1], hspace=0.45, wspace=0.3)
 
-    # Row A: representative rasters (early vs late)
+    # Row A: representative rasters (early vs late) — demoted, illustrative.
     wuid = _pick_raster_well(tidy)
     axr0 = fig.add_subplot(gs[0, 0])
     axr1 = fig.add_subplot(gs[0, 1])
@@ -124,29 +129,53 @@ def build_f4(tidy, analysis_root):
         sub = tidy[tidy.well_uid == wuid].sort_values("DIV")
         r_early, r_late = sub.iloc[0], sub.iloc[-1]
         _panel_raster(axr0, analysis_root, r_early,
-                      f"A  {wuid.split('|')[0]} {r_early.well_name} — DIV {int(r_early.DIV)} (immature)")
+                      f"illustrative · single well — DIV {int(r_early.DIV)} (immature)")
         _panel_raster(axr1, analysis_root, r_late,
-                      f"   {wuid.split('|')[0]} {r_late.well_name} — DIV {int(r_late.DIV)} (mature)")
+                      f"illustrative · single well — DIV {int(r_late.DIV)} (mature)")
+        for a in (axr0, axr1):                 # mute the demoted example titles
+            a.set_title(a.get_title(), fontsize=7, color=MUTED)
+            for sp in a.spines.values():
+                sp.set_color("0.7")
+    axr0.annotate("A  Representative rasters — illustrative, single well",
+                  xy=(0, 1.14), xycoords="axes fraction", fontweight="bold",
+                  fontsize=9, annotation_clip=False)
 
-    # Row B/C: developmental trajectories
+    # DIV window that the treatment DiD (F5-F8) samples = the post-treatment span.
+    div_band = None
+    if "tau" in tidy.columns:
+        post = tidy[tidy.tau >= 0]
+        if not post.empty:
+            div_band = (float(post.DIV.min()), float(post.DIV.max()))
+
+    # Row B/C: developmental trajectories (per group, group palette).
     axt0 = fig.add_subplot(gs[1, 0])
     axt1 = fig.add_subplot(gs[1, 1])
-    _panel_trajectory(axt0, tidy, "median_firing_rate")
+    _panel_trajectory(axt0, tidy, "median_firing_rate", div_band=div_band)
     axt0.set_title("B  Firing-rate maturation", loc="left", fontweight="bold")
-    _panel_trajectory(axt1, tidy, "nb_rate")
+    _panel_trajectory(axt1, tidy, "nb_rate", div_band=div_band)
     axt1.set_title("C  Network-burst maturation", loc="left", fontweight="bold")
 
-    fig.suptitle("Figure 4 — Network activity & development (well_uid unit)",
+    fig.suptitle("Figure 4 — Network activity & development · the maturation "
+                 "baseline the treatment DiD (F5-F8) is read against",
                  fontsize=9, y=0.99)
+    band_txt = ("" if div_band is None else
+                f" The shaded DIV band ({int(div_band[0])}-{int(div_band[1])}) "
+                "marks the post-treatment window sampled by F5-F8.")
     caption(fig,
         "Network activity and its developmental maturation across the cohort. "
         "(A) Representative spike rasters of one well, early (immature, low DIV) "
-        "vs late, illustrating the activity increase with age. (B) Firing-rate "
-        "maturation and (C) network-burst maturation vs developmental age (DIV): "
-        "each line is a group, tracking the median metric across wells as the "
-        "culture matures. This establishes the maturation baseline against which "
-        "the treatment difference-in-differences (F5-F8) is read. Points "
-        "aggregate recordings to the well first (median).")
+        "vs late — illustrative single-well examples, not a group statistic. "
+        "(B) Firing-rate maturation and (C) network-burst maturation vs "
+        "developmental age (DIV): each line is a treatment arm (group palette, "
+        "Control neutral / IVH amber-sienna), tracking the median metric across "
+        "wells (95% bootstrap CI ribbon) as the culture matures. Each arm pools "
+        "ALL of that arm's recordings across DIV — including each treated well's "
+        "pre-treatment recordings — so the lines show per-arm development, not a "
+        "treatment contrast; any pre-band (DIV < treatment) separation is baseline "
+        "well-to-well variation, and the treatment effect is read only as the "
+        "difference-in-differences in F5-F8." + band_txt +
+        " This establishes the maturation baseline against which that DiD is read. "
+        "Points aggregate recordings to the well first (median).")
     return fig, {"raster_well": wuid}
 
 

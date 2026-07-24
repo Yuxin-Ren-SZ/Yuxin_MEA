@@ -44,11 +44,18 @@ def _hist_qc(ax, units, col, log=False) -> None:
     if log:
         ax.set_xscale("log")
     thr, direction = _THRESH[col]
+    # shade the RETAINED side of the gate + report the fraction passing
+    xlo, xhi = ax.get_xlim()
+    keep = (thr, xhi) if direction == ">" else (xlo, thr)
+    frac = float(np.mean(x > thr) if direction == ">" else np.mean(x < thr))
+    ax.axvspan(keep[0], keep[1], color=OKABE_ITO["green"], alpha=0.10, lw=0,
+               zorder=0)
     ax.axvline(thr, ls="--", color=OKABE_ITO["vermillion"], lw=1.0,
-               label=f"gate {direction}{thr:g}")
+               label=f"gate {direction}{thr:g}  ·  {frac * 100:.0f}% pass")
+    ax.set_xlim(xlo, xhi)
     ax.set_xlabel(col)
     ax.set_ylabel("units")
-    ax.legend(fontsize=6)
+    ax.legend(fontsize=6, loc="upper right" if direction == "<" else "upper left")
 
 
 def _panel_waveforms(ax, analysis_root, row) -> None:
@@ -65,18 +72,23 @@ def _panel_waveforms(ax, analysis_root, row) -> None:
     pt = (qm["peak_to_trough_duration"].to_numpy(float) * 1000.0
           if "peak_to_trough_duration" in qm else None)
     n = min(tmpl.shape[0], 40)
+    n_narrow = n_broad = 0
     for u in range(n):
         wf = tmpl[u]
         pk_ch = np.argmax(wf.max(0) - wf.min(0))  # widest peak-to-peak channel
         trace = wf[:, pk_ch]
         trace = trace / (np.abs(trace).max() + 1e-9)
         broad = pt is not None and u < len(pt) and pt[u] >= _PT_NARROW_MS
+        n_broad += broad
+        n_narrow += not broad
         ax.plot(t_ms, trace, lw=0.5, alpha=0.6,
                 color=(OKABE_ITO["orange"] if broad else OKABE_ITO["blue"]))
     ax.set_xlabel("time (ms)")
     ax.set_ylabel("norm. amplitude")
-    ax.plot([], [], color=OKABE_ITO["blue"], label=f"narrow (<{_PT_NARROW_MS}ms)")
-    ax.plot([], [], color=OKABE_ITO["orange"], label=f"broad (≥{_PT_NARROW_MS}ms)")
+    ax.plot([], [], color=OKABE_ITO["blue"],
+            label=f"narrow (<{_PT_NARROW_MS}ms) · n={n_narrow}")
+    ax.plot([], [], color=OKABE_ITO["orange"],
+            label=f"broad (≥{_PT_NARROW_MS}ms) · n={n_broad}")
     ax.legend(fontsize=6)
 
 

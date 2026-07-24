@@ -100,6 +100,32 @@ GENE_ALT_NAMES = {
     "SST": "somatostatin",
 }
 
+#: Cell-type family per gene, used to group heatmap rows so the story reads as a
+#: pattern: astrocyte marker (GFAP, ↑) first, then the neuronal/synaptic markers
+#: (↓). Genes not listed fall into "Other" and sort last.
+GENE_CELLTYPE = {
+    "GFAP": "Astrocyte", "OLIG2": "Oligodendrocyte",
+    "MAP2": "Neuronal", "PAX6": "Neural progenitor", "SOX2": "Neural progenitor",
+    "SLC17A7": "Excitatory synapse", "STX1A": "Synaptic",
+    "SLC32A1": "Inhibitory synapse", "PVALB": "Interneuron", "SST": "Interneuron",
+    "KCNMA1": "Ion channel", "KCNN2": "Ion channel", "HCN1": "Ion channel",
+}
+#: Row order of the cell-type families (astrocyte first → synaptic → channels).
+CELLTYPE_ORDER = ["Astrocyte", "Oligodendrocyte", "Neuronal",
+                  "Neural progenitor", "Excitatory synapse", "Inhibitory synapse",
+                  "Synaptic", "Interneuron", "Ion channel", "Other"]
+
+
+def celltype_ordered_genes(genes) -> list[str]:
+    """Order genes by cell-type family (GENE_CELLTYPE / CELLTYPE_ORDER), keeping
+    the within-family order from GENE_ORDER. Puts GFAP (astrocyte) on top."""
+    present = list(dict.fromkeys(genes))
+    def key(g):
+        fam = GENE_CELLTYPE.get(g, "Other")
+        return (CELLTYPE_ORDER.index(fam) if fam in CELLTYPE_ORDER else 99,
+                GENE_ORDER.index(g) if g in GENE_ORDER else 99, g)
+    return sorted(present, key=key)
+
 
 # --------------------------------------------------------------------------- #
 # Sample-name parsing
@@ -631,34 +657,41 @@ def build_f3(tidy: pd.DataFrame, genes: list[str] | None = None):
     """
     import matplotlib.pyplot as plt
     from matplotlib.colors import TwoSlopeNorm
-    from matplotlib.patches import Rectangle
+    from matplotlib.patches import Patch, Rectangle
 
+    from .report_style import MUTED, QC_NA, fc_div_cmap
+
+    # Story order: group rows by cell type (GFAP astrocyte first, then the
+    # neuronal / synaptic markers) so the pattern reads as a pattern.
+    if genes is None:
+        genes = celltype_ordered_genes(tidy.gene.dropna().unique())
     genes, columns, value, state, text = effect_matrix(tidy, genes)
     n_row, n_col = value.shape
 
-    # Colour limits from QC-pass cells only. The QC-failed Control D14 cells are
-    # the largest magnitudes on the map (MAP2 +6.89 = the 119x loading artefact);
-    # letting them set vmax would wash every real cell out — the 2D form of the
-    # axis clamp the trajectory panels already use.
-    vmax = float(np.nanmax(np.abs(value))) if np.isfinite(value).any() else 1.0
+    # Log-symmetric diverging fill, clipped at ±16× (log2 = ±4) so the QC-failed
+    # loading artefacts (MAP2 +6.89 = 119×) can never set the scale.
+    vmax = 4.0
     norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
-    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap = fc_div_cmap()
 
-    fig, ax = plt.subplots(figsize=(1.05 + 0.62 * n_col, 1.9 + 0.34 * n_row))
-    ax.imshow(np.ma.masked_invalid(value), cmap=cmap, norm=norm, aspect="auto")
+    fig, ax = plt.subplots(figsize=(1.35 + 0.62 * n_col, 2.1 + 0.34 * n_row))
+    ax.imshow(np.ma.masked_invalid(np.clip(value, -vmax, vmax)), cmap=cmap,
+              norm=norm, aspect="auto", zorder=1)
 
     for r in range(n_row):
         for c in range(n_col):
             if state[r, c] != "ok":
-                ax.add_patch(Rectangle((c - 0.5, r - 0.5), 1, 1, facecolor=_FAIL_COLOR,
-                                       edgecolor="none", zorder=2))
+                # QC-fail / n.a. → diagonal hatch (never a grey that reads as low)
+                ax.add_patch(Rectangle((c - 0.5, r - 0.5), 1, 1, facecolor=QC_NA,
+                                       edgecolor="#9A917C", hatch="////", lw=0.0,
+                                       zorder=2))
             if not text[r, c]:
                 continue
             ok = state[r, c] == "ok"
-            shade = abs(value[r, c]) / vmax if ok else 0.0
+            shade = min(abs(value[r, c]), vmax) / vmax if ok else 0.0
             ax.text(c, r, text[r, c], ha="center", va="center", fontsize=5.8,
-                    color="white" if shade > 0.62 else ("0.15" if ok else "0.45"),
-                    zorder=3)
+                    color="white" if shade > 0.62 else ("0.12" if ok else "0.40"),
+                    zorder=4)
 
     # --- column labels + block headers -------------------------------------
     interp = _interpolated_days(tidy)
@@ -672,8 +705,13 @@ def build_f3(tidy: pd.DataFrame, genes: list[str] | None = None):
     ax.set_ylim(n_row - 0.5, -0.5)
 
     n_dev = sum(1 for b, *_ in columns if b == "dev")
-    ax.axvline(n_dev - 0.5, color="black", lw=1.6)
-    _block_header(ax, 0, n_dev, "development\n(Control vs CT DIV 7)", "0.25")
+    # The maturation block is the baseline being SUBTRACTED OUT, not a result:
+    # set it apart with a wide gap line + a translucent overlay that mutes it, and
+    # a grey "removed" header (value labels stay legible on top).
+    ax.axvline(n_dev - 0.5, color="black", lw=2.2)
+    ax.add_patch(Rectangle((-0.5, -0.5), n_dev, n_row, facecolor="white",
+                           alpha=0.34, edgecolor="none", zorder=2.5))
+    _block_header(ax, 0, n_dev, "development — removed (context)", MUTED)
     c0 = n_dev
     for arm in [a for a in dict.fromkeys(col[2] for col in columns) if a]:
         width = sum(1 for col in columns if col[2] == arm)
@@ -682,10 +720,10 @@ def build_f3(tidy: pd.DataFrame, genes: list[str] | None = None):
             ax.axvline(c0 - 0.5, color="white", lw=1.4)
         c0 += width
 
-    # tier rule between priority-1 and priority-2 genes
-    tiers = [gene_tier(g) for g in genes]
+    # rule between cell-type families (rows are grouped GFAP↑ then neuronal↓)
+    fams = [GENE_CELLTYPE.get(g, "Other") for g in genes]
     for r in range(1, n_row):
-        if tiers[r] != tiers[r - 1]:
+        if fams[r] != fams[r - 1]:
             ax.axhline(r - 0.5, color="black", lw=1.0)
 
     ax.tick_params(length=0)
@@ -693,22 +731,34 @@ def build_f3(tidy: pd.DataFrame, genes: list[str] | None = None):
         spine.set_visible(False)
 
     cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax,
-                      fraction=0.022, pad=0.015)
+                      fraction=0.022, pad=0.015, extend="both")
     # Ticks are placed on the (log-spaced) colour axis but labelled in fold
     # change, so a 4x increase and a 4x decrease sit equally far from 1x.
-    ticks = [t for t in range(-12, 13) if abs(t) <= vmax]
+    ticks = [t for t in range(-4, 5)]
     cb.set_ticks(ticks)
     cb.set_ticklabels([fold_text(t) for t in ticks])
-    # Neutral unit: the two blocks use *different* references (Control vs its own
-    # baseline / arm vs time-matched Control), and the block headers say which.
-    # Naming one reference on the shared bar would mislabel the other block.
-    cb.set_label("fold-change", fontsize=6.5)
+    cb.set_label("fold-change (clip ±16×)", fontsize=6.5)
     cb.ax.tick_params(labelsize=6)
     cb.outline.set_visible(False)
 
+    # QC-fail / n.a. hatch key (below the heatmap, clear of the block headers)
+    ax.legend(handles=[Patch(facecolor=QC_NA, edgecolor="#9A917C", hatch="////",
+                             label="QC-fail / n.a. (excluded)")],
+              loc="upper right", bbox_to_anchor=(1.0, -0.06), fontsize=6,
+              frameon=False)
+
     fig.suptitle("Figure 3 — qPCR: treatment effect with development removed",
                  fontsize=9, x=0.02, ha="left", fontweight="bold")
-    fig.tight_layout(rect=(0, 0.06, 1, 0.93))
+    fig.text(0.985, 0.965, "PRELIMINARY · n=1 chip · technical duplicates · "
+             "no statistics", ha="right", va="top", fontsize=6.5,
+             color="#A83B00", fontweight="bold")
+    # Story callout printed on the figure.
+    fig.text(0.5, 0.028, "GFAP ↑ (astrogliosis) while MAP2 / VGLUT1 / VGAT ↓ "
+             "(neuronal & synaptic loss) — consistent across both IVH arms and "
+             "H₂O₂.", ha="center", va="bottom", fontsize=7.5, color="#5A5140",
+             bbox=dict(boxstyle="round,pad=0.4", facecolor="#FBF3E0",
+                       edgecolor="#C79A2E", lw=0.8))
+    fig.tight_layout(rect=(0, 0.075, 1, 0.92))
     caption(fig, _heatmap_footnote(tidy, interp).replace("\n", " "))
     return fig
 
@@ -744,7 +794,7 @@ def _heatmap_footnote(tidy: pd.DataFrame, interp: set[float]) -> str:
         f"efficiency (no standard curves run). {n_genes} of {len(GENE_ORDER)} "
         "planned target genes. Colour is spaced logarithmically about 1× so that "
         "an n-fold increase and an n-fold decrease are equally far from no change.",
-        "Grey = failed QC (reference-Cq shift, value in brackets) or no "
+        "Hatched = failed QC (reference-Cq shift, value in brackets) or no "
         "amplification (n.a.); excluded from the colour scale.",
     ]
     if interp:

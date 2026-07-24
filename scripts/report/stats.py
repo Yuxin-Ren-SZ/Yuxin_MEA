@@ -25,12 +25,12 @@ import pandas as pd
 # Metric families (mirrors METRIC_SPECS in compare_treatment_groups.py).
 RATIO_METRICS = [
     "nb_rate", "nb_count", "nb_duration_mean", "nb_spikes_per_burst_mean",
-    "nb_ibi_mean", "median_firing_rate", "n_curated",
+    "nb_ibi_mean", "nb_ibi_cv", "nb_duration_cv", "median_firing_rate", "n_curated",
     # Spatial / connectivity (non-negative -> log2 ratio valid)
     "activity_gini", "mean_prop_speed_um_ms", "edge_density", "small_worldness",
     "clustering_coeff", "global_efficiency",
     # Node-level graph metrics (non-negative, comfortably > 0)
-    "participation_mean", "degree_cv", "rich_club",
+    "degree_cv",
     # Criticality (exponents / non-negative)
     "aval_tau", "aval_alpha", "gamma_fit",
     # Directed / TE (non-negative, comfortably > 0)
@@ -45,6 +45,9 @@ DIFF_METRICS = [
     "reciprocity", "flow_hierarchy",                   # [0, 1], can be 0
     # near-zero fractions / TE — log2 ratio explodes, so use post-pre difference
     "hub_fraction", "leaf_fraction", "mean_betweenness", "mean_te",
+    # Bounded in [0, 1] and genuinely reaching 0 in sparse wells: a log2 ratio
+    # there produced −30 "responses" that swamped every other chip.
+    "participation_mean", "rich_club",
 ]
 ALL_METRICS = RATIO_METRICS + DIFF_METRICS
 
@@ -350,6 +353,196 @@ def arm_response_vs_control_lmm(
         out["suggestive"] = (out.chip_consistent & out.p_vs_control.notna()
                              & (out.p_vs_control < 0.05) & ~(out.q_bh < 0.05))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Per-time-point response — the ΔΔCq logic, applied to a time series
+# --------------------------------------------------------------------------- #
+# Pooling every post-treatment recording into one number (:func:`well_response`)
+# dilutes effects that emerge late and mixes time points that differ a lot. The
+# functions below keep the time axis:
+#
+#   1. each well is compared to **its own** pre-treatment baseline, per tau bin
+#      (the ΔCq step),
+#   2. the wells of a chip are averaged into one biological value per bin
+#      (technical replicates collapse — the chip is the biological replicate),
+#   3. each chip's treated value minus that chip's own Control value is its DiD
+#      (the ΔΔ step),
+#   4. inference is a one-sample t-test of those per-chip DiDs against 0
+#      (df = n_chips − 1) at **one pre-specified endpoint**.
+#
+# Testing every tau bin would multiply the FDR family by the number of bins and,
+# at n=3 chips, suppress everything; the full time course is still returned for
+# plotting, but only the endpoint enters the family. See :func:`did_at_endpoint`.
+
+#: Post-treatment bins, right-closed: (0,4], (4,8], … labelled by bin centre.
+POST_TAU_EDGES = [0, 4, 8, 12, 16, 20, 24, 28]
+
+
+def _tau_bin(tau: pd.Series, edges=POST_TAU_EDGES) -> pd.Series:
+    cats = pd.cut(tau, edges, right=True)
+    return cats.map(lambda c: (c.left + c.right) / 2 if pd.notna(c) else np.nan)
+
+
+def well_response_by_tau(
+    tidy: pd.DataFrame,
+    metrics: list[str] | None = None,
+    edges: list[float] = POST_TAU_EDGES,
+) -> pd.DataFrame:
+    """Per well × metric × post-tau bin: response vs that well's own baseline.
+
+    baseline = median over the well's ``tau < 0`` recordings (recordings on the
+    treatment day itself, ``tau == 0``, count as neither pre nor post).
+    response = ``log2((post+eps)/(baseline+eps))`` for ratio metrics,
+               ``post − baseline`` for diff metrics — same convention as
+    :func:`well_response`, so the two agree when a single bin is used.
+
+    Control wells are included: their response is the maturation-only change over
+    the same interval, and every treated arm is read against it.
+    """
+    metrics = metrics or ALL_METRICS
+    metrics = [m for m in metrics if m in tidy.columns]
+    rows = []
+    for wuid, sub in tidy.groupby("well_uid"):
+        pre = sub[sub.tau < 0]
+        post = sub[sub.tau > 0]
+        if pre.empty or post.empty:
+            continue
+        arm = arm_of(sub.canonical_group)
+        chip = sub.sample_id.iloc[0]
+        post = post.assign(tauc=_tau_bin(post.tau, edges))
+        for m in metrics:
+            b = pre[m].median()
+            if pd.isna(b):
+                continue
+            for tc, grp in post.groupby("tauc"):
+                if pd.isna(tc):
+                    continue
+                p = grp[m].median()
+                if pd.isna(p):
+                    continue
+                resp = (p - b) if m in DIFF_METRICS else np.log2((p + _EPS) / (b + _EPS))
+                rows.append(dict(
+                    well_uid=wuid, chip=chip, arm=arm, metric=m, tauc=float(tc),
+                    baseline=b, post=p, response=resp,
+                    n_pre=len(pre), n_post=len(grp),
+                ))
+    return pd.DataFrame(rows)
+
+
+def chip_response_by_tau(resp: pd.DataFrame) -> pd.DataFrame:
+    """Per (chip, arm, metric, tau bin): mean of the well responses = one
+    *biological* value. Wells are technical replicates and collapse here."""
+    if resp.empty:
+        return resp
+    return (resp.groupby(["chip", "arm", "metric", "tauc"], as_index=False)
+            .response.mean())
+
+
+def did_by_tau(resp: pd.DataFrame) -> pd.DataFrame:
+    """Per chip × treated arm × metric × tau bin: that chip's own treated−Control
+    difference-in-differences. Only chips carrying both contribute."""
+    if resp.empty:
+        return pd.DataFrame(columns=["chip", "arm", "metric", "tauc", "response",
+                                     "ctrl_response", "did"])
+    cr = chip_response_by_tau(resp)
+    ctrl = (cr[cr.arm == "Control"][["chip", "metric", "tauc", "response"]]
+            .rename(columns={"response": "ctrl_response"}))
+    tr = cr[cr.arm != "Control"].merge(ctrl, on=["chip", "metric", "tauc"], how="inner")
+    tr["did"] = tr.response - tr.ctrl_response
+    return tr[["chip", "arm", "metric", "tauc", "response", "ctrl_response", "did"]]
+
+
+def primary_endpoint(resp: pd.DataFrame, focus_arms: list[str] | None = None) -> float:
+    """The latest tau bin that every chip still contributes to — the endpoint the
+    DiD is tested at.
+
+    Chips stop recording at different treatment days (CX138 ends at tau 15 while
+    CX118/CX169 run to 27), so the last bin *present* is not the last bin that is
+    a fair n=3 comparison. Pick the latest bin where the number of chips equals
+    the study's chip count, for Control and for every focus arm. Falls back to the
+    bin with the most chips when no bin is complete.
+    """
+    d = did_by_tau(resp)
+    if d.empty:
+        return float("nan")
+    if focus_arms:
+        d = d[d.arm.isin(focus_arms)]
+        if d.empty:
+            return float("nan")
+    n_target = resp.chip.nunique()
+    per_bin = d.groupby("tauc").chip.nunique()
+    complete = per_bin[per_bin >= n_target]
+    if len(complete):
+        return float(complete.index.max())
+    return float(per_bin.idxmax())
+
+
+def did_at_endpoint(
+    resp: pd.DataFrame,
+    focus_arms: list[str] | None = None,
+    endpoint: float | None = None,
+) -> pd.DataFrame:
+    """Chip-level DiD at one endpoint, with p and BH-FDR q over this metric set.
+
+    One row per (arm, metric). ``p_vs_control`` is a one-sample t-test of the
+    per-chip DiDs against 0 (df = n_chips − 1 — the honest biological-replicate
+    df); ``q_bh`` corrects across **all rows of this call**, so callers must pass
+    the whole metric family a figure reports, not one metric at a time.
+
+    Significance glyphs read from these two columns only:
+    ``*`` when ``q_bh < 0.05``; ``△`` when ``p_vs_control < 0.05 <= q_bh``.
+    ``chip_consistent`` (same sign on every chip) is reported for context but no
+    longer gates either glyph.
+    """
+    if resp.empty:
+        return pd.DataFrame()
+    arms = focus_arms or [a for a in resp.arm.unique() if a != "Control"]
+    d = did_by_tau(resp)
+    ep = endpoint if endpoint is not None else primary_endpoint(resp, arms)
+    rows = []
+    for m in sorted(resp.metric.unique()):
+        for a in arms:
+            sub = d[(d.metric == m) & (d.arm == a) & (d.tauc == ep)]
+            cd = sub.did.to_numpy(float)
+            cd = cd[~np.isnan(cd)]
+            n_wells = int(resp[(resp.metric == m) & (resp.arm == a)
+                               & (resp.tauc == ep)].response.notna().sum())
+            rows.append(dict(
+                arm=a, metric=m, endpoint_tau=ep,
+                n_chips_paired=len(cd), n_wells=n_wells,
+                did=float(np.mean(cd)) if len(cd) else np.nan,
+                did_sd=float(np.std(cd, ddof=1)) if len(cd) > 1 else np.nan,
+                chip_consistent=bool(len(cd) >= 2
+                                     and (np.all(cd > 0) or np.all(cd < 0))),
+                p_vs_control=_ttest_did_vs_zero(cd),
+            ))
+    out = pd.DataFrame(rows)
+    out["q_bh"] = _bh_fdr(out.p_vs_control.to_numpy())
+    return out
+
+
+def arm_summary_at_endpoint(resp: pd.DataFrame, endpoint: float) -> pd.DataFrame:
+    """Per arm × metric at one tau bin: mean of the per-chip means + 95% t-CI
+    (df = n_chips − 1). The bar and whisker every DiD panel draws."""
+    from scipy.stats import t as tdist
+
+    cr = chip_response_by_tau(resp)
+    cr = cr[cr.tauc == endpoint]
+    rows = []
+    for (arm, m), sub in cr.groupby(["arm", "metric"]):
+        x = sub.response.to_numpy(float)
+        x = x[~np.isnan(x)]
+        n = len(x)
+        mean = float(np.mean(x)) if n else np.nan
+        if n >= 2:
+            h = float(tdist.ppf(0.975, n - 1)) * float(np.std(x, ddof=1) / np.sqrt(n))
+            lo, hi = mean - h, mean + h
+        else:
+            lo = hi = mean
+        rows.append(dict(arm=arm, metric=m, n_chips=n, mean=mean,
+                         ci_low=lo, ci_high=hi))
+    return pd.DataFrame(rows)
 
 
 def cliffs_delta(a: np.ndarray, b: np.ndarray) -> float:

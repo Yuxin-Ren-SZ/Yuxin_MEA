@@ -24,7 +24,8 @@ import pandas as pd
 
 from . import load as L
 from . import stats as S
-from .report_style import caption, save_fig
+from .report_style import (
+    MUTED, STATE_BURST, STATE_REST, caption, group_color, save_fig)
 
 # UMAP params mirror the pipeline; n_components=2 for display.
 _UMAP_KW = dict(n_neighbors=30, min_dist=0.0, n_components=2, random_state=42)
@@ -48,8 +49,8 @@ SELECTED_WELLS = {
 N_TIMEPOINTS = 4
 COL_STAGES = ["Day 0\n(treatment)", "early\n(~⅓ window)",
               "mid\n(~⅔ window)", "latest\nrecorded"]
-_REST_C = "#4477aa"
-_BURST_C = "#d62728"
+_REST_C = STATE_REST          # network-state palette (shared with F6)
+_BURST_C = STATE_BURST
 
 
 def _stride_keep(n: int, k: int, seed: int = 0) -> np.ndarray:
@@ -143,11 +144,16 @@ def build_umap_migration(tidy, analysis_root):
     n_rows, n_cols = len(ROW_ARMS), N_TIMEPOINTS
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.0 * n_cols, 3.0 * n_rows),
                              squeeze=False)
+    def _rest_centroid(d, day):
+        sel = (d["tau"] == day) & ~d["is_burst"]
+        return d["emb"][sel].mean(axis=0) if sel.sum() >= 5 else None
+
     for ri, arm in enumerate(ROW_ARMS):
         d, _ = pooled[arm]
         grey_idx = (_stride_keep(len(d["emb"]), _GREY_SAMPLE)
                     if d is not None else None)
         days = _auto_days(d["tau"]) if d is not None else []
+        cents = [_rest_centroid(d, dy) for dy in days] if d is not None else []
         for ci in range(n_cols):
             ax = axes[ri, ci]
             ax.set_xticks([]); ax.set_yticks([])
@@ -157,29 +163,46 @@ def build_umap_migration(tidy, analysis_root):
                 ax.text(0.5, 0.5, "no debug traces", ha="center", va="center",
                         transform=ax.transAxes, fontsize=7)
                 continue
-            # faint context: subsample of the full embedding (display only)
+            # faint shared background manifold so the state clusters pop
             g = d["emb"][grey_idx]
-            ax.scatter(g[:, 0], g[:, 1], s=1.0, c="0.88", lw=0, zorder=1,
-                       rasterized=True)
+            ax.scatter(g[:, 0], g[:, 1], s=1.0, c="0.86", lw=0, alpha=0.3,
+                       zorder=1, rasterized=True)
             day = days[ci] if ci < len(days) else None
             if day is not None:
-                # colored day = 100% of that day's bins
+                # colored day = 100% of that day's bins (small, soft)
                 sel = d["tau"] == day
                 rest = sel & ~d["is_burst"]
                 brst = sel & d["is_burst"]
-                ax.scatter(d["emb"][rest, 0], d["emb"][rest, 1], s=2,
-                           c=_REST_C, lw=0, alpha=0.5, zorder=2, rasterized=True)
-                ax.scatter(d["emb"][brst, 0], d["emb"][brst, 1], s=4,
-                           c=_BURST_C, lw=0, alpha=0.75, zorder=3, rasterized=True)
+                ax.scatter(d["emb"][rest, 0], d["emb"][rest, 1], s=1.2,
+                           c=_REST_C, lw=0, alpha=0.7, zorder=2, rasterized=True)
+                ax.scatter(d["emb"][brst, 0], d["emb"][brst, 1], s=2.4,
+                           c=_BURST_C, lw=0, alpha=0.7, zorder=3, rasterized=True)
+                # make the resting-cluster migration literal: arrow from the
+                # previous shown day's centroid to this day's.
+                if ci > 0 and ci < len(cents) and cents[ci] is not None \
+                        and cents[ci - 1] is not None:
+                    p0, p1 = cents[ci - 1], cents[ci]
+                    ax.annotate("", xy=(p1[0], p1[1]), xytext=(p0[0], p0[1]),
+                                arrowprops=dict(arrowstyle="->", color=MUTED,
+                                                lw=1.0, alpha=0.9), zorder=4)
+                if cents[ci] is not None:
+                    ax.scatter(*cents[ci], s=22, marker="X", c=MUTED,
+                               edgecolor="white", linewidth=0.5, zorder=5)
             note = f"Day {day}" if day is not None else "n/a"
             ax.text(0.03, 0.96, note, transform=ax.transAxes, fontsize=6.5,
                     va="top", ha="left", color="0.25")
             if ci == 0:
-                ax.set_ylabel(arm, fontsize=8, fontweight="bold")
-    # single resting/burst legend
-    axes[0, -1].scatter([], [], s=8, c=_REST_C, label="resting")
-    axes[0, -1].scatter([], [], s=8, c=_BURST_C, label="bursting")
-    axes[0, -1].legend(loc="lower right", fontsize=6, markerscale=1.5)
+                ax.set_ylabel(arm, fontsize=8, fontweight="bold",
+                              color=group_color(arm))
+    # single shared network-state legend, top-right of the figure
+    h_rest = axes[0, -1].scatter([], [], s=10, c=_REST_C, label="resting")
+    h_brst = axes[0, -1].scatter([], [], s=10, c=_BURST_C, label="bursting")
+    h_cent = axes[0, -1].scatter([], [], s=22, marker="X", c=MUTED,
+                                 edgecolor="white", linewidth=0.5,
+                                 label="rest centroid → migration")
+    fig.legend(handles=[h_rest, h_brst, h_cent], loc="upper right",
+               bbox_to_anchor=(0.995, 0.995), fontsize=6.5, markerscale=1.3,
+               frameon=False)
     fig.suptitle("Figure 6b — Post-treatment network-state dynamics "
                  "(per-well pooled UMAP; fixed axes across treatment days)",
                  fontsize=8.5, y=1.0)

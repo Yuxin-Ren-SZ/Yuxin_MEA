@@ -95,6 +95,13 @@ METRIC_SPECS: dict[str, dict[str, Any]] = {
                                  "get": lambda m: _nested(m, "network_bursts", "spikes_per_burst", "mean")},
     "nb_ibi_mean": {"source": "burst", "kind": "ratio",
                     "get": lambda m: _nested(m, "network_bursts", "inter_event_interval", "mean")},
+    # Burst regularity: CV of the inter-burst intervals (and of burst duration).
+    # Both are already computed by the detector; they are the "burst variability"
+    # readouts F4 tracks across maturation.
+    "nb_ibi_cv": {"source": "burst", "kind": "ratio",
+                  "get": lambda m: _nested(m, "network_bursts", "inter_event_interval", "cv")},
+    "nb_duration_cv": {"source": "burst", "kind": "ratio",
+                       "get": lambda m: _nested(m, "network_bursts", "duration", "cv")},
     # --- Firing / activity (curation quality_metrics) ------------------------
     "median_firing_rate": {"source": "curation", "kind": "ratio",
                            "get": lambda m: m.get("median_firing_rate")},

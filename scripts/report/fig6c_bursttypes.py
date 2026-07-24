@@ -38,7 +38,7 @@ import pandas as pd
 
 from . import load as L
 from . import stats as S
-from .report_style import caption, group_color, ordered_groups, save_fig
+from .report_style import MUTED, caption, group_color, ordered_groups, save_fig
 
 FOCUS_GROUPS = ["Control", "IVH_Early", "IVH_Late"]
 # Raw, biologically interpretable burst-level metrics (network_bursts.pkl).
@@ -54,7 +54,10 @@ LOG_FEATURES = {"within_burst_fr", "total_spikes", "burst_peak",
                 "synchrony_energy", "duration_s"}
 _MAX_ROWS_PER_GROUP = 40     # well-recordings sampled per group (I/O bound)
 _MAX_BURSTS = 9000           # cap pooled bursts before UMAP
-_ARCH_PALETTE = ["#4477aa", "#ee6677", "#228833", "#ccbb44", "#aa3377", "#66ccee"]
+# Dedicated qualitative archetype palette — deliberately distinct from the group
+# palette (amber/sienna/grey) AND the network-state palette (rest #3D6FB4 /
+# burst #D1495B), so archetype colour is never confused with either.
+_ARCH_PALETTE = ["#44AA99", "#882255", "#999933", "#AA4499", "#117733", "#DDCC77"]
 
 
 def _stars(q: float) -> str:
@@ -235,48 +238,23 @@ def build_f6c(tidy, analysis_root, seed: int = 0):
 
     from .trajectory import DEFAULT_TAU_EDGES
 
-    fig = plt.figure(figsize=(10.6, 10.6))
-    outer = fig.add_gridspec(2, 1, height_ratios=[3.0, 0.95], hspace=0.45)
-    gs = outer[0].subgridspec(1, 2, width_ratios=[1.2, 1.0], wspace=0.32)
-    gl = gs[0, 0].subgridspec(3, 1, hspace=0.5)
-    axA = fig.add_subplot(gl[0]); axB = fig.add_subplot(gl[1]); axD = fig.add_subplot(gl[2])
     groups = [g for g in ordered_groups(bursts.group.unique())]
 
-    # A — coloured by group
-    for g in groups:
-        m = bursts.group.to_numpy() == g
-        axA.scatter(emb[m, 0], emb[m, 1], s=3, c=group_color(g), lw=0, alpha=0.5,
-                    label=g, rasterized=True)
-    axA.set_xticks([]); axA.set_yticks([]); axA.set_xlabel("UMAP-1"); axA.set_ylabel("UMAP-2")
-    axA.legend(fontsize=6, markerscale=2, loc="best")
-    axA.set_title("A  Burst feature space by group", loc="left", fontweight="bold")
-
-    # B — coloured by global archetype
-    for a in range(k):
-        m = labels == a
-        axB.scatter(emb[m, 0], emb[m, 1], s=3, c=_ARCH_PALETTE[a % len(_ARCH_PALETTE)],
-                    lw=0, alpha=0.6, label=anames[a], rasterized=True)
-    axB.set_xticks([]); axB.set_yticks([]); axB.set_xlabel("UMAP-1")
-    axB.legend(fontsize=6, markerscale=2, loc="best", title=f"archetype (k={k})",
-               title_fontsize=6)
-    axB.set_title("B  Global burst archetypes", loc="left", fontweight="bold")
-
-    # D — archetype feature profiles (standardised means)
-    im = axD.imshow(prof, aspect="auto", cmap="RdBu_r", vmin=-1.5, vmax=1.5)
-    axD.set_xticks(range(len(FEATURES)))
-    axD.set_xticklabels(FEAT_LABELS, rotation=45, ha="right", fontsize=6)
-    axD.set_yticks(range(k)); axD.set_yticklabels(anames, fontsize=7)
-    cb = fig.colorbar(im, ax=axD, shrink=0.8, pad=0.02)
-    cb.set_label("z-score", fontsize=6); cb.ax.tick_params(labelsize=6)
-    axD.set_title("D  Archetype feature profiles", loc="left", fontweight="bold")
-
-    # C — archetype composition vs treatment day (tau); arms stacked vertically,
-    # SHARED tau x-axis. Pooling all days hid the temporal shift.
+    # ---- composition + significance (per-well fractions; stats UNCHANGED) ----
     wc0 = (bursts.groupby(["well_uid", "group", "arch"]).size()
            .unstack("arch", fill_value=0))
     wc0 = wc0.div(wc0.sum(axis=1), axis=0).reset_index()
     cstats = _composition_stats(wc0, k, groups)
     n_sig = int((cstats.q < 0.05).sum()) if not cstats.empty else 0
+    sig_arch = (set(int(a) for a in cstats.loc[cstats.q < 0.05, "arch"])
+                if not cstats.empty else set())
+    sig_by_arm: dict = {}
+    if not cstats.empty:
+        for _, r in cstats[cstats.q < 0.05].iterrows():
+            sig_by_arm.setdefault(r.arm, []).append(int(r.arch))
+
+    def _arch_label(a):
+        return anames[a] + ("  ★ FDR" if a in sig_arch else "")
 
     armmap = S.well_index(tidy).set_index("well_uid").arm
     bt = bursts.assign(arm=bursts.well_uid.map(armmap))
@@ -284,11 +262,21 @@ def build_f6c(tidy, analysis_root, seed: int = 0):
     bt["tauc"] = pd.cut(bt.tau, DEFAULT_TAU_EDGES, right=False).map(
         lambda c: (c.left + c.right) / 2 if pd.notna(c) else np.nan)
     arms_present = [a for a in ordered_groups(bt.arm.unique()) if a in FOCUS_GROUPS]
-    gsc = gs[0, 1].subgridspec(len(arms_present), 1, hspace=0.15)
+
+    # ---- figure: MAIN (composition + feature profiles) over a demoted strip ----
+    fig = plt.figure(figsize=(10.4, 10.8))
+    outer = fig.add_gridspec(2, 1, height_ratios=[2.15, 1.0], top=0.85,
+                             bottom=0.06, hspace=0.6)
+    main = outer[0].subgridspec(1, 2, width_ratios=[1.4, 1.0], wspace=0.36)
+    main_top = outer[0].get_position(fig).y1
+    fig.text(0.09, main_top + 0.055, "C  Archetype composition vs treatment day",
+             fontweight="bold", fontsize=9, ha="left", va="bottom")
+
+    # C (LEAD) — archetype composition vs treatment day, one stacked panel/arm.
+    gsc = main[0, 0].subgridspec(len(arms_present), 1, hspace=0.16)
     prev = None
     for i, arm in enumerate(arms_present):
-        axc = fig.add_subplot(gsc[i], sharex=prev)
-        prev = axc
+        axc = fig.add_subplot(gsc[i], sharex=prev); prev = axc
         sub = bt[bt.arm == arm]
         wtf = (sub.groupby(["well_uid", "tauc", "arch"]).size()
                .unstack("arch", fill_value=0))
@@ -299,54 +287,95 @@ def build_f6c(tidy, analysis_root, seed: int = 0):
                   for a in range(k)]
             axc.stackplot(comp.index.astype(float), *ys,
                           colors=[_ARCH_PALETTE[a % len(_ARCH_PALETTE)] for a in range(k)],
-                          labels=anames)
+                          labels=[_arch_label(a) for a in range(k)])
         axc.axvline(0, ls=":", color="0.3", lw=0.8)
         axc.set_ylim(0, 1); axc.set_yticks([0, 0.5, 1.0])
-        axc.set_ylabel(arm, fontsize=7, rotation=0, ha="right", va="center")
+        axc.set_ylabel(arm, fontsize=7.5, rotation=0, ha="right", va="center",
+                       color=group_color(arm), fontweight="bold")
         axc.tick_params(labelsize=6)
+        if arm in sig_by_arm:          # flag this arm's FDR-significant archetype
+            names = ", ".join(anames[a] for a in sig_by_arm[arm])
+            axc.text(0.99, 0.05, f"★ {names} differs from Control (FDR)",
+                     transform=axc.transAxes, ha="right", va="bottom",
+                     fontsize=6, color="#B2182B", fontweight="bold")
         if i < len(arms_present) - 1:
             axc.tick_params(labelbottom=False)
         else:
             axc.set_xlabel("treatment day (tau)", fontsize=7)
         if i == 0:
-            axc.annotate("C  Archetype composition vs treatment day",
-                         xy=(0, 1.25), xycoords="axes fraction", fontweight="bold",
-                         fontsize=9)
-            axc.legend(fontsize=5, ncol=k, loc="lower center",
-                       bbox_to_anchor=(0.5, 1.02), frameon=False)
+            axc.legend(fontsize=5.5, ncol=min(k, 3), loc="lower left",
+                       bbox_to_anchor=(0.0, 1.03), frameon=False)
 
-    # E — one example burst raster per archetype (-0.5 s to +0.5 s around burst)
+    # D — archetype feature profiles; y-labels are the colour+name key for C.
+    axD = fig.add_subplot(main[0, 1])
+    im = axD.imshow(prof, aspect="auto", cmap="RdBu_r", vmin=-1.5, vmax=1.5)
+    axD.set_xticks(range(len(FEATURES)))
+    axD.set_xticklabels(FEAT_LABELS, rotation=45, ha="right", fontsize=6)
+    axD.set_yticks(range(k))
+    axD.set_yticklabels([_arch_label(a) for a in range(k)], fontsize=7)
+    for a, tick in enumerate(axD.get_yticklabels()):     # colour = archetype key
+        tick.set_color("#B2182B" if a in sig_arch else
+                       _ARCH_PALETTE[a % len(_ARCH_PALETTE)])
+        if a in sig_arch:
+            tick.set_fontweight("bold")
+    cb = fig.colorbar(im, ax=axD, shrink=0.8, pad=0.02)
+    cb.set_label("z-score", fontsize=6); cb.ax.tick_params(labelsize=6)
+    axD.set_title("D  What defines each archetype", loc="left",
+                  fontweight="bold", fontsize=9)
+
+    # ---- DEMOTED method strip: UMAPs (by group / by archetype) + rasters ----
     reps = _rep_bursts(bursts, Z, labels, k)
-    gsr = outer[1].subgridspec(1, k, wspace=0.28)
+    strip = outer[1].subgridspec(1, 2 + k, wspace=0.32)
+    axA = fig.add_subplot(strip[0]); axB = fig.add_subplot(strip[1])
+    for g in groups:
+        m = bursts.group.to_numpy() == g
+        axA.scatter(emb[m, 0], emb[m, 1], s=2, c=group_color(g), lw=0, alpha=0.45,
+                    rasterized=True)
+    axA.set_xticks([]); axA.set_yticks([])
+    axA.text(0.03, 0.97, "UMAP · by group", transform=axA.transAxes, va="top",
+             ha="left", fontsize=6.5, color=MUTED)
     for a in range(k):
-        axr = fig.add_subplot(gsr[a])
+        m = labels == a
+        axB.scatter(emb[m, 0], emb[m, 1], s=2,
+                    c=_ARCH_PALETTE[a % len(_ARCH_PALETTE)], lw=0, alpha=0.55,
+                    rasterized=True)
+    axB.set_xticks([]); axB.set_yticks([])
+    axB.text(0.03, 0.97, "UMAP · by archetype", transform=axB.transAxes, va="top",
+             ha="left", fontsize=6.5, color=MUTED)
+    for a in range(k):
+        axr = fig.add_subplot(strip[2 + a])
         if a in reps:
             _burst_raster(axr, analysis_root, reps[a],
                           _ARCH_PALETTE[a % len(_ARCH_PALETTE)], anames[a])
-        if a == 0:
-            axr.annotate("E  Example burst raster per archetype (−0.5 to +0.5 s)",
-                         xy=(0, 1.28), xycoords="axes fraction", fontweight="bold",
-                         fontsize=9)
+            axr.set_title("")     # move the archetype name inside to clear header
+            axr.text(0.03, 0.98, anames[a], transform=axr.transAxes, va="top",
+                     ha="left", fontsize=7, fontweight="bold",
+                     color=_ARCH_PALETTE[a % len(_ARCH_PALETTE)])
+    fig.text(0.09, outer[1].get_position(fig).y1 + 0.014,
+             "Method context (demoted) — burst feature space (UMAP: by group / by "
+             "archetype) + one example raster per archetype",
+             fontweight="bold", fontsize=8, color=MUTED)
 
     sep = ("composition does not separate groups" if n_sig == 0
            else f"{n_sig} archetype fraction(s) differ from Control (BH-FDR)")
     fig.suptitle(f"Figure 6c — The pipeline resolves {k} reproducible burst "
                  f"archetypes; {sep} "
                  f"({len(bursts)} bursts, {bursts.well_uid.nunique()} wells)",
-                 fontsize=8.5, y=1.0)
-    fig.tight_layout()
+                 fontsize=8.5, y=0.965)
     caption(fig,
-        f"Cohort-wide burst archetypes. Every detected network burst from the "
-        f"focus groups is pooled and embedded by its features, then clustered "
-        f"into {k} reproducible archetypes (named by their properties). "
-        f"(A) Burst feature space coloured by group; (B) the same space coloured "
-        f"by archetype. (C) Archetype composition vs treatment day (tau), one "
-        f"stacked panel per arm on a shared x-axis: each band = the group-mean "
-        f"fraction of bursts in that archetype, averaged across wells (each well "
-        f"weighted equally). (D) Mean feature profile of each archetype. "
-        f"(E) One example raster per archetype (−0.5 to +0.5 s around the burst). "
-        f"Whether composition separates groups is tested per archetype (per-well "
-        f"fraction, Mann-Whitney vs Control, BH-FDR): {sep.lower()}.")
+        f"Cohort-wide burst archetypes; the figure leads with the finding "
+        f"(composition + what the archetypes are). Every detected network burst "
+        f"from the focus groups is pooled, embedded by its features and clustered "
+        f"into {k} reproducible archetypes (named by their properties). (C) "
+        f"Archetype composition vs treatment day (tau), one stacked panel per arm "
+        f"on a shared x-axis: each band = the group-mean fraction of bursts in "
+        f"that archetype, averaged across wells (each weighted equally); a ★ marks "
+        f"an archetype whose per-well fraction differs from Control (per-arm "
+        f"Mann-Whitney, BH-FDR). (D) Mean standardised feature profile of each "
+        f"archetype (the colour-coded name key for C). Method context (demoted): "
+        f"the burst feature space (UMAP, coloured by group and by archetype) and "
+        f"one example raster per archetype (−0.5 to +0.5 s around the burst). "
+        f"Result: {sep.lower()}.")
     return fig, {"n_bursts": int(len(bursts)), "k": int(k),
                  "n_wells": int(bursts.well_uid.nunique()),
                  "n_composition_sig": n_sig,

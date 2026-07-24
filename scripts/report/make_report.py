@@ -34,7 +34,14 @@ from .report_style import apply_style, report_dir, resolve_roots
 
 logger = logging.getLogger("report")
 
-MAIN = ["f1", "f2", "f3", "f4", "f5", "f6", "f6b", "f6c", "f7", "f7b", "f8"]
+# The main figures are built panel-by-panel now — see ``render_panels.py`` and
+# ``assemble_figure.py``. The composed ``build_fN`` functions below are kept for
+# the supplement only: they still carry their own baked-in captions, which
+# describe the *old* significance rule (a △ that also required the same direction
+# on all three chips) and would contradict the glyphs the shared modules now draw.
+# They are therefore no longer part of the default build.
+MAIN: list[str] = []
+LEGACY_MAIN = ["f1", "f2", "f3", "f4", "f5", "f6", "f6b", "f6c", "f7", "f7b", "f8"]
 SUPP = ["s1", "s2", "s3", "s4", "s5", "s6"]
 
 
@@ -127,7 +134,12 @@ def main(argv=None) -> int:
     p.add_argument("--config", default=None,
                    help="pipeline config JSON (default: pipeline_config_local.json)")
     p.add_argument("--figures", nargs="*", default=["all"],
-                   help="figure ids to build: f1..f6 s1..s4, or 'all'")
+                   help="figure ids to build. 'all' now means the supplement "
+                        "(s1..s6) only — the main figures F2-F8 are built as "
+                        "individual panels by scripts.report.render_panels. The "
+                        "legacy composed builders are still reachable by naming "
+                        "them explicitly (e.g. --figures f5), but their baked-in "
+                        "captions describe the superseded significance rule.")
     p.add_argument("--qpcr-dir", default=None,
                    help="qPCR analysis root holding one directory per plate "
                         "(F3 marker genes + S5 reference-gene screen)")

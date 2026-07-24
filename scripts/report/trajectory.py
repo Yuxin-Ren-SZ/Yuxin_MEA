@@ -14,7 +14,38 @@ import pandas as pd
 from . import stats as S
 from .report_style import METRIC_LABELS, group_color, ordered_groups
 
-DEFAULT_TAU_EDGES = list(range(-6, 22, 4))     # treatment-day bins
+#: Treatment-day bins. Runs past tau 21 so the stated experiment window is fully
+#: covered (CX118/CX169 record to tau 27).
+DEFAULT_TAU_EDGES = list(range(-6, 30, 4))
+
+#: The stated experiment window, in treatment days. Chips differ in absolute DIV,
+#: so every figure aligns on tau and marks the same two days.
+EXPERIMENT_RANGE = (0, 21)
+
+
+def tau_band(ax, start: float = EXPERIMENT_RANGE[0], end: float = EXPERIMENT_RANGE[1],
+             *, label: bool = False) -> None:
+    """Mark the experiment window: dashed verticals at tau=start and tau=end.
+
+    ``start`` is the treatment day (tau 0) and ``end`` the last planned
+    treatment day; the span between is tinted very faintly so the window reads as
+    a region without competing with the data. Used by every trajectory panel so
+    all figures share one time reference.
+    """
+    from .report_style import GRID, MUTED
+
+    ax.axvspan(start, end, color=GRID, alpha=0.35, lw=0, zorder=0)
+    for x in (start, end):
+        ax.axvline(x, ls="--", color=MUTED, lw=0.8, zorder=1)
+    if label:
+        ax.annotate(f"treatment day {start:g}", xy=(start, 1.0),
+                    xycoords=("data", "axes fraction"), xytext=(2, -2),
+                    textcoords="offset points", ha="left", va="top",
+                    fontsize=5.5, color=MUTED)
+        ax.annotate(f"day {end:g}", xy=(end, 1.0),
+                    xycoords=("data", "axes fraction"), xytext=(2, -2),
+                    textcoords="offset points", ha="left", va="top",
+                    fontsize=5.5, color=MUTED)
 
 
 def _boot_ci(x, seed=0, n=2000):
@@ -50,9 +81,18 @@ def tau_trajectory(tidy, metric, arms, tau_edges=DEFAULT_TAU_EDGES):
 
 
 def plot_trajectory(ax, tidy, metric, arms, tau_edges=DEFAULT_TAU_EDGES,
-                    ref=None, ylabel=None, legend=True, title=None):
-    """Draw metric-vs-tau per arm (line + ribbon), tau=0 marker, optional ref line."""
+                    ref=None, ylabel=None, legend=True, title=None,
+                    band: bool = True, band_label: bool = False):
+    """Draw metric-vs-tau per arm: line + 95% CI ribbon, experiment-window marks.
+
+    ``band`` draws the shared tau 0 / tau 21 dashed markers (:func:`tau_band`) so
+    every trajectory in the report is aligned on treatment day, not DIV — chips
+    differ in absolute culture age. ``ref`` adds a horizontal reference line
+    (e.g. the critical branching ratio m=1).
+    """
     traj = tau_trajectory(tidy, metric, arms, tau_edges)
+    if band:
+        tau_band(ax, label=band_label)
     for arm in [a for a in ordered_groups(arms) if a in set(traj.arm.unique())]:
         sub = traj[traj.arm == arm].sort_values("tauc")
         if sub.empty:
@@ -60,10 +100,9 @@ def plot_trajectory(ax, tidy, metric, arms, tau_edges=DEFAULT_TAU_EDGES,
         ax.plot(sub.tauc, sub["median"], "-o", ms=3, color=group_color(arm),
                 label=arm, zorder=3)
         ax.fill_between(sub.tauc, sub.lo, sub.hi, color=group_color(arm),
-                        alpha=0.15, lw=0)
-    ax.axvline(0, ls=":", color="0.5", lw=0.8)
+                        alpha=0.15, lw=0, zorder=2)
     if ref is not None:
-        ax.axhline(ref, ls="--", color="0.5", lw=0.8)
+        ax.axhline(ref, ls="--", color="0.5", lw=0.8, zorder=1)
     ax.set_xlabel("treatment day (tau)", fontsize=7)
     ax.set_ylabel(ylabel or METRIC_LABELS.get(metric, metric), fontsize=7)
     if legend:

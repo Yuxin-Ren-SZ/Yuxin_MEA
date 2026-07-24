@@ -121,19 +121,24 @@ def _stars(q):
     return "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else ""
 
 
-def _forest(ax, tidy, metrics, title):
+def _forest(ax, tidy, metrics, title, *, highlight_metric=None,
+            robust_xlim=False, effect_labels=False):
     from .forest import plot_did_forest
 
     resp = S.well_response(tidy, metrics=metrics)
     resp = resp[resp.arm.isin(["Control"] + FOCUS_ARMS)]
-    plot_did_forest(ax, resp, metrics, FOCUS_ARMS,
-                    xlabel="response (log2 post/pre; Δ for bounded)",
-                    title=title, legend_loc="upper left", footnote=False)
+    return plot_did_forest(
+        ax, resp, metrics, FOCUS_ARMS,
+        xlabel="response (log2 post/pre; Δ for bounded)",
+        title=title, legend_loc="upper left", footnote=False,
+        highlight_metric=highlight_metric, robust_xlim=robust_xlim,
+        effect_labels=effect_labels)
 
 
 def build_f7b(tidy, analysis_root):
     import matplotlib.pyplot as plt
 
+    from .report_style import MUTED
     from .trajectory import pick_example_well, pick_early_late, plot_trajectory
 
     ex = pick_example_well(tidy, "IVH_Late", metric="mean_sttc")
@@ -142,59 +147,68 @@ def build_f7b(tidy, analysis_root):
     def _lab(row, when):
         return when if row is None else f"{when} DIV{int(row.DIV)} tau{int(row.tau):+d}"
 
-    fig = plt.figure(figsize=(9.2, 10.4))
-    gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.0, 0.85],
-                          hspace=0.5, wspace=0.28)
+    fig = plt.figure(figsize=(9.4, 10.0))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.15, 0.9, 0.8], top=0.94,
+                          bottom=0.06, hspace=0.58, wspace=0.3)
 
-    # Row 0: A cartography early | late  +  B directed graph early | late
-    gsa = gs[0, 0].subgridspec(1, 2, wspace=0.08)
-    axa0 = fig.add_subplot(gsa[0, 0]); axa1 = fig.add_subplot(gsa[0, 1])
-    _panel_cartography(axa0, analysis_root, e_row, _lab(e_row, "early"))
-    _panel_cartography(axa1, analysis_root, l_row, _lab(l_row, "late"))
-    axa1.sharey(axa0)
-    axa0.annotate("A  Node cartography — early vs late (P vs z)", xy=(0, 1.15),
-                  xycoords="axes fraction", fontweight="bold", fontsize=9)
-    gsb = gs[0, 1].subgridspec(1, 2, wspace=0.08)
-    axb0 = fig.add_subplot(gsb[0, 0]); axb1 = fig.add_subplot(gsb[0, 1])
-    _panel_directed_graph(axb0, analysis_root, e_row)
-    _panel_directed_graph(axb1, analysis_root, l_row)
-    for a, when in [(axb0, "early"), (axb1, "late")]:
-        a.set_title("", loc="left"); a.set_title(when, fontsize=7)
-    axb0.annotate("B  Directed TE graph — early vs late", xy=(0, 1.15),
-                  xycoords="axes fraction", fontweight="bold", fontsize=9)
+    # Row 0 (LEAD): the inference. Two forests, independent x-scales; the node
+    # forest clips the participation-coeff runaway CI; flow hierarchy highlighted.
+    _forest(fig.add_subplot(gs[0, 0]), tidy, NODE_METRICS,
+            "A  Node-metric DiD vs Control", robust_xlim=True)
+    _forest(fig.add_subplot(gs[0, 1]), tidy, DIR_METRICS,
+            "B  Directed-metric DiD — flow hierarchy highlighted",
+            highlight_metric="flow_hierarchy", effect_labels=True, robust_xlim=True)
 
-    # Row 1: C node forest | D directed forest
-    _forest(fig.add_subplot(gs[1, 0]), tidy, NODE_METRICS,
-            "C  Node-metric response vs Control (DiD, chip-level)")
-    _forest(fig.add_subplot(gs[1, 1]), tidy, DIR_METRICS,
-            "D  Directed-metric response vs Control (DiD, chip-level)")
-
-    # Row 2: E trajectories vs tau
+    # Row 1: C trajectories — the interpretable readouts (participation + flow).
     arms = ["Control"] + FOCUS_ARMS
-    gse = gs[2, :].subgridspec(1, 3, wspace=0.35)
-    for ci, metric in enumerate(["participation_mean", "rich_club", "flow_hierarchy"]):
-        axe = fig.add_subplot(gse[0, ci])
-        plot_trajectory(axe, tidy, metric, arms, legend=(ci == 0))
+    gsc = gs[1, :].subgridspec(1, 2, wspace=0.3)
+    for ci, metric in enumerate(["participation_mean", "flow_hierarchy"]):
+        axc = fig.add_subplot(gsc[0, ci])
+        plot_trajectory(axc, tidy, metric, arms, legend=(ci == 0))
         if ci == 0:
-            axe.annotate("E  Node/directed metrics vs treatment day", xy=(0, 1.15),
+            axc.annotate("C  Node/directed metrics vs treatment day", xy=(0, 1.14),
                          xycoords="axes fraction", fontweight="bold", fontsize=9)
+
+    # Row 2: D demoted illustrative strip — cartography + TE graph (single well).
+    gsd = gs[2, :].subgridspec(1, 4, wspace=0.14)
+    axd = [fig.add_subplot(gsd[0, i]) for i in range(4)]
+    _panel_cartography(axd[0], analysis_root, e_row, _lab(e_row, "early"))
+    _panel_cartography(axd[1], analysis_root, l_row, _lab(l_row, "late"))
+    axd[1].sharey(axd[0])
+    _panel_directed_graph(axd[2], analysis_root, e_row)
+    _panel_directed_graph(axd[3], analysis_root, l_row)
+    # Override each title at its OWN loc so the sub-panel's baked-in title is
+    # replaced, not stacked (cartography = center loc; directed = left loc).
+    axd[0].set_title(_lab(e_row, "early"), fontsize=7, color=MUTED)
+    axd[1].set_title(_lab(l_row, "late"), fontsize=7, color=MUTED)
+    axd[2].set_title("TE early", loc="left", fontsize=7, color=MUTED)
+    axd[3].set_title("TE late", loc="left", fontsize=7, color=MUTED)
+    axd[0].annotate("D  Illustrative — single well: node cartography (P vs z) + "
+                    "directed TE graph, early vs late", xy=(0, 1.20),
+                    xycoords="axes fraction", fontweight="bold", fontsize=8,
+                    color=MUTED, annotation_clip=False)
+
     fig.suptitle("Figure 7b — Node-level & directed (TE) connectivity; "
                  "chip = biological replicate"
                  + ("" if ex is None else f"  ·  {ex.split('|')[0]} (IVH_Late)"),
-                 fontsize=9, y=1.0)
+                 fontsize=9, y=0.985)
     caption(fig,
-        "Node-level & directed connectivity. (A) Node cartography (participation "
-        "coefficient P vs within-module degree z) of one representative treated "
-        "well, early vs late; dashed lines = hub thresholds. (B) Directed "
-        "transfer-entropy (TE) graph for the same well early vs late (arrows = "
-        "inferred information flow). (C, D) Difference-in-differences vs Control "
-        "for node-level (C) and directed (D) metrics at the biological-replicate "
-        "level: bold points = 3 per-chip means, faint = wells; marker = mean of "
-        "chip means, whisker = 95% t-CI over 3 chips (df=2); ★ = FDR q<0.05, △ = "
-        "suggestive (consistent 3/3 chips, p<0.05 uncorrected). (E) Group "
-        "trajectories vs treatment day (tau): line = per-arm median across wells, "
-        "ribbon = 95% bootstrap CI (well-level). TE = Schreiber (2000) transfer "
-        "entropy, effective/bias-corrected. Unit: chip (n=3 per arm).")
+        "Node-level & directed connectivity; the point of interest is directed-"
+        "flow reorganisation (flow hierarchy). (A, B) Difference-in-differences vs "
+        "Control for node-level (A) and directed (B) metrics, each on its own "
+        "x-scale; bold points = 3 per-chip means (biological replicates), faint = "
+        "wells; marker = mean of chip means, whisker = 95% t-CI (df=2); the "
+        "participation-coefficient CI is clipped to the axis (⟩ = off-scale) so "
+        "one wild interval does not flatten the rest; the flow-hierarchy row is "
+        "highlighted with its effect size Δ. ★ = FDR q<0.05 (none survive at "
+        "n=3); △ = suggestive (consistent 3/3 chips, p<0.05 uncorrected). (C) "
+        "Group trajectories vs treatment day (tau): participation coefficient and "
+        "flow hierarchy; line = per-arm median across wells, ribbon = 95% "
+        "bootstrap CI. (D) Demoted illustrative strip (single well): node "
+        "cartography (participation P vs within-module degree z; dashed lines = "
+        "hub thresholds) and directed transfer-entropy graph (arrows = inferred "
+        "flow), early vs late. TE = Schreiber (2000), effective/bias-corrected. "
+        "Unit: chip (n=3 per arm).")
     return fig, {"example": ex}
 
 

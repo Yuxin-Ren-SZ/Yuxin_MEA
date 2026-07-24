@@ -18,28 +18,52 @@ def build_s1(figure_root):
     df = L.load_method_compare(figure_root)
     fig, axes = plt.subplots(1, 3, figsize=(9.0, 3.0))
 
-    # A. count agreement (log-log, identity)
+    _ML = OKABE_ITO["blue"]           # one accent for ML, one for traditional
+    _TRAD = OKABE_ITO["vermillion"]
+
+    # A. count agreement (log-log, identity); flag method-only detections.
     ax = axes[0]
     x = df.trad_count.to_numpy(float)
     y = df.ml_count.to_numpy(float)
-    ax.scatter(x + 1, y + 1, s=5, alpha=0.3, lw=0, color=OKABE_ITO["blue"])
+    ok = ~np.isnan(x) & ~np.isnan(y)
+    trad_only = ok & (x > 0) & (y == 0)
+    ml_only = ok & (y > 0) & (x == 0)
+    both = ok & ~trad_only & ~ml_only
+    ax.scatter(x[both] + 1, y[both] + 1, s=5, alpha=0.3, lw=0, color=_ML,
+               label="both detect")
+    if trad_only.any():
+        ax.scatter(x[trad_only] + 1, y[trad_only] + 1, s=12, lw=0, color=_TRAD,
+                   label="traditional-only")
+    if ml_only.any():
+        ax.scatter(x[ml_only] + 1, y[ml_only] + 1, s=12, lw=0,
+                   color=OKABE_ITO["orange"], label="ML-only")
     lim = [1, np.nanmax([x, y]) + 5]
     ax.plot(lim, lim, "--", color="0.5", lw=0.8)
+    ax.annotate("identity", xy=(lim[1], lim[1]), ha="right", va="bottom",
+                fontsize=5.5, color="0.5")
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("traditional burst count (+1)")
     ax.set_ylabel("ML burst count (+1)")
+    ax.legend(fontsize=5.5, loc="upper left")
     ax.set_title("A  Burst-count agreement", loc="left", fontweight="bold")
 
-    # B. Bland-Altman of duration
+    # B. Bland-Altman of duration, with labelled bias & 95% LoA lines.
     ax = axes[1]
     td, md = df.trad_duration_s.to_numpy(float), df.ml_duration_s.to_numpy(float)
     mean = (td + md) / 2
     diff = md - td
     ok = ~np.isnan(mean) & ~np.isnan(diff)
-    ax.scatter(mean[ok], diff[ok], s=5, alpha=0.3, lw=0, color=OKABE_ITO["vermillion"])
+    ax.scatter(mean[ok], diff[ok], s=5, alpha=0.3, lw=0, color=_ML)
     mu, sd = np.nanmean(diff[ok]), np.nanstd(diff[ok])
-    for yv, ls in [(mu, "-"), (mu + 1.96 * sd, "--"), (mu - 1.96 * sd, "--")]:
+    for yv, ls, lab in [(mu, "-", "bias"), (mu + 1.96 * sd, "--", "+95% LoA"),
+                        (mu - 1.96 * sd, "--", "−95% LoA")]:
         ax.axhline(yv, ls=ls, color="0.4", lw=0.8)
+        ax.annotate(f"{lab} {yv:+.2f}s", xy=(0.99, yv),
+                    xycoords=("axes fraction", "data"), ha="right",
+                    va="bottom", fontsize=5.5, color="0.35")
+    ax.annotate("spread widens with duration\n(proportional bias)", xy=(0.02, 0.03),
+                xycoords="axes fraction", ha="left", va="bottom", fontsize=5.5,
+                color="0.4", style="italic")
     ax.set_xlabel("mean burst duration (s)")
     ax.set_ylabel("ML − traditional (s)")
     ax.set_title("B  Duration Bland-Altman", loc="left", fontweight="bold")

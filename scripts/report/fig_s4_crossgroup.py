@@ -24,7 +24,9 @@ METRICS = ["nb_rate", "nb_duration_mean", "nb_spikes_per_burst_mean",
            "nb_ibi_mean", "median_firing_rate"]
 
 
-def _panel(ax, matched, metric: str) -> None:
+def _panel(ax, matched, metric: str, n1_arms=(), banner=False) -> None:
+    from .forest import _short_group
+
     arms = ordered_groups(matched.arm.unique())
     cm = matched.groupby(["chip", "arm"], as_index=False)[metric].mean()
     rng = np.random.default_rng(0)
@@ -42,19 +44,29 @@ def _panel(ax, matched, metric: str) -> None:
             jit = (rng.random(len(cp)) - 0.5) * 0.16
             ax.scatter(np.full(len(cp), i) + jit, cp, s=26, facecolor=col,
                        edgecolor="white", linewidth=0.5, zorder=5)
+        if arm in n1_arms:                 # flag single-chip arms explicitly
+            ax.annotate("n=1", xy=(i, 0.01), xycoords=("data", "axes fraction"),
+                        ha="center", va="bottom", fontsize=5.5, color="0.45")
     ax.set_xticks(range(len(arms)))
-    ax.set_xticklabels(arms, rotation=40, ha="right", fontsize=6)
+    ax.set_xticklabels([_short_group(a) for a in arms], rotation=30, ha="right",
+                       fontsize=6)
     ax.set_ylabel(METRIC_LABELS.get(metric, metric))
+    if banner:                             # persistent caveat, in the panel
+        ax.set_title("descriptive · chip-confounded · no significance test",
+                     loc="left", fontsize=6.5, color="#A83B00", fontstyle="italic")
 
 
 def build_s4(tidy):
     import matplotlib.pyplot as plt
 
     matched = S.matched_div_wells(tidy, *DIV_WINDOW, metrics=METRICS)
+    # arms represented by a single chip (e.g. NPH / AraC) — flagged as n=1.
+    chips_per_arm = matched.groupby("arm").chip.nunique()
+    n1_arms = set(chips_per_arm[chips_per_arm <= 1].index)
     n = len(METRICS)
-    fig, axes = plt.subplots(1, n, figsize=(2.1 * n, 3.4))
-    for ax, m in zip(axes, METRICS):
-        _panel(ax, matched, m)
+    fig, axes = plt.subplots(1, n, figsize=(2.1 * n, 3.6))
+    for j, (ax, m) in enumerate(zip(axes, METRICS)):
+        _panel(ax, matched, m, n1_arms=n1_arms, banner=(j == 0))
     fig.suptitle(
         f"Figure S4 — Cross-group metrics at DIV {DIV_WINDOW[0]}-{DIV_WINDOW[1]} "
         f"(bold = per-chip means, faint = wells; descriptive, chip-confounded)",

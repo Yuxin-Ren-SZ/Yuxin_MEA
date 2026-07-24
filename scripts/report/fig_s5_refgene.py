@@ -171,7 +171,29 @@ def _sorted_conditions(screen: pd.DataFrame) -> list[str]:
                                 ).index)
 
 
+_SELECTED_COLOR = "#117733"
+
+
+def _flag_selected(ax, genes, best, y=None):
+    """Bold the winner's tick label and stamp a ✓ selected flag (every panel)."""
+    if best not in genes:
+        return
+    bi = genes.index(best)
+    for lbl in ax.get_xticklabels():
+        if lbl.get_text().split("\n")[0] == best:
+            lbl.set_fontweight("bold"); lbl.set_color(_SELECTED_COLOR)
+    if y is None:                       # over the column, top of the axes
+        ax.annotate("✓ selected", xy=(bi, 0.98), xycoords=("data", "axes fraction"),
+                    ha="center", va="top", fontsize=6, color=_SELECTED_COLOR,
+                    fontweight="bold")
+    else:                               # above the geNorm M bar (at x + 0.19)
+        ax.annotate("✓ selected reference", xy=(bi + 0.19, y), xytext=(0, 8),
+                    textcoords="offset points", ha="center", va="bottom",
+                    fontsize=6.5, color=_SELECTED_COLOR, fontweight="bold")
+
+
 def build_s5(root):
+    import matplotlib.lines as mlines
     import matplotlib.pyplot as plt
 
     screen = load_ref_screen(root)
@@ -208,6 +230,7 @@ def build_s5(root):
     ax.set_ylabel("Cq − gene mean (cycles)")
     ax.set_title(f"A  Candidate spread (n = {len(mat)} conditions)",
                  loc="left", fontweight="bold")
+    _flag_selected(ax, genes, best)   # ✓ selected reference on the winner
 
     # --- B. stability metrics ---------------------------------------------
     ax = axes[0, 1]
@@ -224,9 +247,9 @@ def build_s5(root):
     ax.set_xticklabels(genes)
     ax.set_ylabel("cycles")
     ax.legend(fontsize=6, loc="upper left")
-    ax.set_title(f"B  Stability — {best}: lowest geNorm M ({m[best]:.3f}); "
-                 "selected as reference", loc="left", fontweight="bold",
-                 fontsize=7.5)
+    ax.set_title(f"B  Stability — {best}: lowest geNorm M ({m[best]:.3f})",
+                 loc="left", fontweight="bold", fontsize=7.5)
+    _flag_selected(ax, genes, best, y=m[best])
 
     # --- C. pairwise ΔCq SD -------------------------------------------------
     ax = axes[1, 0]
@@ -286,7 +309,13 @@ def build_s5(root):
                + f" (late, of 45 cycles); {len(ntc) - len(amp)}/{len(ntc)} no-Cq")
     fig.suptitle("Figure S5 — reference-gene selection (CX169)", fontsize=9,
                  x=0.02, ha="left", fontweight="bold")
-    fig.tight_layout(rect=(0, 0.02, 1, 0.96))
+    # Shared candidate colour legend (A & D use these colours).
+    fig.legend(handles=[mlines.Line2D([], [], marker="o", ls="", ms=5,
+                                      color=_candidate_color(g), label=g)
+                        for g in genes],
+               loc="upper right", ncol=len(genes), bbox_to_anchor=(0.99, 0.995),
+               fontsize=6.5, frameon=False, title="candidate", title_fontsize=6)
+    fig.tight_layout(rect=(0, 0.02, 1, 0.94))
     caption(fig,
         "Selection of the qPCR reference (housekeeping) gene from the candidate "
         "screen. (A) Spread of raw Cq across conditions for each candidate. "

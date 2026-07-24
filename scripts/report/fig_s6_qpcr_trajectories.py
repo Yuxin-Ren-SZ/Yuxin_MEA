@@ -26,7 +26,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .fig3_qpcr import (control_reference, gene_label, ordered_genes,
+from .fig3_qpcr import (celltype_ordered_genes, control_reference, gene_label,
                         treatment_effects)
 from .report_style import caption, group_color, ordered_groups, save_fig
 
@@ -137,7 +137,7 @@ def _effect_panel(ax, sub, days, n_chips):
 def build_s6(tidy: pd.DataFrame, genes: list[str] | None = None):
     import matplotlib.pyplot as plt
 
-    genes = genes or ordered_genes(tidy.gene)
+    genes = genes or celltype_ordered_genes(tidy.gene.dropna().unique())
     days = sorted(tidy.day.dropna().unique())
     eff_days = [d for d in days if d > 0]
     effects = treatment_effects(tidy)
@@ -155,8 +155,7 @@ def build_s6(tidy: pd.DataFrame, genes: list[str] | None = None):
         ax = axes[r, c]
         sub = tidy[tidy.gene == gene]
         _draw_qc_fails(ax, sub, *_panel(ax, sub, days))
-        ax.set_title(("A  " if i == 0 else "") + gene_label(gene), loc="left",
-                     fontweight="bold", fontsize=7.5)
+        ax.set_title(gene_label(gene), loc="left", fontweight="bold", fontsize=7.5)
         if c == 0:
             ax.set_ylabel("log$_2$ fold vs CT DIV 7")
         ax.set_xlabel("days post-treatment")
@@ -164,8 +163,7 @@ def build_s6(tidy: pd.DataFrame, genes: list[str] | None = None):
         # --- block B: vs the time-matched control ---
         ax = axes[nrow + r, c]
         _effect_panel(ax, effects[effects.gene == gene], eff_days, n_chips)
-        ax.set_title(("B  " if i == 0 else "") + gene_label(gene), loc="left",
-                     fontweight="bold", fontsize=7.5)
+        ax.set_title(gene_label(gene), loc="left", fontweight="bold", fontsize=7.5)
         if c == 0:
             ax.set_ylabel("log$_2$ fold vs\ntime-matched control")
         ax.set_xlabel("days post-treatment")
@@ -199,7 +197,17 @@ def build_s6(tidy: pd.DataFrame, genes: list[str] | None = None):
              f"n = {n_chips} chip, technical duplicates only — no error bars "
              "and no statistics.",
              fontsize=5.5, color="0.35", ha="left", va="top")
-    fig.tight_layout(rect=(0, 0.105, 1, 0.965))
+    fig.tight_layout(rect=(0, 0.105, 1, 0.86))
+    # Explicit A/B row-framing headers (development-removed framing made visible,
+    # not buried in a footnote), placed clear above each block's gene titles.
+    a_top = axes[0, 0].get_position().y1
+    b_top = axes[nrow, 0].get_position().y1
+    fig.text(0.02, a_top + 0.048,
+             "A  ΔΔCq vs CT DIV 7 (development + treatment)",
+             fontweight="bold", fontsize=8.5, va="bottom")
+    fig.text(0.02, b_top + 0.032,
+             "B  vs time-matched Control (development removed → 0 = no difference)",
+             fontweight="bold", fontsize=8.5, va="bottom")
     caption(fig,
         "Per-gene qPCR expression trajectories over days post-treatment, one "
         "line per condition (see the in-panel note for how A and B differ: A = "

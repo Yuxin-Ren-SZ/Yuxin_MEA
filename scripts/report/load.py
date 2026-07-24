@@ -128,6 +128,34 @@ def load_ml_bursts(analysis_root: Path, row: pd.Series | dict[str, Any]) -> pd.D
     return pd.read_pickle(p)
 
 
+def load_ccg(analysis_root: Path, row: pd.Series | dict[str, Any]) -> dict[str, Any]:
+    """Per-edge cross-correlograms for one well-recording.
+
+    Returns the arrays written by ``connectivity.compute_ccg``: ``counts`` and
+    ``baseline`` are ``(n_pairs, n_bins)``, ``lags_ms`` the bin centres, ``pairs``
+    the ``(reference, target)`` unit ids — **rows are keyed by ``pairs``, never by
+    position in ``edges.parquet``**, which can be longer when the pair cap trips.
+    ``syn_lo_ms``/``syn_hi_ms`` bound the causal window the significance test uses.
+    """
+    import numpy as np
+
+    p = artifact_path(analysis_root, "connectivity_data", row,
+                      "connectivity", "ccg.npz")
+    with np.load(p, allow_pickle=True) as z:
+        return {k: z[k] for k in z.files}
+
+
+def load_edges(analysis_root: Path, row: pd.Series | dict[str, Any]) -> pd.DataFrame:
+    """Significant STTC edges for one well-recording (``edges.parquet``).
+
+    Columns: ``u, v, sttc, dist_um`` plus the ``ccg_*`` summaries
+    (``ccg_peak_lag_ms, ccg_peak_z, ccg_sig, ccg_syn_dir, ccg_asymmetry``) when
+    cross-correlograms were computed.
+    """
+    return pd.read_parquet(artifact_path(analysis_root, "connectivity_data", row,
+                                         "connectivity", "edges.parquet"))
+
+
 def load_templates(analysis_root: Path, row: pd.Series | dict[str, Any]):
     """Average waveform templates ``(n_units, n_samples, n_channels)``."""
     import numpy as np

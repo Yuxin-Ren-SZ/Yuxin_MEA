@@ -20,7 +20,7 @@ import pandas as pd
 
 from . import load, stats as S
 from .report_style import (
-    METRIC_LABELS, caption, group_color, ordered_groups, save_fig)
+    METRIC_LABELS, MUTED, caption, group_color, ordered_groups, save_fig)
 
 FOCUS_ARMS = ["IVH_Early", "IVH_Late"]
 FOREST_METRICS = ["branching_ratio_mr", "dcc", "aval_tau", "aval_alpha"]
@@ -68,8 +68,8 @@ _EARLY_C, _LATE_C = "#4477aa", "#cc3311"    # early vs late timepoint colours
 
 
 def _panel_distributions(ax, analysis_root, e_row, l_row):
-    ax.set_title("A  Avalanche distributions (early vs late)", loc="left",
-                 fontweight="bold")
+    ax.set_title("D  Avalanche distributions — illustrative, single well",
+                 loc="left", fontweight="bold", fontsize=8, color=MUTED)
     for row, col, lab in [(e_row, _EARLY_C, "early"), (l_row, _LATE_C, "late")]:
         if row is None:
             continue
@@ -88,8 +88,8 @@ def _panel_distributions(ax, analysis_root, e_row, l_row):
 
 
 def _panel_crackling(ax, analysis_root, e_row, l_row):
-    ax.set_title("B  Crackling scaling (early vs late)", loc="left",
-                 fontweight="bold")
+    ax.set_title("E  Crackling scaling — illustrative, single well",
+                 loc="left", fontweight="bold", fontsize=8, color=MUTED)
     for row, col, lab in [(e_row, _EARLY_C, "early"), (l_row, _LATE_C, "late")]:
         if row is None:
             continue
@@ -160,7 +160,8 @@ def _stars(q):
 def build_f8(tidy, analysis_root):
     import matplotlib.pyplot as plt
 
-    from .forest import plot_did_forest
+    from .forest import group_columns_grid
+    from .report_style import preliminary_tag
     from .trajectory import plot_trajectory, pick_early_late, pick_example_well
 
     resp = S.well_response(tidy, metrics=FOREST_METRICS)
@@ -169,44 +170,56 @@ def build_f8(tidy, analysis_root):
     e_row, l_row = pick_early_late(tidy, ex_well) if ex_well else (None, None)
     arms = ["Control"] + FOCUS_ARMS
 
-    fig = plt.figure(figsize=(9.2, 9.6))
-    gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.0, 1.1], hspace=0.5, wspace=0.3)
-    # Row 0: early-vs-late avalanche example (one treated well)
-    _panel_distributions(fig.add_subplot(gs[0, 0]), analysis_root, e_row, l_row)
-    _panel_crackling(fig.add_subplot(gs[0, 1]), analysis_root, e_row, l_row)
-    # Row 1: group trajectories vs treatment day
-    axc = fig.add_subplot(gs[1, 0])
-    plot_trajectory(axc, tidy, "branching_ratio_mr", arms, ref=1.0,
-                    ylabel="branching ratio (MR)", title="C  Branching ratio vs tau")
-    axd = fig.add_subplot(gs[1, 1])
-    plot_trajectory(axd, tidy, "dcc", arms, legend=False,
-                    ylabel="DCC (distance to criticality)", title="D  DCC vs tau")
-    # Row 2: DiD forest (chip-level, well-nested-in-chip LMM)
-    axe = fig.add_subplot(gs[2, :])
-    fdata = plot_did_forest(
-        axe, resp, FOREST_METRICS, FOCUS_ARMS,
-        xlabel="response  (log2 post/pre; Δ for BR/DCC)",
-        title="E  Criticality response vs Control (DiD, chip-level)",
-        legend_loc="lower right")
+    fig = plt.figure(figsize=(9.8, 9.4))
+    gs = fig.add_gridspec(3, 4, height_ratios=[1.0, 1.0, 0.82], top=0.93,
+                          bottom=0.07, hspace=0.6, wspace=0.5)
+    # Lead row: the two story trajectories (branching ratio, DCC).
+    axa = fig.add_subplot(gs[0, :2])
+    plot_trajectory(axa, tidy, "branching_ratio_mr", arms, ref=1.0,
+                    ylabel="branching ratio (MR)",
+                    title="A  Branching ratio vs treatment day")
+    axa.text(0.98, 0.03, "-- m=1 critical  ·  : treatment", transform=axa.transAxes,
+             fontsize=5.5, color=MUTED, ha="right", va="bottom")
+    axb = fig.add_subplot(gs[0, 2:])
+    plot_trajectory(axb, tidy, "dcc", arms, legend=False,
+                    ylabel="DCC (distance to criticality)",
+                    title="B  Distance to criticality (DCC) vs tau")
+    # Row 1: criticality DiD as grouped-column small multiples, DCC highlighted.
+    did_axes = [fig.add_subplot(gs[1, i]) for i in range(4)]
+    fdata = group_columns_grid(
+        did_axes, resp, FOREST_METRICS, FOCUS_ARMS,
+        highlight_metric="dcc", effect_labels=True,
+        ylabel="response (log₂ or Δ)", ylabel_axes=[did_axes[0]])
+    did_axes[0].annotate("C  Criticality DiD vs Control — DCC highlighted",
+                         xy=(0, 1.32), xycoords="axes fraction", fontweight="bold",
+                         fontsize=9, annotation_clip=False)
+    preliminary_tag(did_axes[3])
+    # Row 2: demoted illustrative strip — single-well avalanche examples.
+    _panel_distributions(fig.add_subplot(gs[2, :2]), analysis_root, e_row, l_row)
+    _panel_crackling(fig.add_subplot(gs[2, 2:]), analysis_root, e_row, l_row)
     fig.suptitle("Figure 8 — Neuronal-avalanche criticality (branching ratio, DCC); "
-                 "chip = biological replicate", fontsize=9, y=1.0)
+                 "chip = biological replicate", fontsize=9, y=0.985)
     caption(fig,
-        "Neuronal-avalanche criticality. (A) Avalanche-size distribution (log–log "
-        "PDF) of one representative treated well (CX169), early (τ+0) vs late "
-        "(τ+14); solid line = fitted power law (exponent τ). (B) Crackling-noise "
-        "scaling — mean avalanche size vs duration for the same well early vs "
-        "late; DCC (distance to criticality) per timepoint in the legend. "
-        "(C, D) Group trajectories vs treatment day (tau): branching ratio (MR "
-        "estimator; dashed line = critical value 1) and DCC. Line = per-arm "
+        "Neuronal-avalanche criticality; the arc is IVH_Early drifting away from "
+        "criticality (branching ratio falls, DCC rises). (A, B) Group trajectories "
+        "vs treatment day (tau): branching ratio (MR estimator; dashed line = "
+        "critical value 1) and DCC (distance to criticality). Line = per-arm "
         "median across wells, ribbon = 95% bootstrap CI (well-level), dotted "
-        "vertical = treatment day (tau 0). (E) Difference-in-differences vs "
-        "Control at the biological-replicate level: marker = mean of the 3 "
-        "per-chip mean responses, whisker = 95% t-CI over those 3 chips (df=2); "
-        "bold dots = per-chip means, faint dots = wells; Control diamond = "
-        "maturation baseline. ★ = FDR q<0.05 (none here); △ = suggestive (same "
-        "direction on all 3 chips, uncorrected p<0.05, does not survive FDR at "
-        "n=3). Response = log2(post/pre), or Δ(post−pre) for branching ratio and "
-        "DCC. Unit of replication: chip (n=3 per arm).")
+        "vertical = treatment day. (C) Criticality difference-in-differences vs "
+        "Control, one panel per metric with the groups side-by-side; the DCC panel "
+        "is highlighted as the pre-specified criticality readout — IVH_Early DCC "
+        "rises (direction-consistent across all 3 chips) but at p≈0.08, a trend "
+        "that does not reach the suggestive bar; the △-flagged suggestive metrics "
+        "are the avalanche-duration exponent α (IVH_Early) and size exponent τ "
+        "(IVH_Late). Bold = the 3 per-chip means (biological replicates), faint "
+        "= wells, bar = mean of chip means, whisker = 95% t-CI (df=2), dashed line "
+        "= no change. ★ = FDR q<0.05 (none survive at n=3); △ = suggestive (same "
+        "direction 3/3 chips, uncorrected p<0.05). Response = log2(post/pre), or "
+        "Δ(post−pre) for branching ratio and DCC. (D, E) Demoted illustrative "
+        "strip — one representative treated well (CX169), early (τ+0, blue) vs "
+        "late (τ+14, red): avalanche-size log–log PDF with fitted power law, and "
+        "crackling-noise scaling (DCC per timepoint in the legend). Unit of "
+        "replication: chip (n=3 per arm).")
     return fig, {"response": resp, "example": ex_well,
                  **(fdata or {})}
 
