@@ -57,6 +57,18 @@ LAYOUTS: dict[str, list[list[str]]] = {
            ["F8h_avalanche_pdf", "F8i_crackling"]],
 }
 
+#: Figure titles, used by the review sheets and by the PowerPoint export so the
+#: two never disagree. Kept short — the detail belongs in the panel captions.
+FIGURE_TITLES: dict[str, str] = {
+    "f2": "Experimental schedule",
+    "f3": "Characterisation of the cultures",
+    "f4": "HD-MEA recording schema and network maturation",
+    "f5": "Network-burst phenotype after intraventricular-haemorrhage CSF",
+    "f6": "Network-state embeddings and cohort-wide burst archetypes",
+    "f7": "Functional connectivity, from single-pair correlograms to network metrics",
+    "f8": "Neuronal-avalanche criticality",
+}
+
 _PAD = 18          # px between panels
 _LETTER = 34       # px reserved above each panel for its letter
 

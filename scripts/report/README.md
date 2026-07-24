@@ -20,6 +20,10 @@ python -m scripts.report.render_panels --panels f5a_hmm_posteriors f5b_did_nb_ra
 # arrange the rendered panels into per-figure review sheets (no re-render)
 python -m scripts.report.assemble_figure --figures f4 f5 f7
 
+# portrait US-Letter PowerPoint: one figure per page, panels as images and
+# everything else (figure number, panel letters, caption) as editable text boxes
+python -m scripts.report.panel_pptx
+
 # the immunofluorescence panel takes image files (blank frames until supplied)
 python -m scripts.report.panels.f3c_icc --images map2_d0.tif ... --px-per-um 1.5
 ```
@@ -31,6 +35,7 @@ panels/     F4c_firing_rate.{png,pdf,svg}       the panel itself, no caption
 panels/     F5b_did_nb_rate_stats.csv           the p and q behind its glyphs
 captions/   F4c_firing_rate.txt                 the caption, as text
 figures/    F4_sheet.png, F4_captions.txt       assembled review sheet
+pptx/       report_panels.pptx                  portrait Letter deck, editable text
 _cache/                                          shared derived tables (safe to delete)
 ```
 
