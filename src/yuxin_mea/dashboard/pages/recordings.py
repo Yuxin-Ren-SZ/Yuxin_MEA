@@ -31,6 +31,7 @@ from yuxin_mea.dashboard.components import (
 )
 from yuxin_mea.dashboard.context import load_dataset_mgr, load_pipeline_mgr
 from yuxin_mea.dashboard.data import (
+    HOURS_UNKNOWN,
     filter_recordings,
     load_recordings_detail,
     recording_provenance,
@@ -48,23 +49,24 @@ _STATUS_FAIL = "failed"
 # Component ids that reset pagination when changed. The date range picker is a
 # single component ("…-filter-date") whose start_date/end_date both report that
 # id via triggered_id.
-_FILTER_FIELDS = ("sample", "scan-type", "date", "group", "status")
+_FILTER_FIELDS = ("sample", "scan-type", "date", "group", "hours", "status")
 _FILTER_IDS = [filter_id("recordings", f) for f in _FILTER_FIELDS]
 
 # States re-read by the selection callbacks. Date splits into start_date/end_date
-# so the 6-arg callback signatures still line up.
+# so the callback signatures still line up.
 _FILTER_STATES = [
     State(filter_id("recordings", "sample"), "value"),
     State(filter_id("recordings", "scan-type"), "value"),
     State(filter_id("recordings", "date"), "start_date"),
     State(filter_id("recordings", "date"), "end_date"),
     State(filter_id("recordings", "group"), "value"),
+    State(filter_id("recordings", "hours"), "value"),
     State(filter_id("recordings", "status"), "value"),
 ]
 
 
-def _filter_values(sample, scan_type, date_from, date_to, group, status) -> dict:
-    """Bundle the six raw filter inputs into filter-function kwargs.
+def _filter_values(sample, scan_type, date_from, date_to, group, hours, status) -> dict:
+    """Bundle the raw filter inputs into filter-function kwargs.
 
     `date_from`/`date_to` arrive as ISO strings from the DatePickerRange and are
     converted to the cache's ``"YYMMDD"`` form for the pure filter functions.
@@ -76,9 +78,25 @@ def _filter_values(sample, scan_type, date_from, date_to, group, status) -> dict
             "date-from": iso_to_yymmdd(date_from),
             "date-to": iso_to_yymmdd(date_to),
             "group": group,
+            "hours": hours,
             "status": status,
         }
     )
+
+
+def _hours_options(recordings: list[dict]) -> list[dict]:
+    """Dropdown options for the hours-since-media facet, timed values first.
+
+    Untimed recordings get an explicit option rather than being hidden: they are
+    a real category (early scans whose tag records no interval) and one people
+    need to be able to look at.
+    """
+    seen = {r.get("hours_since_media") for r in recordings}
+    opts = [{"label": f"{h:g} h", "value": h}
+            for h in sorted(v for v in seen if v is not None)]
+    if None in seen:
+        opts.append({"label": "no time recorded", "value": HOURS_UNKNOWN})
+    return opts
 
 
 def _render_list(filtered, wps, selected, checked, page):
@@ -593,6 +611,7 @@ def _build_wells_table(rec: dict, well_pipeline_status: dict) -> html.Div:
     Output(filter_id("recordings", "date"), "min_date_allowed"),
     Output(filter_id("recordings", "date"), "max_date_allowed"),
     Output(filter_id("recordings", "group"), "options"),
+    Output(filter_id("recordings", "hours"), "options"),
     Input("recordings-refresh", "n_clicks"),
     Input("recordings-scan", "n_clicks"),
     Input("recordings-refresh-groups", "n_clicks"),
@@ -601,6 +620,7 @@ def _build_wells_table(rec: dict, well_pipeline_status: dict) -> html.Div:
     Input(filter_id("recordings", "date"), "start_date"),
     Input(filter_id("recordings", "date"), "end_date"),
     Input(filter_id("recordings", "group"), "value"),
+    Input(filter_id("recordings", "hours"), "value"),
     Input(filter_id("recordings", "status"), "value"),
     Input("recordings-page-prev", "n_clicks"),
     Input("recordings-page-next", "n_clicks"),
@@ -617,6 +637,7 @@ def _populate(
     f_date_from: str,
     f_date_to: str,
     f_group: list[str],
+    f_hours: list,
     f_status: list[str],
     _prev: int,
     _next: int,
@@ -661,7 +682,7 @@ def _populate(
     group_options = sorted({g for r in recordings for g in r.get("groups", [])})
 
     kwargs = _filter_values(
-        f_sample, f_scan_type, f_date_from, f_date_to, f_group, f_status
+        f_sample, f_scan_type, f_date_from, f_date_to, f_group, f_hours, f_status
     )
     filtered = filter_recordings(recordings, well_pipeline_status, **kwargs)
 
@@ -707,6 +728,7 @@ def _populate(
         date_min,
         date_max,
         [{"label": g, "value": g} for g in group_options],
+        _hours_options(recordings),
     )
 
 
@@ -731,6 +753,7 @@ def _select_recording(
     f_date_from,
     f_date_to,
     f_group,
+    f_hours,
     f_status,
     page,
 ):
@@ -748,7 +771,7 @@ def _select_recording(
     well_pipeline_status = store_data.get("well_pipeline_status", {})
 
     kwargs = _filter_values(
-        f_sample, f_scan_type, f_date_from, f_date_to, f_group, f_status
+        f_sample, f_scan_type, f_date_from, f_date_to, f_group, f_hours, f_status
     )
     filtered = filter_recordings(recordings, well_pipeline_status, **kwargs)
 
@@ -798,6 +821,7 @@ def _select_all_in_group(
     f_date_from,
     f_date_to,
     f_group,
+    f_hours,
     f_status,
     page,
 ):
@@ -817,7 +841,7 @@ def _select_all_in_group(
     well_pipeline_status = store_data.get("well_pipeline_status", {})
 
     kwargs = _filter_values(
-        f_sample, f_scan_type, f_date_from, f_date_to, f_group, f_status
+        f_sample, f_scan_type, f_date_from, f_date_to, f_group, f_hours, f_status
     )
     filtered = filter_recordings(recordings, well_pipeline_status, **kwargs)
 

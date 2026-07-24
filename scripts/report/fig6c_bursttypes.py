@@ -7,15 +7,20 @@ pools every detected burst from many wells across the focus groups, embeds them
 in one shared feature space, and clusters them **globally** into cohort-wide
 burst archetypes.
 
-Result (well = unit of analysis): the pipeline resolves ~4 reproducible burst
-archetypes. Whether their **composition separates the groups** is *computed in
+Result (well = unit of analysis): k is chosen by silhouette rather than fixed, so
+the number of archetypes is whatever the pooled bursts support — read it off the
+figure, not from this docstring. It is not stable against how much data the fit
+sees: on a 40-recording-per-group subsample the sweep settled on 4, and on the
+full pool it settles on fewer, which is itself a reason to treat the archetype
+identities as descriptive rather than as discovered cell-level categories.
+Whether their **composition separates the groups** is *computed in
 panel C* — a per-archetype Mann-Whitney of each treated arm's per-well fractions
 vs Control, BH-FDR (`_composition_stats`) — never asserted: any q<0.05 is starred
 and the panel title / figure suptitle switch to report the actual count. This is
-deliberately not a hardcoded "n.s." label: on the current sample one contrast
-(IVH_Late, archetype 1) clears FDR at q≈0.04, so the figure must report it. That
-single borderline contrast is sensitive to the KMeans k / burst-sampling seed and
-should be treated as exploratory, not a headline claim, pending confirmation.
+deliberately not a hardcoded "n.s." label. An earlier subsampled fit produced one
+FDR-clearing contrast (IVH_Late, archetype 1, q≈0.04); it did not survive fitting
+on every recording, which is what that "sensitive to k and the sampling seed"
+caveat was warning about.
 Panel C uses per-well fractions, not burst-level pooling, precisely to avoid the
 pseudo-replication that made a pooled bar chart look falsely separated.
 
@@ -33,12 +38,16 @@ Panels:
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 
 from . import load as L
 from . import stats as S
 from .report_style import MUTED, caption, group_color, ordered_groups, save_fig
+
+logger = logging.getLogger("report.fig6c")
 
 FOCUS_GROUPS = ["Control", "IVH_Early", "IVH_Late"]
 # Raw, biologically interpretable burst-level metrics (network_bursts.pkl).
@@ -52,8 +61,15 @@ FEAT_LABELS = ["duration", "within-burst FR", "participation", "spikes/burst",
 # clustering reflects shape, not a few high-rate outliers. (Fractions kept linear.)
 LOG_FEATURES = {"within_burst_fr", "total_spikes", "burst_peak",
                 "synchrony_energy", "duration_s"}
-_MAX_ROWS_PER_GROUP = 40     # well-recordings sampled per group (I/O bound)
-_MAX_BURSTS = 9000           # cap pooled bursts before UMAP
+#: Runaway guard only. The fit loads every eligible well-recording (~823 rows,
+#: ~18k bursts on the current cohort); this cap exists so a future cohort cannot
+#: silently exhaust memory. It must stay well above the real pool, because
+#: subsampling here re-introduces the very bias this module used to have: a flat
+#: per-group draw made pre-treatment recordings — 6-15% of each pool — a matter of
+#: luck, so one arm could show a tau<0 band and another none, from the same data.
+_MAX_BURSTS = 200_000
+#: Minimum network bursts in a recording for it to contribute to the fit.
+_MIN_NB_COUNT = 5
 # Dedicated qualitative archetype palette — deliberately distinct from the group
 # palette (amber/sienna/grey) AND the network-state palette (rest #3D6FB4 /
 # burst #D1495B), so archetype colour is never confused with either.
@@ -67,19 +83,32 @@ def _stars(q: float) -> str:
 
 
 def collect_bursts(tidy, analysis_root, seed: int = 0) -> pd.DataFrame:
-    """Pool per-burst feature rows across sampled wells of the focus groups."""
-    frames = []
+    """Pool per-burst feature rows across **every** eligible well of the focus arms.
+
+    Selection is on the well's *treatment identity* (``stats.arm_of`` via
+    ``well_index``), not on the per-row ``canonical_group``. The two are not the
+    same thing: ``canonical_group`` is the groupname the MaxWell chip carried at
+    scan time, and on CX138 every well — treated or not — was scanned as
+    ``Control`` until the day of treatment. Selecting on it therefore hides
+    treated wells' baselines inside the Control pool, and any panel that later
+    relabels by well (as F6c does) ends up plotting bursts it never asked for.
+
+    No recording is subsampled. ``seed`` is still threaded through for the
+    downstream KMeans/silhouette in :func:`_cluster`, so the fit stays
+    reproducible.
+    """
+    wi = S.well_index(tidy)[["well_uid", "arm"]]
+    d = tidy.merge(wi, on="well_uid", how="left")
+    frames, skipped = [], []
     for grp in FOCUS_GROUPS:
-        rows = tidy[(tidy.canonical_group == grp) & (tidy.nb_count >= 5)]
-        if rows.empty:
-            continue
-        take = rows.sample(min(len(rows), _MAX_ROWS_PER_GROUP), random_state=seed)
-        for _, r in take.iterrows():
+        rows = d[(d.arm == grp) & (d.nb_count >= _MIN_NB_COUNT)]
+        for _, r in rows.iterrows():
             try:
                 b = L.load_ml_bursts(analysis_root, r)
             except FileNotFoundError:
-                continue
+                b = None
             if b is None or b.empty or not set(FEATURES).issubset(b.columns):
+                skipped.append((grp, int(r["tau"])))
                 continue
             full = b
             b = b[FEATURES].copy()
@@ -95,8 +124,39 @@ def collect_bursts(tidy, analysis_root, seed: int = 0) -> pd.DataFrame:
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     out = out.dropna(subset=FEATURES)
     if len(out) > _MAX_BURSTS:
+        logger.warning(
+            "burst cap %d binding on a pool of %d — the fit is a subsample again; "
+            "raise _MAX_BURSTS", _MAX_BURSTS, len(out))
         out = out.sample(_MAX_BURSTS, random_state=seed).reset_index(drop=True)
+    out.attrs["selection"] = _selection_summary(d, out, skipped)
     return out
+
+
+def _selection_summary(d: pd.DataFrame, out: pd.DataFrame, skipped: list) -> pd.DataFrame:
+    """What the fit is built on, and what the eligibility gates removed.
+
+    Written next to the panel so a reader can tell an arm that genuinely has no
+    pre-treatment data from one whose baselines were filtered away.
+    """
+    sk = pd.DataFrame(skipped, columns=["arm", "tau"])
+    key = ["well_uid", "recording_key", "rec_name"]
+    rows = []
+    for grp in FOCUS_GROUPS:
+        pool = d[d.arm == grp]
+        for pre, sub in pool.groupby(pool.tau < 0):
+            used = out[(out.group == grp) & ((out.tau < 0) == pre)] if len(out) else out
+            miss = sk[(sk.arm == grp) & ((sk.tau < 0) == pre)]
+            rows.append(dict(
+                arm=grp, pre_treatment=bool(pre),
+                recs_total=len(sub),
+                # NaN nb_count fails the gate too, so negate the gate rather than
+                # counting rows below it.
+                recs_below_nb_count=int((~(sub.nb_count >= _MIN_NB_COUNT)).sum()),
+                recs_no_burst_file=len(miss),
+                recs_used=int(used[key].drop_duplicates().shape[0]) if len(used) else 0,
+                wells_used=int(used.well_uid.nunique()) if len(used) else 0,
+                bursts=len(used)))
+    return pd.DataFrame(rows)
 
 
 def name_archetypes(prof: np.ndarray, feat_labels=FEAT_LABELS) -> list:
@@ -129,18 +189,31 @@ def name_archetypes(prof: np.ndarray, feat_labels=FEAT_LABELS) -> list:
     return out
 
 
+_SIL_DRAWS, _SIL_SIZE = 5, 3000
+
+
 def _cluster(Z: np.ndarray, seed: int = 0) -> tuple[np.ndarray, int]:
-    """KMeans with k chosen by silhouette (k = 2..6)."""
+    """KMeans on every burst, with k chosen by silhouette (k = 2..6).
+
+    The silhouette is O(n²), so it is scored on subsamples rather than the whole
+    pool — but on a single draw the winning k is partly a property of that draw.
+    Averaging several disjoint draws makes the choice a property of the data.
+    """
     from sklearn.cluster import KMeans
     from sklearn.metrics import silhouette_score
 
+    rng = np.random.default_rng(seed)
+    n = min(_SIL_SIZE, len(Z))
+    draws = [rng.choice(len(Z), n, replace=False) for _ in range(_SIL_DRAWS)]
     best = None
     for k in range(2, 7):
         km = KMeans(n_clusters=k, n_init=10, random_state=seed).fit(Z)
-        # silhouette on a subsample for speed
-        idx = np.random.default_rng(seed).choice(
-            len(Z), min(3000, len(Z)), replace=False)
-        s = silhouette_score(Z[idx], km.labels_[idx])
+        scores = [silhouette_score(Z[i], km.labels_[i]) for i in draws
+                  if len(np.unique(km.labels_[i])) > 1]
+        if not scores:
+            continue
+        s = float(np.mean(scores))
+        logger.debug("k=%d silhouette %.4f (%d draws)", k, s, len(scores))
         if best is None or s > best[0]:
             best = (s, k, km.labels_)
     return best[2], best[1]

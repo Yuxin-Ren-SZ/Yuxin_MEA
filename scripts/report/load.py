@@ -167,21 +167,21 @@ def load_templates(analysis_root: Path, row: pd.Series | dict[str, Any]):
     return np.load(p)
 
 
-def load_units(
-    analysis_root: Path,
-    rows: pd.DataFrame,
-    limit: int | None = None,
-) -> pd.DataFrame:
+def load_units(analysis_root: Path, rows: pd.DataFrame) -> pd.DataFrame:
     """Concatenate per-unit ``quality_metrics.pkl`` for the given tidy rows.
 
     Each unit row is annotated with its well identifiers + ``canonical_group``
     so downstream figures can group/colour without a second join. Missing
     pickles are skipped (logged count returned via attrs).
+
+    Reads every row it is given. There used to be a ``limit`` that quietly took
+    the first ``n`` — no caller ever passed it, and a truncation this easy to
+    reach is the same footgun that made the S2 QC histograms describe 2% of the
+    cohort. Narrow ``rows`` at the call site, where the choice is visible.
     """
     frames: list[pd.DataFrame] = []
     n_missing = 0
-    sub = rows if limit is None else rows.head(limit)
-    for _, r in sub.iterrows():
+    for _, r in rows.iterrows():
         p = quality_metrics_path(analysis_root, r)
         if not p.exists():
             n_missing += 1
@@ -199,7 +199,7 @@ def load_units(
     else:
         out = pd.concat(frames, ignore_index=True)
     out.attrs["n_missing"] = n_missing
-    out.attrs["n_wells"] = len(sub) - n_missing
+    out.attrs["n_wells"] = len(rows) - n_missing
     return out
 
 

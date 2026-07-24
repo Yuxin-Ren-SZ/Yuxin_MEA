@@ -1,11 +1,62 @@
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ._mxassay_decoder import decode_mxassay_metadata
+
+# --------------------------------------------------------------------------- #
+# Assay tag -> hours since the last media change
+# --------------------------------------------------------------------------- #
+#: ``Run #000019`` — stripped before any number is read, or a bare-number tag
+#: like ``"Run #000022 24"`` would yield the run number instead of the interval.
+#: The ``#`` is what identifies a run id, so ``Run`` is optional and a lone
+#: ``"#000048"`` is still recognised as a run id and not read as 48 hours; a tag
+#: that is just ``"24"``, with no ``#``, keeps its number.
+_RUN_PREFIX = re.compile(r"^\s*(?:run\s*)?#\s*\d+\s*", re.I)
+#: ``24H`` / ``0.5 h`` / ``15H``. The ``H`` is **mandatory** — an interval is only
+#: an interval when it is labelled as one, so a bare number anywhere in the tag is
+#: not read as hours. The unit may sit mid-tag (``"24H Post Drug"``), and the
+#: negative lookahead keeps ``H`` a unit rather than the first letter of a word.
+_HOURS = re.compile(r"(\d+(?:\.\d+)?)\s*[Hh](?![A-Za-z])")
+_MINUTES = re.compile(r"(\d+(?:\.\d+)?)\s*min", re.I)
+_IMMEDIATE = re.compile(r"\bimm\b", re.I)
+
+
+def parse_hours_since_media(tag: str | None) -> float | None:
+    """Hours between the last media change and this recording, from its assay tag.
+
+    The tag is free text a human typed at the scanner, so the real inventory
+    looks like ``"Run #000007 24H"``, ``"Run #000009 Imm 0.5H"``,
+    ``"Run #000019 Using 015 as base 15H"``, ``"Run #000064 24H Post Drug"``,
+    ``"Run #000054 5 min post drug. using 052 conf"`` and
+    ``"Run #000017 Old_config"``.
+
+    An hour is only read where it is **labelled** ``H``; the label may sit
+    anywhere in the tag, not just at the end. A bare number is never an interval
+    — ``"Run #000022 24"`` records no unit, and guessing hours from it would put
+    a number in the column that nobody wrote down.
+
+    Returns ``None`` — never ``0.0`` — when the tag records no interval at all.
+    "Nobody wrote down when the media was changed" and "recorded at the media
+    change" are different facts, and collapsing them would silently admit
+    untimed recordings into an acute-timepoint window.
+    """
+    body = _RUN_PREFIX.sub("", str(tag or "")).strip()
+    if not body:
+        return None
+    m = _MINUTES.search(body)
+    if m:
+        return float(m.group(1)) / 60.0
+    hits = _HOURS.findall(body)
+    if hits:
+        # Last match wins: in "NU Imm 1.5H" the explicit number has to beat the
+        # bare "Imm" below, and "Using 015 as base 15H" must not read the 015.
+        return float(hits[-1])
+    return 0.0 if _IMMEDIATE.search(body) else None
 
 # Keys added by the decoder that are not metadata fields from the file itself.
 _DECODER_INTERNAL_KEYS = frozenset({

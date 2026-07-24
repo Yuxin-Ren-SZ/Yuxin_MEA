@@ -15,8 +15,16 @@ DIV_WINDOW = (18, 24)
 
 
 def _pick_per_group(tidy):
-    """For each arm, the in-window recording with the most curated units."""
-    win = tidy[(tidy.DIV >= DIV_WINDOW[0]) & (tidy.DIV <= DIV_WINDOW[1])]
+    """For each arm, the in-window recording with the most curated units.
+
+    The DIV window happens to contain no pre-treatment recording on this cohort,
+    but that is arithmetic about three chips' plating dates, not a property of
+    the selection. The explicit ``tau > 0`` makes the example post-treatment by
+    construction — without it, a treated well's baseline (labelled ``Control``
+    on CX138) is eligible to be drawn as the Control raster.
+    """
+    win = tidy[(tidy.DIV >= DIV_WINDOW[0]) & (tidy.DIV <= DIV_WINDOW[1])
+               & (tidy.tau > 0)]
     win = win.dropna(subset=["n_curated"])
     picks = {}
     for arm in ordered_groups(win.canonical_group.unique()):

@@ -180,7 +180,10 @@ layout = html.Div([
     ),
     html.Div(id="plate-viewer-banner-slot"),
     # Filters narrow the Recording dropdown below (same bar as the other pages).
-    build_filter_bar("plate-viewer"),
+    # Five facets, as before: this bar selects a plate to view, and an
+    # hours-since-media control would render here with no callback behind it.
+    build_filter_bar("plate-viewer",
+                     show=("sample", "scan-type", "date", "group", "status")),
     html.Div(
         [
             html.Label("Recording", className="section-label",

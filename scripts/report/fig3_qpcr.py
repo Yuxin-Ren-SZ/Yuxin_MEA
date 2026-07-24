@@ -56,6 +56,14 @@ GENE_ALIASES = {"GABDH": "GAPDH"}
 #: is a reference-gene screen and is skipped by F3 (it feeds S5 instead).
 REFERENCE_CANDIDATES = {"ACTB", "GAPDH", "HPRT1", "B2M", "TBP", "RPLP0", "18S"}
 
+#: Arms parsed from the plate but kept out of the figures. The oxidative-stress
+#: arms are a separate line of enquiry from the CSF comparison the report makes,
+#: and on a single chip with technical duplicates they add columns without adding
+#: evidence. They stay in ``F3a_qpcr_tidy.csv`` / ``F3a_qpcr_effects.csv`` — the
+#: record is complete; only the drawn figure is narrowed. Empty this set to bring
+#: them back.
+EXCLUDED_GROUPS = {"H2O2_10uM", "H2O2_20uM"}
+
 #: Arm prefix (post-normalisation) -> canonical_group in ``GROUP_PALETTE``.
 GROUP_ALIASES = {
     "CT": "Control",
@@ -408,6 +416,17 @@ def _calibrate_per_chip(df: pd.DataFrame) -> pd.DataFrame:
 CONTROL_GROUP = "Control"
 
 
+def drawable(tidy: pd.DataFrame) -> pd.DataFrame:
+    """``tidy`` without the arms held out of the figures (:data:`EXCLUDED_GROUPS`).
+
+    Applied by the figure builders rather than by the loader, so the exported
+    tables and any interactive use still see every arm that was on the plate.
+    """
+    if not EXCLUDED_GROUPS or "group" not in tidy.columns:
+        return tidy
+    return tidy[~tidy.group.isin(EXCLUDED_GROUPS)].copy()
+
+
 def control_reference(tidy: pd.DataFrame,
                       interpolate: bool = True) -> pd.DataFrame:
     """Per ``(sample_id, gene, day)`` Control ΔCq, with failed days filled in.
@@ -661,6 +680,7 @@ def build_f3(tidy: pd.DataFrame, genes: list[str] | None = None):
 
     from .report_style import MUTED, QC_NA, fc_div_cmap
 
+    tidy = drawable(tidy)
     # Story order: group rows by cell type (GFAP astrocyte first, then the
     # neuronal / synaptic markers) so the pattern reads as a pattern.
     if genes is None:
@@ -752,10 +772,15 @@ def build_f3(tidy: pd.DataFrame, genes: list[str] | None = None):
     fig.text(0.985, 0.965, "PRELIMINARY · n=1 chip · technical duplicates · "
              "no statistics", ha="right", va="top", fontsize=6.5,
              color="#A83B00", fontweight="bold")
-    # Story callout printed on the figure.
+    # Story callout printed on the figure. Names the arms actually drawn — it
+    # claimed consistency with H2O2 while those columns were on the figure, and a
+    # callout that outlives the columns it describes is a wrong claim, not a
+    # stale one.
+    drawn = list(dict.fromkeys(c[2] for c in columns if c[0] == "eff" and c[2]))
+    shown = " and ".join(a.replace("_", " ") for a in drawn) or "the treated arms"
     fig.text(0.5, 0.028, "GFAP ↑ (astrogliosis) while MAP2 / VGLUT1 / VGAT ↓ "
-             "(neuronal & synaptic loss) — consistent across both IVH arms and "
-             "H₂O₂.", ha="center", va="bottom", fontsize=7.5, color="#5A5140",
+             f"(neuronal & synaptic loss) — consistent across {shown}.",
+             ha="center", va="bottom", fontsize=7.5, color="#5A5140",
              bbox=dict(boxstyle="round,pad=0.4", facecolor="#FBF3E0",
                        edgecolor="#C79A2E", lw=0.8))
     fig.tight_layout(rect=(0, 0.075, 1, 0.92))

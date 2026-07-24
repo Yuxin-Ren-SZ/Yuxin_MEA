@@ -59,10 +59,16 @@ def _stride_keep(n: int, k: int, seed: int = 0) -> np.ndarray:
     return np.sort(np.random.default_rng(seed).choice(n, k, replace=False))
 
 
-def _pick_well(tidy, analysis_root, arm: str):
-    """Well of this arm with the most DIV-spanning debug traces (chip CX118)."""
+def _pick_well(tidy, analysis_root, arm: str, chip: str = "CX118"):
+    """Well of this arm with the most DIV-spanning debug traces on ``chip``.
+
+    Fallback only: :data:`SELECTED_WELLS` is hand-picked and wins for every arm
+    the report draws, so this runs solely if that mapping loses an arm. ``chip``
+    is a parameter rather than a literal because the default no longer matches
+    the chip the figure actually shows.
+    """
     wi = S.well_index(tidy)
-    wells = wi[(wi.arm == arm) & (wi.chip == "CX118")].well_uid
+    wells = wi[(wi.arm == arm) & (wi.chip == chip)].well_uid
     best = None
     for w in wells:
         sub = tidy[tidy.well_uid == w]

@@ -75,7 +75,10 @@ layout = html.Div(
         html.Div(id="run-banner-slot"),
         # Filters narrow the Recordings dropdown below (keeps the built command
         # sane — you still pick explicit keys from the filtered set).
-        build_filter_bar("run"),
+        # Pinned to the five original facets: this bar picks a recording to run,
+        # and an hours-since-media control here would render with no callback
+        # behind it. Add "hours" once this page's callback populates and reads it.
+        build_filter_bar("run", show=("sample", "scan-type", "date", "group", "status")),
         html.Div(
             [
                 html.Div(

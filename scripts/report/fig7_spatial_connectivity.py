@@ -112,17 +112,25 @@ _B_GROUPS = ["Control", "IVH_Early", "IVH_Late"]
 _B_DIV = (14, 24)
 
 
-def _panel_sttc_distance(ax, analysis_root, tidy, max_wells=18, seed=0):
+def _panel_sttc_distance(ax, analysis_root, tidy, seed=0):
+    """Mean STTC vs inter-unit distance, over every well-recording in the window.
+
+    This is a distribution, not an example, so it reads every eligible STTC
+    matrix rather than a capped draw: an 18-well-per-group cap made the curve —
+    and which chips contributed to it — a property of the seed.
+    """
     ax.set_title("C  STTC vs inter-unit distance", loc="left", fontweight="bold")
-    win = tidy[(tidy.DIV >= _B_DIV[0]) & (tidy.DIV <= _B_DIV[1])
-               & tidy.mean_sttc.notna()]
+    wi = S.well_index(tidy)[["well_uid", "arm"]]
+    win = tidy.merge(wi, on="well_uid", how="left")
+    win = win[(win.DIV >= _B_DIV[0]) & (win.DIV <= _B_DIV[1])
+              & win.mean_sttc.notna()]
     centers = (DIST_BINS[:-1] + DIST_BINS[1:]) / 2
     any_line = False
+    n_used = {}
     for g in _B_GROUPS:
-        rows = win[win.canonical_group == g]
+        rows = win[win.arm == g]
         if rows.empty:
             continue
-        rows = rows.sample(min(len(rows), max_wells), random_state=seed)
         D, Sv = [], []
         for _, r in rows.iterrows():
             try:
@@ -132,6 +140,7 @@ def _panel_sttc_distance(ax, analysis_root, tidy, max_wells=18, seed=0):
             D.append(d); Sv.append(s)
         if not D:
             continue
+        n_used[g] = len(D)
         D = np.concatenate(D); Sv = np.concatenate(Sv)
         idx = np.digitize(D, DIST_BINS) - 1
         means = np.array([np.nanmean(Sv[idx == b]) if np.any(idx == b) else np.nan
@@ -146,19 +155,28 @@ def _panel_sttc_distance(ax, analysis_root, tidy, max_wells=18, seed=0):
     ax.set_xlabel("inter-unit distance (µm)")
     ax.set_ylabel("mean STTC")
     ax.legend(fontsize=6, loc="upper right")
-    ax.text(0.02, 0.02, f"DIV {_B_DIV[0]}–{_B_DIV[1]}, ≤{max_wells} wells/group",
-            transform=ax.transAxes, fontsize=5.5, color="0.45", va="bottom")
+    used = " / ".join(str(n_used.get(g, 0)) for g in _B_GROUPS)
+    ax.text(0.02, 0.02, f"DIV {_B_DIV[0]}–{_B_DIV[1]}, all well-recordings "
+            f"({used})", transform=ax.transAxes, fontsize=5.5, color="0.45",
+            va="bottom")
 
 
 def _pick_representative(tidy, metric, group, lo=14, hi=24):
     """Row whose ``metric`` is nearest that group's median (matched DIV) — so
-    the example graph is representative, not an outlier."""
+    the example graph is representative, not an outlier.
+
+    The DIV window lands after treatment on every chip, but the fallback that
+    drops it does not, so the fallback keeps an explicit post-treatment guard:
+    a treated well's baseline is labelled ``Control`` on CX138 and would
+    otherwise be eligible as a Control example.
+    """
     if metric not in tidy.columns:
         return None
     sub = tidy[(tidy.canonical_group == group) & tidy[metric].notna()
                & (tidy.DIV >= lo) & (tidy.DIV <= hi)]
     if sub.empty:
-        sub = tidy[(tidy.canonical_group == group) & tidy[metric].notna()]
+        sub = tidy[(tidy.canonical_group == group) & tidy[metric].notna()
+                   & (tidy.tau > 0)]
     if sub.empty:
         return None
     med = sub[metric].median()

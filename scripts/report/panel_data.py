@@ -23,9 +23,11 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+from yuxin_mea.dataset.metadata import parse_hours_since_media
+
 from . import load as L
 from . import stats as S
-from .report_style import report_dir, resolve_roots
+from .report_style import DEFAULT_CONFIG, report_dir, resolve_roots
 
 logger = logging.getLogger("report.data")
 
@@ -33,6 +35,23 @@ logger = logging.getLogger("report.data")
 MAIN_ARMS = ["Control", "IVH_Early", "IVH_Late"]
 #: Treated arms (Control is the reference, never listed as a focus arm).
 FOCUS_ARMS = ["IVH_Early", "IVH_Late"]
+
+# --------------------------------------------------------------------------- #
+# Time since the last media change
+# --------------------------------------------------------------------------- #
+# A well recorded 30 minutes after its media was changed is not comparable with
+# the same well recorded a day later: the acute scans capture the medium swap,
+# not the treatment. ``hours_since_media`` (parsed from each recording's assay
+# tag) makes that explicit, and these windows keep the report on one timepoint.
+#: ~24 h after the media change — the routine post-treatment scan.
+MEDIA_WINDOW_POST = (18.0, 30.0)
+#: A full day to two days — the pre-treatment baseline.
+MEDIA_WINDOW_PRE = (24.0, 48.0)
+#: Some early tags record no interval at all ("Test", "Old_config"). The protocol
+#: default is a scan the next day, which is what ``_treatment_from_flip`` has
+#: always assumed; those rows are admitted on that basis rather than discarded,
+#: and the count is logged so the assumption stays visible.
+ASSUME_HOURS_WHEN_UNKNOWN = 24.0
 
 # --------------------------------------------------------------------------- #
 # Metric families — one per figure.
@@ -108,16 +127,33 @@ class PanelContext:
         self.config_path = config_path
         self.analysis_root, self.figure_root = resolve_roots(config_path)
         tidy = L.load_tidy(self.figure_root)
+        # The window is part of the cache key, not just of the result: it decides
+        # which recordings every derived table is built from, so widening it — or
+        # turning it off with ``media_window: null`` — has to invalidate the
+        # pickles. Hashing only the on-disk table would let a config change come
+        # back served from a cache built under the old cohort, with nothing on
+        # screen to say so.
+        self.media_window = _media_window_config(config_path)
         fp = hashlib.sha256(
-            f"{self.analysis_root}|{len(tidy)}|{','.join(sorted(tidy.columns))}".encode()
+            f"{self.analysis_root}|{len(tidy)}|{','.join(sorted(tidy.columns))}"
+            f"|media={self.media_window}".encode()
         ).hexdigest()[:16]
         self.cache = _Cache(self.figure_root, fp, refresh=refresh)
-        self.tidy = self.cache.get("tidy_backfilled", lambda: _backfill(tidy, self.analysis_root))
+        # Applied here rather than per panel, so every derived table inherits one
+        # cohort and no figure can quietly disagree with its neighbours about
+        # which recordings the report is about.
+        self.tidy = self.cache.get(
+            "tidy_backfilled",
+            lambda: _restrict_media_window(
+                _backfill_hours(_backfill(tidy, self.analysis_root),
+                                self.analysis_root),
+                self.media_window))
         # qPCR plate exports live beside the MEA analysis tree; the conventional
         # location is used unless a panel is given an explicit one.
         default_qpcr = self.analysis_root / "qPCR"
         self.qpcr_dir = Path(qpcr_dir) if qpcr_dir else (
             default_qpcr if default_qpcr.is_dir() else None)
+        _warn_baseline_labels(self.tidy)
 
     # -- convenience views ------------------------------------------------- #
     @property
@@ -208,13 +244,20 @@ class PanelContext:
         The HMM-posterior panel needs ``debug_trace.pkl``, which only exists for
         runs with ``debug=True``; candidates are ranked by burst rate so the
         chosen example actually shows burst structure rather than a flat trace.
+
+        Selection is on the well's arm and restricted to post-treatment
+        recordings. Matching ``canonical_group`` instead would silently mean
+        "post-treatment" for a treated arm and "anything, including treated wells'
+        baselines" for Control — two different things under one parameter.
         """
         key = f"ml_row|{arm}|{min_bursts}|{min_units}"
 
         def build():
-            cand = self.tidy[(self.tidy.canonical_group == arm)
-                             & (self.tidy.nb_count >= min_bursts)
-                             & (self.tidy.n_curated >= min_units)]
+            wi = S.well_index(self.tidy).set_index("well_uid").arm
+            t = self.tidy.assign(_arm=self.tidy.well_uid.map(wi))
+            cand = t[(t._arm == arm) & (t.tau > 0)
+                     & (t.nb_count >= min_bursts)
+                     & (t.n_curated >= min_units)]
             for _, r in cand.sort_values("nb_rate", ascending=False).iterrows():
                 if L.ml_trace_path(self.analysis_root, r).exists():
                     return r
@@ -239,6 +282,113 @@ def context(config_path=None, refresh: bool = False, qpcr_dir=None) -> PanelCont
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def _warn_baseline_labels(tidy: pd.DataFrame) -> None:
+    """Log, per sample, how many baselines are labelled ``Control`` on a treated well.
+
+    ``canonical_group`` is the groupname the MaxWell chip carried at scan time, and
+    the convention differs between chips: CX118 and CX169 name a treated well from
+    its first pre-treatment scan, CX138 scanned the whole plate as ``Control`` until
+    treatment day. Any selection written against ``canonical_group`` therefore sees
+    a different cohort on different chips — treated baselines missing from their own
+    arm and pooled into Control. Surfacing the count once makes that visible instead
+    of leaving it to reshape selection pools silently.
+    """
+    if not {"canonical_group", "tau", "well_uid", "sample_id"}.issubset(tidy.columns):
+        return
+    arm = S.well_index(tidy).set_index("well_uid").arm
+    d = tidy.assign(arm=tidy.well_uid.map(arm))
+    bad = d[(d.tau < 0) & (d.canonical_group == "Control") & (d.arm != "Control")]
+    if bad.empty:
+        return
+    for sample, sub in bad.groupby("sample_id"):
+        logger.warning(
+            "%s: %d pre-treatment recordings on %d treated wells are labelled "
+            "'Control' (arms: %s) — select on the well's arm, not canonical_group",
+            sample, len(sub), sub.well_uid.nunique(),
+            ", ".join(sorted(sub.arm.dropna().unique())))
+
+
+def _media_window_config(config_path) -> dict | None:
+    """Read the ``media_window`` block, or the defaults, or ``None`` to disable.
+
+    Absent from the config → the module defaults. Explicitly ``null`` → the filter
+    is off and the whole cohort is analysed, which is the escape hatch for
+    checking what the window costs without editing code.
+    """
+    cfg: dict = {}
+    try:
+        with (Path(config_path) if config_path else DEFAULT_CONFIG).open() as fh:
+            cfg = json.load(fh)
+    except Exception as exc:  # noqa: BLE001 — a missing config just means defaults
+        logger.debug("media_window: config unreadable (%s); using defaults", exc)
+    block = cfg.get("media_window", cfg.get("global", {}).get("media_window", {}))
+    if block is None:
+        return None
+    return {
+        "pre": tuple(block.get("pre", MEDIA_WINDOW_PRE)),
+        "post": tuple(block.get("post", MEDIA_WINDOW_POST)),
+        "assume_unknown_hours": block.get("assume_unknown_hours",
+                                          ASSUME_HOURS_WHEN_UNKNOWN),
+    }
+
+
+def _restrict_media_window(tidy: pd.DataFrame, window: dict | None) -> pd.DataFrame:
+    """Keep recordings taken a comparable time after their last media change.
+
+    Pre-treatment (``tau < 0``) and post-treatment rows get different windows: a
+    baseline may sit anywhere from a day to two days after the change, but a
+    treatment-period scan has to be the routine ~24 h one. ``tau == 0`` is gated
+    with the post window, which rejects it — every tau-0 recording carries a 0 h
+    tag by construction, since the treatment date is back-dated from that very
+    scan's tag.
+
+    Bounds are inclusive at both ends **deliberately**: the unknown-tag default
+    sits exactly on the pre window's lower edge, and an exclusive comparison would
+    silently drop the untimed baselines this is meant to keep.
+    """
+    if window is None or "hours_since_media" not in tidy.columns:
+        if window is not None:
+            logger.warning("media window skipped: tidy has no hours_since_media "
+                           "column — re-run compare_treatment_groups to add it")
+        return tidy
+    h = pd.to_numeric(tidy.hours_since_media, errors="coerce")
+    unknown = h.isna()
+    h = h.fillna(window["assume_unknown_hours"])
+    pre = tidy.tau < 0
+    lo_pre, hi_pre = window["pre"]
+    lo_post, hi_post = window["post"]
+    keep = np.where(pre,
+                    h.between(lo_pre, hi_pre, inclusive="both"),
+                    h.between(lo_post, hi_post, inclusive="both"))
+    out = tidy[keep].copy()
+
+    before = _pre_post_coverage(tidy)
+    after = _pre_post_coverage(out)
+    logger.info("media window pre %s post %s: kept %d/%d recordings "
+                "(%d admitted on the unknown-tag default of %g h)",
+                window["pre"], window["post"], len(out), len(tidy),
+                int((unknown & keep).sum()), window["assume_unknown_hours"])
+    for sample, n_drop in (tidy[~keep].groupby("sample_id").size().items()):
+        logger.info("  %s: %d recordings outside the window", sample, n_drop)
+    # A well that loses its last baseline stops being paired and vanishes from
+    # every difference-in-differences — the one failure mode of this filter that
+    # would not look like a filter.
+    lost = sorted(before - after)
+    if lost:
+        logger.warning("media window cost %d well(s) their pre or post coverage: %s",
+                       len(lost), ", ".join(f"{w} ({side})" for w, side in lost[:10]))
+    return out
+
+
+def _pre_post_coverage(tidy: pd.DataFrame) -> set:
+    """``{(well_uid, "pre"|"post")}`` for every well that has that side."""
+    if tidy.empty or "well_uid" not in tidy.columns:
+        return set()
+    pre = tidy[tidy.tau < 0].well_uid.unique()
+    post = tidy[tidy.tau > 0].well_uid.unique()
+    return {(w, "pre") for w in pre} | {(w, "post") for w in post}
+
+
 def _restrict_arms(tidy: pd.DataFrame, arms: list[str]) -> pd.DataFrame:
     """Keep wells whose *treatment identity* is in ``arms``.
 
@@ -283,4 +433,33 @@ def _backfill(tidy: pd.DataFrame, analysis_root: Path) -> pd.DataFrame:
         out[c] = vals[c]
     n_ok = {c: int(pd.notna(out[c]).sum()) for c in missing}
     logger.info("backfilled burst-variability columns: %s of %d rows", n_ok, len(out))
+    return out
+
+
+def _backfill_hours(tidy: pd.DataFrame, analysis_root: Path) -> pd.DataFrame:
+    """Derive ``hours_since_media`` from the assay tags when the roll-up predates it.
+
+    ``compare_treatment_groups`` writes this column now, but the live
+    ``tidy_long.csv`` also carries criticality and directed-connectivity columns
+    that script does not produce — so re-running it to pick up one new column
+    would drop twenty-two others. Deriving here instead keeps both: the column is
+    read straight from ``experiment_cache.json``, which is the same source the
+    roll-up uses, so the two paths cannot disagree.
+    """
+    if "hours_since_media" in tidy.columns:
+        return tidy
+    path = analysis_root / "experiment_cache.json"
+    if not path.exists():
+        logger.warning("no experiment_cache.json at %s — hours_since_media unavailable",
+                       path)
+        return tidy
+    with path.open() as fh:
+        cache = json.load(fh)
+    hours = {k: parse_hours_since_media((r.get("metadata") or {}).get("tag"))
+             for k, r in cache.items()}
+    out = tidy.copy()
+    out["hours_since_media"] = out.recording_key.map(hours)
+    known = int(pd.notna(out.hours_since_media).sum())
+    logger.info("derived hours_since_media for %d of %d rows (%d tags record no "
+                "interval)", known, len(out), len(out) - known)
     return out

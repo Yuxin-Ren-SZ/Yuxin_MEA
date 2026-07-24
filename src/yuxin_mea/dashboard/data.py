@@ -15,8 +15,13 @@ from pathlib import Path
 import pandas as pd
 
 from yuxin_mea.dataset.cache import JsonCacheStore
+from yuxin_mea.dataset.metadata import parse_hours_since_media
 from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
 from yuxin_mea.pipeline.task_record import TaskStatus
+
+#: Option value standing in for "the assay tag records no interval". A dropdown
+#: value has to be JSON-serialisable and comparable, so ``None`` cannot be one.
+HOURS_UNKNOWN = "unknown"
 
 
 _RECORDING_COLUMNS = [
@@ -114,6 +119,12 @@ def load_recordings_detail(
                 # {"h5": {method, sha256, ...}, "metadata": {sha256, ...}|None} — {}
                 # when never fingerprinted. See doc/caching.md.
                 "raw_fingerprint": e.raw_fingerprint or {},
+                # Hours between the last media change and this scan, parsed from
+                # the recording's free-text assay tag. Derived on read rather than
+                # persisted: the tag itself is already cached, so re-deriving costs
+                # nothing and a parser fix reaches old recordings without a rescan.
+                # None when the tag records no interval.
+                "hours_since_media": parse_hours_since_media(e.metadata.get("tag")),
             }
         )
     recordings.sort(key=lambda r: (r["sample_id"], r["date"], r["run_id"]))
@@ -174,6 +185,18 @@ def well_group_map(analysis_root: Path) -> dict[str, str]:
     return out
 
 
+def recording_hours_map(analysis_root: Path) -> dict[str, float | None]:
+    """Map ``cache_key`` → hours between the last media change and the recording.
+
+    Keyed by recording, not by well: the assay tag describes the whole scan. The
+    Pipeline page's ``recording_key`` is the same string, so this joins directly
+    without the ``rec_name/well_id`` suffix `well_group_map` needs.
+    """
+    entries = JsonCacheStore(analysis_root).load()
+    return {e.cache_key: parse_hours_since_media(e.metadata.get("tag"))
+            for e in entries.values()}
+
+
 def filter_recordings(
     recordings: list[dict],
     well_pipeline_status: dict[str, dict],
@@ -184,6 +207,7 @@ def filter_recordings(
     date_from: str | None = None,
     date_to: str | None = None,
     groups: list[str] | None = None,
+    hours_since_media: list[float | str] | None = None,
     statuses: list[str] | None = None,
     queue_status: str = "all",
 ) -> list[dict]:
@@ -208,6 +232,15 @@ def filter_recordings(
     if groups:
         group_set = set(groups)
         out = [r for r in out if group_set & set(r.get("groups", []))]
+    if hours_since_media:
+        # Recording-level, so no "any well" rule: one assay tag per scan. The
+        # sentinel keeps untimed recordings selectable — they are a real category,
+        # not an absence, and hiding them makes them impossible to audit.
+        wanted = {HOURS_UNKNOWN if h in (None, HOURS_UNKNOWN) else float(h)
+                  for h in hours_since_media}
+        out = [r for r in out
+               if (r.get("hours_since_media") if r.get("hours_since_media") is not None
+                   else HOURS_UNKNOWN) in wanted]
     if statuses:
         status_set = set(statuses)
         out = [
@@ -237,8 +270,10 @@ def filter_pipeline_df(
     date_from: str | None = None,
     date_to: str | None = None,
     groups: list[str] | None = None,
+    hours_since_media: list[float | str] | None = None,
     statuses: list[str] | None = None,
     group_map: dict[str, str] | None = None,
+    hours_map: dict[str, float | None] | None = None,
 ) -> pd.DataFrame:
     """Filter the pipeline matrix DataFrame from `load_pipeline_df`.
 
@@ -273,6 +308,16 @@ def filter_pipeline_df(
             lambda r: gmap.get(f"{r['recording_key']}/{r['well_id']}"), axis=1
         )
         keep &= row_group.isin(group_set)
+
+    if hours_since_media:
+        # Keyed on recording_key alone — one assay tag per scan, unlike group,
+        # which varies well by well.
+        hmap = hours_map or {}
+        wanted = {HOURS_UNKNOWN if h in (None, HOURS_UNKNOWN) else float(h)
+                  for h in hours_since_media}
+        row_hours = df["recording_key"].map(
+            lambda k: h if (h := hmap.get(k)) is not None else HOURS_UNKNOWN)
+        keep &= row_hours.isin(wanted)
 
     if statuses and task_cols:
         status_set = set(statuses)

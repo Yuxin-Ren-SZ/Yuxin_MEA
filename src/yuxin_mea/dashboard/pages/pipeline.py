@@ -29,8 +29,10 @@ from yuxin_mea.dashboard.components import (
 )
 from yuxin_mea.dashboard.context import load_pipeline_mgr
 from yuxin_mea.dashboard.data import (
+    HOURS_UNKNOWN,
     filter_pipeline_df,
     load_pipeline_df,
+    recording_hours_map,
     well_group_map,
 )
 from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
@@ -421,8 +423,22 @@ clientside_callback(
 
 # The date range picker is a single component; its start/end changes both report
 # the "…-filter-date" id, so pagination still resets on a date change.
-_PIPE_FILTER_FIELDS = ("sample", "scan-type", "date", "group", "status")
+_PIPE_FILTER_FIELDS = ("sample", "scan-type", "date", "group", "hours", "status")
 _PIPE_FILTER_IDS = [filter_id("pipeline", f) for f in _PIPE_FILTER_FIELDS]
+
+
+def _hours_options(hours_map: dict) -> list[dict]:
+    """Dropdown options for the hours-since-media facet.
+
+    Untimed recordings get their own option rather than being hidden — they are
+    a real category, and one worth being able to look at.
+    """
+    seen = set(hours_map.values())
+    opts = [{"label": f"{h:g} h", "value": h}
+            for h in sorted(v for v in seen if v is not None)]
+    if None in seen:
+        opts.append({"label": "no time recorded", "value": HOURS_UNKNOWN})
+    return opts
 
 
 @callback(
@@ -440,6 +456,7 @@ _PIPE_FILTER_IDS = [filter_id("pipeline", f) for f in _PIPE_FILTER_FIELDS]
     Output(filter_id("pipeline", "date"), "min_date_allowed"),
     Output(filter_id("pipeline", "date"), "max_date_allowed"),
     Output(filter_id("pipeline", "group"), "options"),
+    Output(filter_id("pipeline", "hours"), "options"),
     Input("pipeline-refresh", "n_clicks"),
     Input("pipeline-auto-refresh", "n_intervals"),
     Input("pipeline-selected-cell", "data"),
@@ -448,6 +465,7 @@ _PIPE_FILTER_IDS = [filter_id("pipeline", f) for f in _PIPE_FILTER_FIELDS]
     Input(filter_id("pipeline", "date"), "start_date"),
     Input(filter_id("pipeline", "date"), "end_date"),
     Input(filter_id("pipeline", "group"), "value"),
+    Input(filter_id("pipeline", "hours"), "value"),
     Input(filter_id("pipeline", "status"), "value"),
     Input("pipeline-page-prev", "n_clicks"),
     Input("pipeline-page-next", "n_clicks"),
@@ -462,6 +480,7 @@ def _refresh(
     f_date_from,
     f_date_to,
     f_group,
+    f_hours,
     f_status,
     _prev,
     _next,
@@ -480,6 +499,7 @@ def _refresh(
 
     pipe_df, task_names = load_pipeline_df(Path(analysis_root))
     group_map = well_group_map(Path(analysis_root))
+    hours_map = recording_hours_map(Path(analysis_root))
     n_entries = len(pipe_df)
     subtitle = f"{len(task_names)}-task DAG · {n_entries} pipeline entries · cache: pipeline_cache.json"
 
@@ -528,10 +548,12 @@ def _refresh(
             "date-from": iso_to_yymmdd(f_date_from),
             "date-to": iso_to_yymmdd(f_date_to),
             "group": f_group,
+            "hours": f_hours,
             "status": f_status,
         }
     )
-    filtered_all = filter_pipeline_df(pipe_df, group_map=group_map, **kwargs)
+    filtered_all = filter_pipeline_df(pipe_df, group_map=group_map,
+                                      hours_map=hours_map, **kwargs)
 
     # Page index: prev/next step it; a filter change resets to 0. Cell-select,
     # refresh, and the 30 s interval keep the current page.
@@ -635,6 +657,7 @@ def _refresh(
         date_min,
         date_max,
         [{"label": g, "value": g} for g in group_opts],
+        _hours_options(hours_map),
     )
 
 

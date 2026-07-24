@@ -46,6 +46,7 @@ import argparse
 import csv
 import json
 import logging
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +55,8 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 from scipy import stats
+
+from yuxin_mea.dataset.metadata import parse_hours_since_media
 
 logger = logging.getLogger("compare_treatment_groups")
 
@@ -181,6 +184,19 @@ def _group_lookup(experiment_cache: dict) -> dict[tuple[str, str], dict[str, str
     return out
 
 
+def _hours_lookup(experiment_cache: dict) -> dict[str, float | None]:
+    """Map recording_key -> hours between the last media change and the scan.
+
+    Recording-level, unlike :func:`_group_lookup`: the assay tag describes the
+    whole run, so every well of a recording shares one value. ``None`` where the
+    tag records no interval.
+    """
+    return {
+        rec_key: parse_hours_since_media((rec.get("metadata") or {}).get("tag"))
+        for rec_key, rec in experiment_cache.items()
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Template emission
 # --------------------------------------------------------------------------- #
@@ -205,28 +221,28 @@ def _norm_plating_date(s: str) -> str:
 def _treatment_from_flip(flip_date: str, tag: str) -> str:
     """Back-date the media-change (treatment) day from the first treated recording.
 
-    Recordings are taken some hours AFTER the media change; the ``tag`` encodes the
-    delay: 'Imm xH' → recorded at treatment (same day); '24H' → 1 day after;
-    '48H' → 2 days after. Default (no marker) assumes the usual 24 h delay.
-    So treatment_date = flip recording date − delay.
+    Recordings are taken some hours AFTER the media change and the tag records how
+    many, so treatment_date = flip recording date − ceil(hours / 24).
+
+    Shares :func:`parse_hours_since_media` with the rest of the pipeline rather
+    than re-implementing the ladder. The old inline version tested only for
+    ``imm`` / ``24h`` / ``48h``, so a ``72H`` or ``32H`` flip fell through to the
+    1-day default and mis-dated the whole chip; and ``Imm`` won over an explicit
+    number, so ``"NU Imm 1.5H"`` read as 0 h.
     """
     from datetime import timedelta
+
     dt = _parse_yymmdd(flip_date)
     if dt is None:
         return ""
-    t = str(tag).lower()
-    if "imm" in t:
-        delta = 0
-    elif "48h" in t:
-        delta = 2
-    elif "24h" in t:
-        delta = 1
-    else:
-        delta = 1  # protocol default: recording done 24 h after media change
+    hours = parse_hours_since_media(tag)
+    # No interval recorded → the protocol default, a scan 24 h after the change.
+    delta = 1 if hours is None else math.ceil(hours / 24.0)
     return (dt - timedelta(days=delta)).strftime("%y%m%d")
 
 
-def emit_template(experiment_cache: dict, out_path: Path) -> None:
+def emit_template(experiment_cache: dict, out_path: Path,
+                  refresh_only: bool = False) -> None:
     """Enumerate every (sample_id, plate_id, raw_groupname) and write a template.
 
     Auto-fills what the cached MaxWell annotations already contain, so the user
@@ -310,11 +326,66 @@ def emit_template(experiment_cache: dict, out_path: Path) -> None:
             "treated_media": "; ".join(sorted(slot["treated_media"])[:3]),
         })
 
+    rows = _keep_curation(rows, out_path, refresh_only=refresh_only)
     with out_path.open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=TEMPLATE_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
     logger.info("Wrote template with %d (sample,plate,group) rows -> %s", len(rows), out_path)
+
+
+def _keep_curation(rows: list[dict], out_path: Path,
+                   refresh_only: bool = False) -> list[dict]:
+    """Carry the reviewed columns of an existing template over a re-emit.
+
+    ``canonical_group``, ``role`` and the dates are what a human fills in — a
+    plain re-emit would reset ``IVH054_Early`` back to itself and lose the
+    mapping onto ``IVH_Early``. The counts and date ranges are the derived
+    review aids and *should* be refreshed: they go stale as recordings are added,
+    which is how ``treatment_map.csv`` came to claim a whole-plate Control group
+    for a chip whose cache no longer has one.
+
+    With ``refresh_only`` the row *set* is left alone: groups absent from the
+    current file are reported but not added. Adding a group here is not a
+    bookkeeping change — every well under it joins the analysed cohort, and an
+    auto-filled row with no ``treatment_date`` would enter it with an undefined
+    treatment day. Which experiments belong in the comparison is a decision for
+    whoever reviews the file.
+    """
+    if not out_path.exists():
+        return rows
+    with out_path.open(newline="") as fh:
+        prior = {(r["sample_id"].strip(), r["plate_id"].strip(),
+                  r["raw_groupname"].strip()): r for r in csv.DictReader(fh)}
+    kept = 0
+    for row in rows:
+        old = prior.get((row["sample_id"], row["plate_id"], row["raw_groupname"]))
+        if not old:
+            continue
+        kept += 1
+        for col in ("canonical_group", "role", "plating_date", "treatment_date"):
+            if (old.get(col) or "").strip():
+                row[col] = old[col].strip()
+    new = [r for r in rows
+           if (r["sample_id"], r["plate_id"], r["raw_groupname"]) not in prior]
+    if new:
+        logger.warning(
+            "%d group(s) in the cache are absent from %s and are %s: %s",
+            len(new), out_path.name,
+            "left out — add them by hand if they belong" if refresh_only
+            else "being added with auto-filled values; review them",
+            sorted((r["sample_id"], r["raw_groupname"]) for r in new))
+    dropped = set(prior) - {(r["sample_id"], r["plate_id"], r["raw_groupname"])
+                            for r in rows}
+    if dropped:
+        logger.warning("%d reviewed row(s) no longer in the cache and will be "
+                       "dropped: %s", len(dropped), sorted(dropped))
+    logger.info("Carried reviewed fields for %d/%d rows from the existing %s",
+                kept, len(rows), out_path.name)
+    if refresh_only:
+        rows = [r for r in rows
+                if (r["sample_id"], r["plate_id"], r["raw_groupname"]) in prior]
+    return rows
 
 
 def load_template(path: Path) -> dict[tuple[str, str, str], dict[str, Any]]:
@@ -390,6 +461,7 @@ def _curation_median_firing(qm_path: Path) -> dict[str, Any]:
 def build_long_table(
     analysis_root: Path,
     group_lut: dict[tuple[str, str], dict[str, str]],
+    hours_lut: dict[str, float | None] | None = None,
     burst_dirname: str = "burst_detection_data",
     ml_dirname: str = "ml_burst_data_umap",
     curation_dirname: str = "curation_data",
@@ -446,6 +518,10 @@ def build_long_table(
             **ids,
             "well_name": meta.get("well_name", "?"),
             "groupname": meta.get("groupname", "?"),
+            # NaN where the assay tag records no interval — the column states what
+            # was written down, and any assumed default belongs to whoever filters
+            # on it, not to the record.
+            "hours_since_media": (hours_lut or {}).get(ids["recording_key"], np.nan),
         }
         for name, spec in METRIC_SPECS.items():
             if spec["source"] == "burst":
@@ -843,6 +919,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="pipeline_config.json (read for analysis_root + figure_root).")
     p.add_argument("--emit-template", type=Path, default=None,
                    help="Write the (sample,plate,group) template CSV to this path and exit.")
+    p.add_argument("--refresh-template", action="store_true",
+                   help="With --emit-template: refresh the derived review columns "
+                        "(n_wells, date range, media) of the rows already in the file "
+                        "and leave the row set alone. Groups missing from the file are "
+                        "reported, not added — adding one enrols its wells in the cohort.")
     p.add_argument("--treatment-map", type=Path, default=None,
                    help="Filled template CSV (required unless --emit-template).")
     p.add_argument("--output-dir", type=Path, default=None,
@@ -876,7 +957,8 @@ def main(argv: list[str] | None = None) -> int:
     experiment_cache = _load_experiment_cache(analysis_root)
 
     if args.emit_template is not None:
-        emit_template(experiment_cache, args.emit_template)
+        emit_template(experiment_cache, args.emit_template,
+                      refresh_only=args.refresh_template)
         return 0
 
     if args.treatment_map is None:
@@ -892,7 +974,9 @@ def main(argv: list[str] | None = None) -> int:
     png_dir.mkdir(exist_ok=True)
 
     group_lut = _group_lookup(experiment_cache)
-    long_df = build_long_table(analysis_root, group_lut, burst_dirname=args.burst_dirname,
+    hours_lut = _hours_lookup(experiment_cache)
+    long_df = build_long_table(analysis_root, group_lut, hours_lut,
+                               burst_dirname=args.burst_dirname,
                                ml_dirname=args.ml_dirname, curation_dirname=args.curation_dirname,
                                scan_type=args.scan_type, limit=args.limit)
     if long_df.empty:

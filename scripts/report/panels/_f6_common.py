@@ -56,6 +56,11 @@ def _fit(ctx, seed: int = 0) -> Archetypes:
     profile = np.vstack([Z[labels == a].mean(0) for a in range(k)])
     names = name_archetypes(profile, FEAT_LABELS)
 
+    # ``group`` is the well's treatment arm, assigned once in ``collect_bursts``
+    # from ``well_index``. The panels bin the same column, so the stars and the
+    # bands are keyed off one labelling — they used to disagree, because
+    # selection ran on the per-recording chip groupname and the plot relabelled
+    # per well.
     comp = (bursts.groupby(["well_uid", "group", "arch"]).size()
             .unstack("arch", fill_value=0))
     comp = comp.div(comp.sum(axis=1), axis=0).reset_index()
@@ -120,18 +125,40 @@ def arch_color(a: int) -> str:
 
 
 def representative_bursts(arch: Archetypes, a: int, n: int = 3) -> pd.DataFrame:
-    """The ``n`` bursts closest to archetype ``a``'s centroid.
+    """The ``n`` bursts closest to archetype ``a``'s centroid, spread over chips.
 
     One example per archetype invites the reader to treat a single burst as the
     definition; several show the within-archetype spread that the feature profile
-    only summarises.
+    only summarises. Taking the ``n`` nearest outright defeats that: the nearest
+    neighbours of a centroid tend to come from one culture, and twice from one
+    well, so the reader sees one well's burst three times and reads it as the
+    archetype. Prefer a different chip for each example, then a different well,
+    and only then fall back on distance alone.
     """
     idx = np.where(arch.bursts.arch.to_numpy() == a)[0]
     if not len(idx):
         return arch.bursts.iloc[[]]
     centre = arch.Z[idx].mean(0)
-    d = ((arch.Z[idx] - centre) ** 2).sum(1)
-    return arch.bursts.iloc[idx[np.argsort(d)[:n]]]
+    order = idx[np.argsort(((arch.Z[idx] - centre) ** 2).sum(1))]
+    uid = arch.bursts.well_uid.to_numpy()
+    chip = np.asarray([u.split("|")[0] for u in uid])
+
+    picked: list[int] = []
+    for keyed in (chip, uid, None):        # one per chip, then per well, then any
+        seen = set() if keyed is None else {keyed[i] for i in picked}
+        for i in order:
+            if len(picked) >= n:
+                break
+            if i in picked:
+                continue
+            k = None if keyed is None else keyed[i]
+            if k is not None and k in seen:
+                continue
+            seen.add(k)
+            picked.append(i)
+        if len(picked) >= n:
+            break
+    return arch.bursts.iloc[picked]
 
 
 def arch_label(arch: Archetypes, a: int) -> str:

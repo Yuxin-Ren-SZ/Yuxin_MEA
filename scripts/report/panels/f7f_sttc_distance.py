@@ -8,9 +8,11 @@ NAME = "F7f_sttc_distance"
 FIGSIZE = (3.6, 2.7)
 CAPTION = (
     "How functional coupling decays with physical distance. Every unit pair from "
-    "the full STTC matrix of the sampled wells is binned by the distance between "
+    "the full STTC matrix of every well-recording in the window is binned by the "
+    "distance between "
     "the two units on the electrode plane, and the mean STTC of each bin is "
-    "plotted per group. Wells are sampled at matched culture age so the curves "
+    "plotted per group; the counts printed on the axes are the well-recordings "
+    "each curve rests on. The window is a matched culture age so the curves "
     "are not confounded by maturation; note this is a cross-sectional comparison "
     "across wells and chips, not a within-well treatment contrast, so it "
     "describes the spatial structure of coupling rather than testing a treatment "

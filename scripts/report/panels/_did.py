@@ -85,7 +85,10 @@ TIMECOURSE_METHOD = (
     "One small panel per metric: the difference-in-differences against Control "
     "over time rather than at a single day. Each chip's treated-minus-own-Control "
     "difference is computed per treatment-day bin; the line is the mean across "
-    "chips and the band its 95% t-CI (df = n_chips − 1). Zero means the arm is "
+    "chips and the band its 95% t-CI (df = n_chips − 1); a bin resting on a "
+    "single chip has no interval and is drawn as an open ring — kept on the "
+    "figure rather than dropped, so a line that stops early means the data stop, "
+    "not the plotting. Zero means the arm is "
     "changing exactly like Control, i.e. pure maturation. The solid vertical "
     "marks the pre-specified endpoint the formal test uses — the other bins are "
     "shown so a late-emerging or transient effect is visible, but they are not "
@@ -106,21 +109,26 @@ def _timecourse_axes(ax, metric, dt, endpoint, *, show_ylabel, ylabel):
     sub = dt[dt.metric == metric]
     seen = []
     for arm, g in sub.groupby("arm"):
-        xs, ys, los, his = [], [], [], []
+        xs, ys, los, his, ns = [], [], [], [], []
         for tc, grp in g.groupby("tauc"):
             v = grp.did.to_numpy(float)
             v = v[np.isfinite(v)]
-            if len(v) < 2:
+            if not len(v):
                 continue
             m = float(np.mean(v))
-            h = float(tdist.ppf(0.975, len(v) - 1)) * float(
-                np.std(v, ddof=1) / np.sqrt(len(v)))
-            xs.append(float(tc)); ys.append(m); los.append(m - h); his.append(m + h)
+            # One chip gives a difference but no interval. Plot it with a NaN
+            # band instead of dropping the bin: dropping it made an arm's line
+            # stop early with nothing on the figure to say why, and it happened
+            # exactly at the late bins (IVH_Early at tau 18/22/26 on nb_rate).
+            h = (float(tdist.ppf(0.975, len(v) - 1))
+                 * float(np.std(v, ddof=1) / np.sqrt(len(v)))) if len(v) > 1 else np.nan
+            xs.append(float(tc)); ys.append(m)
+            los.append(m - h); his.append(m + h); ns.append(len(v))
         if not xs:
             continue
         o = np.argsort(xs)
         xs = np.array(xs)[o]; ys = np.array(ys)[o]
-        los = np.array(los)[o]; his = np.array(his)[o]
+        los = np.array(los)[o]; his = np.array(his)[o]; ns = np.array(ns)[o]
         # Arms track each other closely; a dash on the second keeps both readable
         # where the lines coincide instead of one hiding the other.
         style = {"dashes": (3, 1.5)} if seen else {}
@@ -128,6 +136,9 @@ def _timecourse_axes(ax, metric, dt, endpoint, *, show_ylabel, ylabel):
                 **style)
         ax.fill_between(xs, los, his, color=group_color(arm), alpha=0.13, lw=0,
                         zorder=2)
+        if (ns < 2).any():        # one chip: point kept, interval undefined
+            ax.plot(xs[ns < 2], ys[ns < 2], "o", ms=5.5, mfc="none",
+                    mec=group_color(arm), mew=0.8, zorder=4)
         seen.append(arm)
         ax._tc_span = (min(getattr(ax, "_tc_span", (np.inf, -np.inf))[0], float(ys.min())),
                        max(getattr(ax, "_tc_span", (np.inf, -np.inf))[1], float(ys.max())))

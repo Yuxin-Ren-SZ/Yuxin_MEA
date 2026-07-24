@@ -25,24 +25,46 @@ _THRESH = {
 _PT_NARROW_MS = 0.5  # narrow/broad spiking split on peak-to-trough duration
 
 
-def _sample_wells(tidy: pd.DataFrame, n: int = 48, seed: int = 0) -> pd.DataFrame:
-    """A spread of wells across groups for pooling unit metrics."""
-    per = max(2, n // max(tidy.canonical_group.nunique(), 1))
-    parts = [sub.sample(min(len(sub), per), random_state=seed)
-             for _, sub in tidy.groupby("canonical_group")]
-    return pd.concat(parts).reset_index(drop=True)
+def _pool_wells(tidy: pd.DataFrame) -> pd.DataFrame:
+    """Every well-recording, for pooling per-unit quality metrics.
+
+    These panels are the QC distributions the curation gates are set against, so
+    they have to describe the units that were actually curated. A capped draw
+    (this used to take 48 wells, spread over groups) made the histograms — and
+    the pass fractions printed on them — a property of the seed.
+    """
+    return tidy.reset_index(drop=True)
+
+
+#: Percentile range the histogram axes span. Pooling every well brings in a few
+#: units with absurd metric values (median amplitudes past -2000 uV); on a raw
+#: axis they stretch the range until the distribution everyone needs to read is a
+#: single bar. Units outside the range are clipped into the end bins, so every
+#: unit is still counted and the count outside is printed — none is discarded.
+_HIST_SPAN = (0.1, 99.9)
 
 
 def _hist_qc(ax, units, col, log=False) -> None:
     x = units[col].dropna().to_numpy(float)
     if log:
         x = x[x > 0]
-        bins = np.logspace(np.log10(max(x.min(), 1e-3)), np.log10(x.max()), 30)
+    lo, hi = np.percentile(x, _HIST_SPAN) if len(x) else (0.0, 1.0)
+    if not np.isfinite([lo, hi]).all() or hi <= lo:
+        lo, hi = (np.nanmin(x), np.nanmax(x)) if len(x) else (0.0, 1.0)
+    n_out = int(((x < lo) | (x > hi)).sum())
+    xc = np.clip(x, lo, hi)
+    if log:
+        bins = np.logspace(np.log10(max(lo, 1e-3)), np.log10(hi), 30)
     else:
-        bins = 30
-    ax.hist(x, bins=bins, color=OKABE_ITO["sky"], alpha=0.8)
+        bins = np.linspace(lo, hi, 31)
+    ax.hist(xc, bins=bins, color=OKABE_ITO["sky"], alpha=0.8)
     if log:
         ax.set_xscale("log")
+    if n_out:
+        ax.annotate(f"{n_out:,} of {len(x):,} units clipped into the end bins",
+                    xy=(0.5, 1.0), xycoords="axes fraction", xytext=(0, 2),
+                    textcoords="offset points", ha="center", va="bottom",
+                    fontsize=5, color="0.45")
     thr, direction = _THRESH[col]
     # shade the RETAINED side of the gate + report the fraction passing
     xlo, xhi = ax.get_xlim()
@@ -108,7 +130,7 @@ def _panel_celltype(ax, units) -> None:
 def build_s2(tidy, analysis_root):
     import matplotlib.pyplot as plt
 
-    sample = _sample_wells(tidy)
+    sample = _pool_wells(tidy)
     units = L.load_units(analysis_root, sample)
     fig, axes = plt.subplots(2, 3, figsize=(9.0, 5.4))
     _hist_qc(axes[0, 0], units, "presence_ratio")
@@ -126,8 +148,9 @@ def build_s2(tidy, analysis_root):
                  fontsize=9, y=1.01)
     fig.tight_layout()
     caption(fig,
-        "Spike-sorting quality control, single units pooled across a spread of "
-        "wells. Panels show extracellular waveform templates and the "
+        "Spike-sorting quality control, single units pooled across every "
+        "well-recording in the cohort. Panels show extracellular waveform "
+        "templates and the "
         "distributions of the quality metrics used to curate units before "
         "analysis — presence ratio, refractory-period (ISI) contamination, "
         "median amplitude, and firing rate — plus a peak-to-trough-duration vs "

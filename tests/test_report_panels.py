@@ -185,3 +185,115 @@ def test_primary_endpoint_is_the_latest_bin_all_chips_reach():
     resp = S.well_response_by_tau(tidy2, metrics=["nb_rate"])
     assert sorted(resp.tauc.unique()) == [10.0, 22.0]
     assert S.primary_endpoint(resp, ["IVH_Early"]) == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Time-since-media-change window
+# ---------------------------------------------------------------------------
+_WINDOW = {"pre": (24.0, 48.0), "post": (18.0, 30.0), "assume_unknown_hours": 24.0}
+
+
+def _rows(*specs):
+    """``(well, tau, hours)`` triples -> a tidy-shaped frame."""
+    return pd.DataFrame(
+        [{"well_uid": w, "tau": t, "hours_since_media": h, "sample_id": "S1"}
+         for w, t, h in specs]
+    )
+
+
+def test_media_window_keeps_the_routine_scans_and_drops_the_acute_ones():
+    from scripts.report.panel_data import _restrict_media_window
+
+    tidy = _rows(("w1", 3, 24.0), ("w1", 5, 0.0), ("w1", 7, 0.5), ("w1", 9, 48.0))
+    out = _restrict_media_window(tidy, _WINDOW)
+    assert list(out.tau) == [3]
+
+
+def test_media_window_is_wider_before_treatment_than_after():
+    """A baseline may be a day or two old; a treatment-period scan may not."""
+    from scripts.report.panel_data import _restrict_media_window
+
+    tidy = _rows(("w1", -2, 48.0), ("w1", 4, 48.0))
+    out = _restrict_media_window(tidy, _WINDOW)
+    assert list(out.tau) == [-2]
+
+
+def test_media_window_bounds_are_inclusive():
+    """The unknown-tag default sits exactly on the pre window's lower edge."""
+    from scripts.report.panel_data import _restrict_media_window
+
+    tidy = _rows(("w1", -1, 24.0), ("w1", -2, 48.0), ("w1", 2, 18.0), ("w1", 3, 30.0))
+    out = _restrict_media_window(tidy, _WINDOW)
+    assert len(out) == 4
+
+
+def test_media_window_admits_untimed_rows_on_the_protocol_default():
+    from scripts.report.panel_data import _restrict_media_window
+
+    tidy = _rows(("w1", -3, np.nan), ("w1", 5, np.nan))
+    out = _restrict_media_window(tidy, _WINDOW)
+    assert len(out) == 2, "untimed rows are kept, not silently dropped"
+
+
+def test_media_window_rejects_tau_zero():
+    """Every tau-0 recording is a 0 h scan by construction — the treatment date
+    is back-dated from that very scan's tag — so the post window rejects it."""
+    from scripts.report.panel_data import _restrict_media_window
+
+    tidy = _rows(("w1", 0, 0.0))
+    assert _restrict_media_window(tidy, _WINDOW).empty
+
+
+def test_media_window_disabled_returns_everything():
+    from scripts.report.panel_data import _restrict_media_window
+
+    tidy = _rows(("w1", 5, 0.0), ("w1", 7, 72.0))
+    assert len(_restrict_media_window(tidy, None)) == 2
+
+
+def test_media_window_is_a_noop_without_the_column():
+    """An older tidy_long.csv must degrade to unfiltered, not to empty."""
+    from scripts.report.panel_data import _restrict_media_window
+
+    tidy = pd.DataFrame({"well_uid": ["w1"], "tau": [5], "sample_id": ["S1"]})
+    assert len(_restrict_media_window(tidy, _WINDOW)) == 1
+
+
+def test_media_window_reports_a_well_that_loses_its_baseline(caplog):
+    """The one failure mode that would not look like a filter."""
+    from scripts.report.panel_data import _restrict_media_window
+
+    tidy = _rows(("w1", -1, 0.5), ("w1", 4, 24.0))
+    with caplog.at_level("WARNING"):
+        out = _restrict_media_window(tidy, _WINDOW)
+    assert list(out.tau) == [4]
+    assert any("pre or post coverage" in r.message for r in caplog.records)
+
+
+def test_media_window_is_part_of_the_cache_key(tmp_path, monkeypatch):
+    """Toggling the window must invalidate the pickles, not silently reuse them.
+
+    The fingerprint used to hash only the on-disk table, so switching
+    ``media_window`` off returned a cache built under the old cohort with nothing
+    on screen to say so.
+    """
+    import json
+
+    from scripts.report import panel_data as D
+
+    tidy = pd.DataFrame({"well_uid": ["w1"], "tau": [4], "sample_id": ["S1"],
+                         "hours_since_media": [24.0]})
+    monkeypatch.setattr(D.L, "load_tidy", lambda _root: tidy)
+    monkeypatch.setattr(D, "_backfill", lambda t, _root: t)
+    monkeypatch.setattr(D, "_backfill_hours", lambda t, _root: t)
+    monkeypatch.setattr(D, "resolve_roots", lambda _p: (tmp_path, tmp_path))
+
+    on = tmp_path / "on.json"
+    on.write_text(json.dumps({"global": {}}))
+    off = tmp_path / "off.json"
+    off.write_text(json.dumps({"global": {}, "media_window": None}))
+
+    ctx_on = D.PanelContext(str(on))
+    ctx_off = D.PanelContext(str(off))
+    assert ctx_on.cache.fingerprint != ctx_off.cache.fingerprint
+    assert ctx_off.media_window is None

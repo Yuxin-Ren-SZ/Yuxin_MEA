@@ -130,18 +130,25 @@ def _panel_branching(ax, tidy):
     pw = d.groupby(["arm", "well_uid", "tauc"])["branching_ratio_mr"].median().reset_index()
     for g in [a for a in ordered_groups(d.arm.unique()) if a in _B_GROUPS]:
         sub = pw[pw.arm == g]
-        xs, ys, los, his = [], [], [], []
+        xs, ys, los, his, ns = [], [], [], [], []
         for tc, grp in sub.groupby("tauc"):
             v = grp.branching_ratio_mr.to_numpy()
-            if np.isnan(tc) or len(v) < 2:
+            if np.isnan(tc) or not len(v):
                 continue
-            lo, hi = _boot_ci(v)
+            # Single-well bins keep their median and lose only the bootstrap
+            # interval — same rule as ``trajectory.tau_trajectory``.
+            lo, hi = _boot_ci(v) if len(v) >= 2 else (np.nan, np.nan)
             xs.append(tc); ys.append(np.median(v)); los.append(lo); his.append(hi)
+            ns.append(len(v))
         if xs:
             order = np.argsort(xs); xs = np.array(xs)[order]
             ys = np.array(ys)[order]; los = np.array(los)[order]; his = np.array(his)[order]
+            ns = np.array(ns)[order]
             ax.plot(xs, ys, "-o", ms=3, color=group_color(g), label=g, zorder=3)
             ax.fill_between(xs, los, his, color=group_color(g), alpha=0.15, lw=0)
+            if (ns < 2).any():
+                ax.plot(xs[ns < 2], ys[ns < 2], "o", ms=5.5, mfc="none",
+                        mec=group_color(g), mew=0.8, zorder=4)
     ax.axhline(1.0, ls="--", color="0.5", lw=0.8)
     ax.axvline(0.0, ls=":", color="0.5", lw=0.8)
     ax.set_xlabel("treatment day (tau)")

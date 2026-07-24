@@ -137,6 +137,9 @@ def _effect_panel(ax, sub, days, n_chips):
 def build_s6(tidy: pd.DataFrame, genes: list[str] | None = None):
     import matplotlib.pyplot as plt
 
+    from .fig3_qpcr import drawable
+
+    tidy = drawable(tidy)
     genes = genes or celltype_ordered_genes(tidy.gene.dropna().unique())
     days = sorted(tidy.day.dropna().unique())
     eff_days = [d for d in days if d > 0]

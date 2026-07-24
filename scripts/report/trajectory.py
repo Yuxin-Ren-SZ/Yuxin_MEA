@@ -15,8 +15,10 @@ from . import stats as S
 from .report_style import METRIC_LABELS, group_color, ordered_groups
 
 #: Treatment-day bins. Runs past tau 21 so the stated experiment window is fully
-#: covered (CX118/CX169 record to tau 27).
-DEFAULT_TAU_EDGES = list(range(-6, 30, 4))
+#: covered (CX118/CX169 record to tau 27). The stop is 31, not 30: ``range`` is
+#: half-open, so stopping at 30 left the trailing edge unwritten and silently
+#: binned every tau >= 26 to NaN — the last four days of two chips.
+DEFAULT_TAU_EDGES = list(range(-6, 31, 4))
 
 #: The stated experiment window, in treatment days. Chips differ in absolute DIV,
 #: so every figure aligns on tau and marks the same two days.
@@ -72,9 +74,12 @@ def tau_trajectory(tidy, metric, arms, tau_edges=DEFAULT_TAU_EDGES):
         if pd.isna(tc):
             continue
         v = grp[metric].to_numpy(float)
-        if len(v) < 2:
-            continue
-        lo, hi = _boot_ci(v)
+        # A single well gives a median but no bootstrap interval. Keep the point
+        # and leave the interval NaN rather than dropping the bin: dropping it
+        # shortened an arm's line without saying so, and it bit hardest at the
+        # late bins where an effect would show (IVH_Early loses tau 20 and 24 on
+        # nb_rate this way, so its line simply ended before Control's).
+        lo, hi = _boot_ci(v) if len(v) >= 2 else (np.nan, np.nan)
         rows.append(dict(arm=arm, tauc=float(tc), median=float(np.median(v)),
                          lo=lo, hi=hi, n_wells=len(v)))
     return pd.DataFrame(rows)
@@ -101,6 +106,12 @@ def plot_trajectory(ax, tidy, metric, arms, tau_edges=DEFAULT_TAU_EDGES,
                 label=arm, zorder=3)
         ax.fill_between(sub.tauc, sub.lo, sub.hi, color=group_color(arm),
                         alpha=0.15, lw=0, zorder=2)
+        # Single-well bins carry no interval; ring them so a point with no band
+        # reads as "one well", not as a suspiciously precise estimate.
+        thin = sub[sub.n_wells < 2]
+        if not thin.empty:
+            ax.plot(thin.tauc, thin["median"], "o", ms=5.5, mfc="none",
+                    mec=group_color(arm), mew=0.8, zorder=4)
     if ref is not None:
         ax.axhline(ref, ls="--", color="0.5", lw=0.8, zorder=1)
     ax.set_xlabel("treatment day (tau)", fontsize=7)

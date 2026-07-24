@@ -21,11 +21,11 @@ from dash import dcc, html
 
 
 # Canonical field order. Date is a single calendar range picker.
-ALL_FIELDS = ("sample", "scan-type", "date", "group", "status")
+ALL_FIELDS = ("sample", "scan-type", "date", "group", "hours", "status")
 
 # Data-driven fields whose option lists are filled by the page callback
 # (status options are fixed; date bounds are set via min/max_date_allowed).
-POPULATED_FIELDS = ("sample", "scan-type", "group")
+POPULATED_FIELDS = ("sample", "scan-type", "group", "hours")
 
 # Fixed status options (real TaskStatus values; see pipeline/task_record.py).
 STATUS_OPTIONS = [
@@ -45,6 +45,7 @@ _KWARG = {
     "date-from": "date_from",
     "date-to": "date_to",
     "group": "groups",
+    "hours": "hours_since_media",
     "status": "statuses",
 }
 
@@ -53,6 +54,10 @@ _LABELS = {
     "scan-type": "Scan type(s)",
     "date": "Date range",
     "group": "Group(s)",
+    # Hours between the last media change and the recording, read from the assay
+    # tag. A discrete facet rather than a slider: the values people actually type
+    # are a handful of protocol timepoints (0, 0.5, 24, 48, 72), not a continuum.
+    "hours": "Hours since media",
     "status": "Status",
 }
 

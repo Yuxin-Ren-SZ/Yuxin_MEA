@@ -18,7 +18,12 @@ import pytest
 
 from yuxin_mea.dashboard import build_app
 from yuxin_mea.dashboard.cli import main
-from yuxin_mea.dashboard.data import filter_recordings, load_pipeline_df, load_recordings_df
+from yuxin_mea.dashboard.data import (
+    HOURS_UNKNOWN,
+    filter_recordings,
+    load_pipeline_df,
+    load_recordings_df,
+)
 from yuxin_mea.pipeline.cache import JsonPipelineCacheStore
 from yuxin_mea.pipeline.pipeline_entry import PipelineEntry
 from yuxin_mea.pipeline.task_record import TaskRecord, TaskStatus
@@ -518,3 +523,50 @@ def test_pager_state_label_and_disabled():
     assert pager_state(2, 3, 120) == ("page 3 / 3 · 120 total", False, True)
     # single page → both disabled
     assert pager_state(0, 1, 10) == ("page 1 / 1 · 10 total", True, True)
+
+
+# ---------------------------------------------------------------------------
+# hours-since-media facet
+# ---------------------------------------------------------------------------
+_HOURS_RECS = [
+    {"cache_key": "S1/260101/P1/Network/001", "sample_id": "S1", "date": "260101",
+     "scan_type": "Network", "wells": [], "groups": ["Control"],
+     "hours_since_media": 24.0},
+    {"cache_key": "S1/260102/P1/Network/002", "sample_id": "S1", "date": "260102",
+     "scan_type": "Network", "wells": [], "groups": ["Control"],
+     "hours_since_media": 0.5},
+    {"cache_key": "S1/260103/P1/Network/003", "sample_id": "S1", "date": "260103",
+     "scan_type": "Network", "wells": [], "groups": ["IVH"],
+     "hours_since_media": None},
+]
+
+
+def test_filter_by_hours_since_media():
+    out = filter_recordings(_HOURS_RECS, {}, hours_since_media=[24.0])
+    assert {r["cache_key"] for r in out} == {"S1/260101/P1/Network/001"}
+
+
+def test_filter_hours_selects_untimed_recordings_explicitly():
+    """Untimed scans are a category you can ask for, not a hidden remainder."""
+    out = filter_recordings(_HOURS_RECS, {}, hours_since_media=[HOURS_UNKNOWN])
+    assert {r["cache_key"] for r in out} == {"S1/260103/P1/Network/003"}
+
+
+def test_filter_hours_accepts_several_timepoints():
+    out = filter_recordings(_HOURS_RECS, {}, hours_since_media=[24.0, 0.5])
+    assert len(out) == 2
+
+
+def test_filter_hours_combines_with_the_other_facets():
+    out = filter_recordings(
+        _HOURS_RECS, {}, groups=["Control"], hours_since_media=[24.0, 0.5],
+    )
+    assert len(out) == 2
+    out2 = filter_recordings(
+        _HOURS_RECS, {}, groups=["IVH"], hours_since_media=[24.0],
+    )
+    assert out2 == []
+
+
+def test_filter_hours_absent_is_a_noop():
+    assert len(filter_recordings(_HOURS_RECS, {})) == 3
