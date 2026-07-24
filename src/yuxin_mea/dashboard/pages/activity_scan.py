@@ -130,12 +130,26 @@ layout = html.Div([
 
     dcc.Store(id="as-context"),
     dcc.Store(id="as-active-well", data=None),
+    # Anchor for the one-time document keydown listener (registered clientside).
+    html.Div(id="as-keydummy", style={"display": "none"}),
 
+    # Navigation: step the open well (←/→) or switch recording (Shift+←/→).
+    # Order mirrors the physical relationship: plate ‹ well ‹ well › plate ›.
     html.Div([
+        html.Button([html.Span("‹‹", className="glyph"), "Previous plate"],
+                    id="as-prev-plate", n_clicks=0, className="btn",
+                    title="Previous plate (Shift+←)"),
         html.Button([html.Span("‹", className="glyph"), "Previous well"],
-                    id="as-prev-well", n_clicks=0, className="btn"),
+                    id="as-prev-well", n_clicks=0, className="btn",
+                    title="Previous well (←)"),
         html.Button(["Next well", html.Span("›", className="glyph")],
-                    id="as-next-well", n_clicks=0, className="btn"),
+                    id="as-next-well", n_clicks=0, className="btn",
+                    title="Next well (→)"),
+        html.Button(["Next plate", html.Span("››", className="glyph")],
+                    id="as-next-plate", n_clicks=0, className="btn",
+                    title="Next plate (Shift+→)"),
+        html.Span("← / → well · Shift + ← / → plate",
+                  style={**_MONO, "marginLeft": "12px", "fontSize": "10px"}),
         html.Span(id="as-legend", style={**_MONO, "marginLeft": "12px"}),
     ], style={"display": "flex", "gap": "6px", "alignItems": "center",
               "flexWrap": "wrap", "margin": "12px 0 0"}),
@@ -288,13 +302,15 @@ def _populate_recordings(_n, f_sample, f_from, f_to, f_group, root, current_rec)
     date_opts = sorted({r["date"] for r in with_out})
     group_opts = sorted({g for r in with_out for g in r.get("groups", [])})
 
+    # The scan type is fixed for this page (no scan-type control in the filter
+    # bar), but it must go through `filter_kwargs` — that helper emits *every*
+    # kwarg, so passing scan_types separately would duplicate the keyword.
     kwargs = filter_kwargs({
-        "sample": f_sample,
+        "sample": f_sample, "scan-type": ["ActivityScan"],
         "date-from": iso_to_yymmdd(f_from), "date-to": iso_to_yymmdd(f_to),
         "group": f_group,
     })
-    filtered = filter_recordings(recordings, well_status, scan_types=["ActivityScan"],
-                                 **kwargs)
+    filtered = filter_recordings(recordings, well_status, **kwargs)
     rec_keys = sorted(r["cache_key"] for r in filtered if r["cache_key"] in computed)
     options = [{"label": k, "value": k} for k in rec_keys]
     value = current_rec if current_rec in rec_keys else (rec_keys[0] if rec_keys else None)
@@ -472,3 +488,76 @@ def _close_modal(_backdrop, _close):
     if not trig or not trig.get("value"):
         return dash.no_update
     return _MODAL_HIDDEN
+
+
+@callback(
+    Output("as-rec", "value", allow_duplicate=True),
+    Output("as-modal", "style", allow_duplicate=True),
+    Output("as-active-well", "data", allow_duplicate=True),
+    Input("as-prev-plate", "n_clicks"),
+    Input("as-next-plate", "n_clicks"),
+    State("as-rec", "value"),
+    State("as-rec", "options"),
+    prevent_initial_call=True,
+)
+def _on_plate_nav(_prev, _next, current, options):
+    """Step the recording dropdown ±1 within its filtered options.
+
+    Only the dropdown value moves — `_render_grid` and `_map_options_and_root`
+    already take `as-rec` as an Input, so the plate repaints itself. Any open
+    well modal belongs to the previous recording, so it is closed.
+    """
+    nu = dash.no_update
+    trig = ctx.triggered[0] if ctx.triggered else None
+    if not trig or not trig.get("value"):
+        return nu, nu, nu
+    opt_values = [o["value"] for o in (options or [])]
+    if not opt_values:
+        return nu, nu, nu
+    idx = opt_values.index(current) if current in opt_values else 0
+    idx = (max(0, idx - 1) if ctx.triggered_id == "as-prev-plate"
+           else min(len(opt_values) - 1, idx + 1))
+    new_key = opt_values[idx]
+    if new_key == current:
+        return nu, nu, nu  # already at the end — nothing to do
+    return new_key, _MODAL_HIDDEN, None
+
+
+# One-time document keydown listener: ←/→ step the open well, Shift+←/→ switch
+# recording. It only synthesises clicks on the nav buttons, so all logic stays in
+# the server callbacks above. Held in a module constant so a test can assert the
+# guards and the button ids it clicks.
+#
+# Guarded against three focus targets that own the arrow keys themselves: text
+# inputs (the output-root box), dropdowns, and the ``dcc.Slider`` handle — an
+# rc-slider handle is a focusable div with ``role="slider"``, so it matches
+# neither of the other two and would otherwise move *and* step the well.
+_KEYDOWN_JS = """
+    function(_id) {
+        if (window.__asKeysBound) { return ''; }
+        window.__asKeysBound = true;
+        document.addEventListener('keydown', function(e) {
+            var t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
+            if (t && t.closest && t.closest('.Select, .dash-dropdown, [role=combobox], [role=slider], .rc-slider')) { return; }
+            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') { return; }
+            var modal = document.getElementById('as-modal');
+            var open = modal && modal.style.display && modal.style.display !== 'none';
+            function click(id) { var el = document.getElementById(id); if (el) { el.click(); } }
+            if (e.key === 'ArrowLeft') {
+                if (e.shiftKey) { e.preventDefault(); click('as-prev-plate'); }
+                else if (open) { e.preventDefault(); click('as-prev-well'); }
+            } else {
+                if (e.shiftKey) { e.preventDefault(); click('as-next-plate'); }
+                else if (open) { e.preventDefault(); click('as-next-well'); }
+            }
+        });
+        return '';
+    }
+"""
+
+dash.clientside_callback(
+    _KEYDOWN_JS,
+    Output("as-keydummy", "children"),
+    Input("as-keydummy", "id"),
+)
