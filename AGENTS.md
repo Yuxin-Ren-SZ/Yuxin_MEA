@@ -17,6 +17,12 @@ Concise codebase map for future coding agents. Production code only.
 - `src/yuxin_mea/analysis/` burst detector algorithm and output writer; burst diagnostic library; curation summary reader; synthetic validation generators (promoted from `pipeline_tasks/analysis/`).
   - `burst_detector.py`, `iterative_burst_detector.py`, `burst_output.py`, `plate_raster_synchrony.py`.
   - `burst_diagnostic.py` — pure library for batch analysis/caching/diagnostics; no Dash imports.
+  - `electrode_selection_qc.py` — longitudinal QC of Network routed-electrode selection per
+    (sample, chip, well): h5-metadata-only extraction, treatment-window resolution, stability
+    metrics (identity Jaccard + exact FFT toroidal-shift null + lag decay + config-reuse
+    detection), and the selection-history animation. Script-driven, NOT a task.
+  - `electrode_selection_inspector.py` — read side of the above: loaders, Plotly figures,
+    cached PNG thumbnails, markdown report. No Dash / h5py imports.
   - `curation_summary.py` — read/summarize AutoCurationTask outputs (Phase 4).
   - `synthetic_validation.py` — synthetic spike-train generators and ground-truth scoring (Phase 4).
 - `src/yuxin_mea/dashboard/` multipage Dash app for non-technical users; read-only browsing of dataset/pipeline/burst diagnostics.
@@ -24,6 +30,8 @@ Concise codebase map for future coding agents. Production code only.
   - `components/layout.py` — navbar + page container + `no_config_banner()`.
   - `components/form_builder.py` — schema-driven Dash form renderer (Phase 3).
   - `pages/{home,recordings,pipeline,plate_viewer,burst_diagnostic}.py` — registered pages.
+  - `pages/electrode_selection.py` — `/electrode-selection`; 4x6 plate grid of selection-count
+    thumbnails + per-well drill-in. Read-only; never triggers a render.
   - `pages/settings.py` — schema-driven config editor (Phase 3).
 - `src/yuxin_mea/cli/` stub (empty; populated in later phase).
 - `config/` example/default pipeline config JSON.
@@ -53,6 +61,12 @@ raw data scan -> recording/well cache -> per-well task queue -> preprocessing ->
 - JSON cache writes are atomic via tempfile + `os.replace`.
 - `DatasetManager.refresh()` full rescan; startup scan only new date dirs.
 - Missing cached date dirs logged; cached entries kept.
+- `treatment_map.csv` is gitignored, so it is absent from every git worktree; anything
+  needing treatment/plating dates must resolve it explicitly and degrade loudly.
+- A well's `groupname` is per-recording metadata and can change mid-experiment (wells are
+  relabelled from a placeholder at treatment); use the most recent non-empty name.
+- Network runs re-route their electrode set every time; `electrode` is not a valid join key
+  across recordings. See `electrode_selection_qc`.
 - Metadata dict keys dynamic; do not hardcode MaxWell annotation keys.
 - `auto_curation` writes `curated_spike_times.npy`; hard input contract for `burst_detection`.
 - Dashboard pages use pure cache loaders (`load_recordings_df`, `load_pipeline_df`) instead of managers to enforce read-only semantics.
