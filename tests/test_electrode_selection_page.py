@@ -58,6 +58,19 @@ def test_grid_callback_is_graceful_without_a_selection():
         from yuxin_mea.dashboard.pages import electrode_selection as page
 
         with app.server.test_request_context():
-            grid, legend, context = page._render_grid(None, None, "")
+            grid, legend, context = page._render_grid(None, None, ["on"], "")
         assert context is None
         assert legend == ""
+
+
+def test_unified_toggle_is_wired_into_the_grid_callback():
+    """The checkbox must reach _render_grid, or flipping it would do nothing."""
+    with TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        cfg = tmp_path / "pipeline_config.json"
+        _write_config(cfg, tmp_path)
+        build_app(cfg)
+        from yuxin_mea.dashboard.pages import electrode_selection as page
+
+        import inspect
+        assert "unified" in inspect.signature(page._render_grid).parameters

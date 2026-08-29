@@ -117,6 +117,11 @@ layout = html.Div([
                    style={"marginBottom": "0", "marginLeft": "8px"}),
         html.Div(dcc.Dropdown(id="es-plate", options=[], value=None,
                               clearable=False), style={"flex": "1 1 200px"}),
+        dcc.Checklist(
+            id="es-unified",
+            options=[{"label": " Unified scale across wells", "value": "on"}],
+            value=["on"], style={"marginLeft": "12px", "fontSize": "12px"},
+            inputStyle={"marginRight": "4px"}),
     ], style={"display": "flex", "alignItems": "center", "gap": "8px",
               "flexWrap": "wrap", "margin": "10px 0"}),
 
@@ -189,9 +194,10 @@ def _plates(sample_id, root):
     Output("es-context", "data"),
     Input("es-sample", "value"),
     Input("es-plate", "value"),
+    Input("es-unified", "value"),
     State("es-root", "value"),
 )
-def _render_grid(sample_id, plate_id, root):
+def _render_grid(sample_id, plate_id, unified, root):
     from yuxin_mea.analysis import electrode_selection_inspector as VI
 
     resolved = _resolved_root(root)
@@ -205,13 +211,26 @@ def _render_grid(sample_id, plate_id, root):
                          style=_MONO), "", None)
 
     cache_root = _ctx().get("cache_root")
+    is_unified = bool(unified) and "on" in unified
+
+    # Load every well once, then — in unified mode — pool them for one shared
+    # set of bands, so the grid reads as a cross-well comparison rather than 24
+    # independently normalised pictures.
+    loaded = {well: VI.load_well(resolved, sample_id, plate_id, well)
+              for well in found}
+    if is_unified:
+        edges, top_open = VI.plate_band_edges(loaded.values())
+    else:
+        edges, top_open = None, False
+
     cells, windows = [], set()
     for well in found:
-        payload = VI.load_well(resolved, sample_id, plate_id, well)
+        payload = loaded[well]
         wdir = VI.well_dir(resolved, sample_id, plate_id, well)
         uri = ""
         if payload is not None and cache_root:
-            uri = VI.count_png_data_uri(payload, Path(cache_root), wdir)
+            uri = VI.count_png_data_uri(payload, Path(cache_root), wdir,
+                                        edges=edges, top_open=top_open)
         stab = (payload or {}).get("stability") or {}
         verdict = str(stab.get("verdict") or "—")
         windows.add(VI.window_label(payload))
@@ -239,11 +258,15 @@ def _render_grid(sample_id, plate_id, root):
             title=f"Open {VI.well_name(well)} ({well})"))
 
     window = windows.pop() if len(windows) == 1 else "mixed windows"
+    scale_note = (
+        "shared bands pooled across all wells — colour compares between wells"
+        if is_unified else
+        "each well scaled to itself — colour does NOT compare between wells")
     legend = (f"{len(found)} well(s) · window {window} · thumbnails show the "
-              f"fraction of each well's own scans (0–1), so wells with "
-              f"different scan counts stay comparable")
+              f"fraction of each well's own scans; {scale_note}")
     context = {"sample_id": sample_id, "plate_id": plate_id,
-               "root": _root_override(root) or "", "wells": found}
+               "root": _root_override(root) or "", "wells": found,
+               "unified": is_unified}
     return html.Div(cells, style=_GRID_STYLE), legend, context
 
 

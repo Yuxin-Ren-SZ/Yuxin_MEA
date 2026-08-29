@@ -154,7 +154,9 @@ def run_one(job: dict) -> dict:
         map_rel = anim_rel = None
         if "map" in modes:
             VI.render_count_map(payload, out_dir / MAP_STEM, cmap=job["cmap"],
-                                formats=tuple(job["map_formats"]))
+                                formats=tuple(job["map_formats"]),
+                                scale=job["color_scale"],
+                                clip_percentile=job["clip_percentile"])
             map_rel = f"{MAP_STEM}.png"
         if "anim" in modes and job["animate"]:
             written = Q.render_history_animation(
@@ -321,6 +323,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-scans", type=int, default=3,
                    help="Below this many in-window scans the verdict is withheld.")
 
+    p.add_argument("--color-scale", choices=["bands", "linear"], default="bands",
+                   help="Map colour scale. 'bands' (default) gives one discrete "
+                        "colour per scan-count with the top clipped, so the "
+                        "crowded low end is separable; 'linear' spans 1..n_scans.")
+    p.add_argument("--clip-percentile", type=float, default=98.0,
+                   help="Percentile at which the count ramp is clipped. "
+                        "Default 98.")
     p.add_argument("--cmap", default="RdYlGn",
                    help="Count-map colormap. Default RdYlGn (red->green, as "
                         "requested); 'viridis' is the colour-blind-safe swap.")
@@ -477,6 +486,8 @@ def main(argv: list[str] | None = None) -> int:
             "animate": animate,
             "cmap": args.cmap,
             "map_formats": ["png", "pdf"],
+            "color_scale": args.color_scale,
+            "clip_percentile": args.clip_percentile,
             "format": args.format,
             "decay_days": args.decay_days,
             "fps": args.fps,

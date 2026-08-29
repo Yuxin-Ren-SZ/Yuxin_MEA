@@ -58,6 +58,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_CMAP = "RdYlGn"
 CVD_SAFE_CMAP = "viridis"
 
+#: Selection counts are steeply geometric — on the reference well 43 % of routed
+#: electrodes were picked exactly once and 98 % eight times or fewer, so a ramp
+#: spanning 1…n_scans spends more than half its range on under 2 % of the data
+#: and renders everything real as one shade of red. Two things fix that: clip the
+#: top at a percentile, and quantise into discrete bands so adjacent counts get
+#: visibly different colours rather than adjacent points on a gradient.
+DEFAULT_CLIP_PERCENTILE = 98.0
+
+#: RdYlGn stops being separable much past ten steps, and the 98th percentile
+#: reaches ~16 on the longest series, so bands widen rather than multiply.
+MAX_BANDS = 10
+
 WHITE = "#ffffff"
 _INK = "#1c1a15"
 _INK3 = "#84807a"
@@ -164,6 +176,150 @@ def window_label(payload: dict | None) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Colour bands
+# --------------------------------------------------------------------------- #
+def band_edges(values, *, clip_percentile: float = DEFAULT_CLIP_PERCENTILE,
+               max_bands: int = MAX_BANDS,
+               integer: bool = True) -> tuple[list[float], bool]:
+    """Band boundaries for a skewed count (or fraction) raster.
+
+    Returns ``(edges, top_open)`` where ``edges`` are the *lower* bounds of each
+    band and ``top_open`` says whether real data exceeds the last one — which is
+    what earns the ``N+`` label on the colourbar.
+
+    Zero and non-finite entries are dropped first: "never selected" is absent
+    data painted white, not a value competing for space on the scale.
+    """
+    v = np.asarray(list(values) if not isinstance(values, np.ndarray) else values,
+                   dtype=float).ravel()
+    v = v[np.isfinite(v) & (v > 0)]
+    if v.size == 0:
+        return ([1.0], False) if integer else ([0.0], False)
+
+    lo = float(np.min(v))
+    observed_max = float(np.max(v))
+    clipped = float(np.percentile(v, clip_percentile))
+
+    if integer:
+        lo = max(1.0, np.floor(lo))
+        # Floor at 2 so a "1 vs 2+" split always survives, but never invent a
+        # band above what the data actually reaches.
+        vmax = min(observed_max, max(2.0, np.ceil(clipped)))
+        vmax = max(vmax, lo)
+        span = int(vmax - lo) + 1
+        step = max(1, int(np.ceil(span / max_bands)))
+        edges = [float(e) for e in np.arange(lo, vmax + 1, step)]
+    else:
+        vmax = min(observed_max, max(clipped, lo))
+        if vmax <= lo:
+            return ([lo], observed_max > lo)
+        edges = [float(e) for e in np.linspace(lo, vmax, max_bands + 1)[:-1]]
+
+    edges = sorted(set(edges)) or [lo]
+    return edges, bool(observed_max > edges[-1])
+
+
+#: RdYlGn passes through a near-white pale yellow at its midpoint (#ffffbf sits
+#: only 0.145 away from white in sRGB). On a map whose *background* is white and
+#: whose marks are single electrodes, a mid band sampled there reads as empty.
+#: Band colours therefore skip a sliver either side of the midpoint.
+_RAMP_GAP = 0.08
+
+
+def band_colors(n: int, cmap_name: str) -> list:
+    """``n`` evenly spaced colours from ``cmap_name``, skipping its pale centre.
+
+    Shared by the matplotlib and Plotly paths so the exported PNG and the
+    interactive figure are colour-identical by construction rather than by
+    coincidence.
+    """
+    from matplotlib import colormaps
+
+    cmap = colormaps[cmap_name]
+    if n <= 1:
+        return [cmap(0.0)]
+    out = []
+    for i in range(n):
+        t = (i + 0.5) / n
+        # Compress each half of the ramp into its outer portion, leaving the
+        # washed-out middle unused while preserving the hue order.
+        if t < 0.5:
+            t = t * (1.0 - 2.0 * _RAMP_GAP)
+        else:
+            t = 1.0 - (1.0 - t) * (1.0 - 2.0 * _RAMP_GAP)
+        out.append(cmap(t))
+    return out
+
+
+def _band_norm(edges: list[float], top_open: bool, cmap_name: str):
+    """``(cmap, norm)`` for matplotlib, with never-selected painted white."""
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+
+    colors = band_colors(len(edges), cmap_name)
+    cmap = ListedColormap(colors)
+    cmap.set_bad(WHITE)          # never selected == absent data, painted white
+    boundaries = list(edges) + [_band_top(edges, top_open)]
+    # clip=True folds anything above the last boundary into the top band, which
+    # is exactly what the "N+" label promises.
+    norm = BoundaryNorm(boundaries, ncolors=len(colors), clip=True)
+    return cmap, norm
+
+
+def _band_top(edges: list[float], top_open: bool) -> float:
+    """Upper boundary closing the final band."""
+    if len(edges) >= 2:
+        width = edges[-1] - edges[-2]
+    else:
+        width = 1.0
+    return edges[-1] + width
+
+
+def band_ticks(edges: list[float], top_open: bool,
+               integer: bool = True) -> tuple[list[float], list[str]]:
+    """Tick positions (band centres) and labels, the last one ``N+`` if open."""
+    top = _band_top(edges, top_open)
+    bounds = list(edges) + [top]
+    centres = [(bounds[i] + bounds[i + 1]) / 2 for i in range(len(edges))]
+    labels = []
+    for i, e in enumerate(edges):
+        hi = bounds[i + 1]
+        if integer:
+            lo_i, hi_i = int(round(e)), int(round(hi)) - 1
+            label = f"{lo_i}" if hi_i <= lo_i else f"{lo_i}–{hi_i}"
+        else:
+            label = f"{e:.2f}"
+        labels.append(label)
+    if top_open and labels:
+        base = labels[-1].split("–")[0]
+        labels[-1] = f"{base}+"
+    return centres, labels
+
+
+def plate_band_edges(payloads, *, clip_percentile: float = DEFAULT_CLIP_PERCENTILE,
+                     max_bands: int = MAX_BANDS) -> tuple[list[float], bool]:
+    """One shared set of *fraction* bands across every well of a plate.
+
+    Pool then take percentiles, the same idea as
+    ``activity_scan_inspector.plate_value_range``. Fractions rather than raw
+    counts because wells on one plate do not share a scan count — CX118 ranges
+    13–22 — so counts would make a well with fewer scans look colder purely for
+    having been recorded less often.
+    """
+    pooled = []
+    for payload in payloads:
+        if payload is None:
+            continue
+        frac = fraction_grid(payload)
+        finite = frac[np.isfinite(frac) & (frac > 0)]
+        if finite.size:
+            pooled.append(finite)
+    if not pooled:
+        return [0.0], False
+    return band_edges(np.concatenate(pooled), clip_percentile=clip_percentile,
+                      max_bands=max_bands, integer=False)
+
+
+# --------------------------------------------------------------------------- #
 # Plotly (dashboard)
 # --------------------------------------------------------------------------- #
 def _empty_figure(message: str, height: int = 360) -> go.Figure:
@@ -178,7 +334,8 @@ def _empty_figure(message: str, height: int = 360) -> go.Figure:
 
 
 def fig_count_map(payload: dict | None, cmap: str = DEFAULT_CMAP,
-                  height: int = 420) -> go.Figure:
+                  height: int = 420,
+                  clip_percentile: float = DEFAULT_CLIP_PERCENTILE) -> go.Figure:
     """Interactive count map on true chip geometry (3850 x 2100 µm)."""
     if not payload:
         return _empty_figure("no electrode-selection QC for this well", height)
@@ -189,12 +346,18 @@ def fig_count_map(payload: dict | None, cmap: str = DEFAULT_CMAP,
     n = n_scans(payload)
     x = np.arange(GRID_COLS) * PITCH_UM
     y = np.arange(GRID_ROWS) * PITCH_UM
+
+    # Discrete count bands, not a gradient: adjacent counts must read as
+    # different colours, and the top is clipped so the empty tail of the
+    # distribution stops eating the ramp.
+    edges, top_open = band_edges(grid[np.isfinite(grid)], clip_percentile=clip_percentile)
+    top = _band_top(edges, top_open)
+    ticks, labels = band_ticks(edges, top_open)
     fig = go.Figure(go.Heatmap(
-        z=grid, x=x, y=y, colorscale=cmap,
-        # zmin=1 so a single selection reads at the ramp's red end rather than
-        # washing out next to the white "never selected" background.
-        zmin=1, zmax=max(2, n),
-        colorbar=dict(title=f"scans<br>(of {n})", thickness=12, len=0.75),
+        z=grid, x=x, y=y, colorscale=_plotly_band_scale(edges, cmap),
+        zmin=edges[0], zmax=top,
+        colorbar=dict(title=f"scans<br>(of {n})", thickness=12, len=0.75,
+                      tickvals=ticks, ticktext=labels, tickmode="array"),
         hovertemplate=("x %{x:.0f} µm · y %{y:.0f} µm<br>"
                        "selected in %{z:.0f} scan(s)<extra></extra>"),
         hoverongaps=False,
@@ -251,6 +414,25 @@ def fig_lag_decay(payload: dict | None, height: int = 280) -> go.Figure:
 # --------------------------------------------------------------------------- #
 # Matplotlib rasterizers
 # --------------------------------------------------------------------------- #
+def _plotly_band_scale(edges: list[float], cmap_name: str) -> list:
+    """Hard-stop Plotly colorscale sampled from the same matplotlib colormap.
+
+    Each band repeats its colour at both ends of its span, so Plotly renders
+    steps rather than interpolating across them — and the PNG and the
+    interactive figure agree colour for colour.
+    """
+    from matplotlib.colors import to_hex
+
+    n = len(edges)
+    colors = band_colors(n, cmap_name)
+    scale = []
+    for i in range(n):
+        colour = to_hex(colors[i])
+        scale.append([i / n, colour])
+        scale.append([(i + 1) / n, colour])
+    return scale
+
+
 def _cmap_white_bad(name: str):
     from matplotlib import colormaps
 
@@ -261,7 +443,8 @@ def _cmap_white_bad(name: str):
 
 def render_count_map(payload: dict, out_path: str | Path, *,
                      cmap: str = DEFAULT_CMAP, formats: tuple[str, ...] = ("png",),
-                     dpi: int = 200) -> list[Path]:
+                     dpi: int = 200, scale: str = "bands",
+                     clip_percentile: float = DEFAULT_CLIP_PERCENTILE) -> list[Path]:
     """Vis 1 — full-size cumulative selection map with axes and a colourbar.
 
     Uses the matplotlib object API (never pyplot): pyplot's global figure
@@ -278,11 +461,21 @@ def render_count_map(payload: dict, out_path: str | Path, *,
     masked = np.ma.masked_invalid(grid)
     n = n_scans(payload)
 
+    if scale == "linear":
+        band_cmap, norm, ticks, labels = _cmap_white_bad(cmap), None, None, None
+    else:
+        edges, top_open = band_edges(grid[np.isfinite(grid)],
+                                     clip_percentile=clip_percentile)
+        band_cmap, norm = _band_norm(edges, top_open, cmap)
+        ticks, labels = band_ticks(edges, top_open)
+
     fig = Figure(figsize=(8.2, 5.0), dpi=dpi, facecolor=WHITE)
     FigureCanvasAgg(fig)
     ax = fig.add_subplot(111, facecolor=WHITE)
-    im = ax.imshow(masked, origin="lower", cmap=_cmap_white_bad(cmap),
-                   vmin=1, vmax=max(2, n), interpolation="nearest",
+    im = ax.imshow(masked, origin="lower", cmap=band_cmap, norm=norm,
+                   vmin=1 if norm is None else None,
+                   vmax=max(2, n) if norm is None else None,
+                   interpolation="nearest",
                    aspect="equal", extent=[0, CHIP_W_UM, 0, CHIP_H_UM])
     ax.set_xlabel("x (µm)")
     ax.set_ylabel("y (µm)")
@@ -296,6 +489,10 @@ def render_count_map(payload: dict, out_path: str | Path, *,
     ax.set_title(f"{payload.get('well_uid', '')}\n{sub}", fontsize=10, color=_INK)
 
     cbar = fig.colorbar(im, ax=ax, fraction=0.030, pad=0.02)
+    if ticks is not None:
+        cbar.set_ticks(ticks)
+        cbar.set_ticklabels(labels)
+    cbar.ax.tick_params(labelsize=8)
     cbar.set_label(f"scans selected (of {n})", fontsize=9)
     fig.text(0.01, 0.01, "white = never selected", fontsize=7, color=_INK3)
     fig.tight_layout()
@@ -311,12 +508,19 @@ def render_count_map(payload: dict, out_path: str | Path, *,
 
 def render_count_thumbnail(payload: dict, out_path: str | Path, *,
                            cmap: str = DEFAULT_CMAP,
+                           edges: list[float] | None = None,
+                           top_open: bool = False,
                            w_px: int = 220, h_px: int = 120) -> Path:
-    """Plate-grid thumbnail: fraction of scans on a fixed 0-1 scale, white ground.
+    """Plate-grid thumbnail: fraction of scans in discrete bands, white ground.
 
     Fraction rather than raw counts so wells with different in-window scan
     counts stay comparable across the plate; opaque white so never-selected
     electrodes read as blank rather than borrowing the page background.
+
+    ``edges`` supplied  -> unified mode: every thumbnail on the plate shares one
+    scale, so a greener well genuinely is a more stable well.
+    ``edges`` is None   -> each well is scaled to itself: maximally legible
+    alone, but colour no longer compares between wells.
     """
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
@@ -324,41 +528,58 @@ def render_count_thumbnail(payload: dict, out_path: str | Path, *,
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    masked = np.ma.masked_invalid(fraction_grid(payload))
+    frac = fraction_grid(payload)
+    masked = np.ma.masked_invalid(frac)
+    if edges is None:
+        edges, top_open = band_edges(frac[np.isfinite(frac)], integer=False)
+    band_cmap, norm = _band_norm(list(edges), top_open, cmap)
+
     fig = Figure(figsize=(w_px / 100, h_px / 100), dpi=100, facecolor=WHITE)
     FigureCanvasAgg(fig)
     ax = fig.add_axes([0, 0, 1, 1], facecolor=WHITE)
     ax.axis("off")
     if masked.count():
-        ax.imshow(masked, origin="lower", aspect="auto",
-                  cmap=_cmap_white_bad(cmap), vmin=0.0, vmax=1.0,
-                  interpolation="nearest")
+        ax.imshow(masked, origin="lower", aspect="auto", cmap=band_cmap,
+                  norm=norm, interpolation="nearest")
     fig.savefig(out_path, dpi=100, facecolor=WHITE)
     return out_path
 
 
-def _thumbnail_path(cache_dir: Path, results_dir: Path, cmap: str) -> Path:
-    """Content-keyed cache path: re-renders only when the QC output changed."""
+def _thumbnail_path(cache_dir: Path, results_dir: Path, cmap: str,
+                    edges: list[float] | None = None) -> Path:
+    """Content-keyed cache path: re-renders only when the QC output changed.
+
+    The resolved band edges are part of the key. Without them, toggling the
+    unified-scale switch would keep serving the PNGs rendered under the old
+    scale and the change would be invisible.
+    """
     marker = Path(results_dir) / "counts.npz"
     try:
         sig = marker.stat()
         base = f"{results_dir}|{cmap}|{sig.st_mtime_ns}|{sig.st_size}"
     except OSError:
         base = f"{results_dir}|{cmap}"
+    if edges is None:
+        base += "|per-well"
+    else:
+        base += "|" + ",".join(f"{e:.5g}" for e in edges)
     name = hashlib.sha1(base.encode()).hexdigest()[:16]
     return Path(cache_dir) / _RASTER_SUBDIR / f"{name}.png"
 
 
 def count_png_data_uri(payload: dict | None, cache_dir: Path | str,
                        results_dir: Path | str,
-                       cmap: str = DEFAULT_CMAP) -> str:
+                       cmap: str = DEFAULT_CMAP,
+                       edges: list[float] | None = None,
+                       top_open: bool = False) -> str:
     """Cached base64 thumbnail; empty string when there is nothing to draw."""
     if not payload:
         return ""
-    path = _thumbnail_path(Path(cache_dir), Path(results_dir), cmap)
+    path = _thumbnail_path(Path(cache_dir), Path(results_dir), cmap, edges)
     if not path.exists():
         try:
-            render_count_thumbnail(payload, path, cmap=cmap)
+            render_count_thumbnail(payload, path, cmap=cmap, edges=edges,
+                                   top_open=top_open)
         except Exception as exc:  # noqa: BLE001 — a bad thumbnail must not break the grid
             logger.warning("thumbnail render failed for %s: %s", results_dir, exc)
             return ""

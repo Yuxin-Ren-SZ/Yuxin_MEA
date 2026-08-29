@@ -455,3 +455,157 @@ def test_window_label_names_a_soft_anchor(dataset, tmp_path):
 def test_well_name_maps_the_plate():
     assert VI.well_name("well000") == "A1"
     assert VI.well_name("well023") == "D6"
+
+
+# --------------------------------------------------------------------------- #
+# Colour bands
+# --------------------------------------------------------------------------- #
+def _geometric_counts():
+    """The reference well's real count distribution: 43% at 1, 98% at <=8."""
+    return np.repeat(np.arange(1, 16),
+                     [2105, 1106, 634, 402, 272, 134, 106, 56, 37, 30, 14, 7, 3, 5, 2])
+
+
+def test_band_edges_clip_the_empty_tail():
+    edges, top_open = VI.band_edges(_geometric_counts())
+    assert edges == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    assert top_open is True                       # counts 9-15 fold into "8+"
+
+
+def test_band_ticks_label_the_open_top():
+    edges, top_open = VI.band_edges(_geometric_counts())
+    ticks, labels = VI.band_ticks(edges, top_open)
+    assert labels[0] == "1" and labels[-1] == "8+"
+    assert len(ticks) == len(edges)
+    assert all(edges[i] < ticks[i] < edges[i] + 1.001 for i in range(len(edges)))
+
+
+def test_band_count_is_capped_and_the_step_widens():
+    edges, _ = VI.band_edges(np.repeat(np.arange(1, 41), 50))
+    assert len(edges) <= VI.MAX_BANDS
+    steps = {round(b - a, 6) for a, b in zip(edges, edges[1:])}
+    assert len(steps) == 1 and steps.pop() > 1    # widened, not truncated
+
+
+def test_top_open_is_false_when_nothing_exceeds_the_clip():
+    edges, top_open = VI.band_edges(np.array([1, 1, 2, 2, 3, 3]))
+    assert top_open is False
+    assert edges[-1] == 3.0
+
+
+def test_vmax_floors_at_two_so_one_versus_more_survives():
+    """98% at count 1 must still separate '1' from '2+', not collapse to one band."""
+    counts = np.array([1] * 990 + [2] * 8 + [5] * 2)
+    edges, top_open = VI.band_edges(counts)
+    assert len(edges) >= 2
+    assert top_open is True
+
+
+def test_degenerate_inputs_do_not_raise():
+    assert VI.band_edges(np.array([])) == ([1.0], False)
+    assert VI.band_edges(np.array([1, 1, 1])) == ([1.0], False)
+    # zeros are absent data, not a value on the scale
+    assert VI.band_edges(np.array([0, 0, 0])) == ([1.0], False)
+
+
+def _rgb_distance(a, b) -> float:
+    return float(np.linalg.norm(np.array(a[:3]) - np.array(b[:3])) / np.sqrt(3))
+
+
+def test_counts_one_two_three_get_distinct_colours():
+    """The actual complaint: adjacent low counts used to render identically."""
+    edges, top_open = VI.band_edges(_geometric_counts())
+    cmap, norm = VI._band_norm(edges, top_open, VI.DEFAULT_CMAP)
+    new = [cmap(norm(v)) for v in (1, 2, 3)]
+    assert len({tuple(c) for c in new}) == 3
+
+    # Under the old linear 1..18 ramp these three were nearly the same red.
+    from matplotlib import colormaps
+    from matplotlib.colors import Normalize
+    lin_cmap, lin = colormaps[VI.DEFAULT_CMAP], Normalize(vmin=1, vmax=18)
+    old = [lin_cmap(lin(v)) for v in (1, 2, 3)]
+
+    # Measured: adjacent separation 0.165/0.172 now versus 0.092/0.091 before,
+    # a 1.81x gain in plain sRGB distance. The perceptual gain is larger than
+    # that number suggests — the old three were all dark reds (#a50026,
+    # #c21c27, #dc3b2c) while the new three cross red -> orange-red -> orange.
+    worst_new = min(_rgb_distance(new[i], new[j]) for i, j in ((0, 1), (1, 2)))
+    worst_old = min(_rgb_distance(old[i], old[j]) for i, j in ((0, 1), (1, 2)))
+    assert worst_new > 1.5 * worst_old
+    assert worst_new > 0.15
+
+
+def test_every_band_is_separable_from_the_white_ground():
+    """RdYlGn's pale centre would otherwise read as 'never selected'."""
+    white = (1.0, 1.0, 1.0)
+    for n in (2, 3, 5, 8, VI.MAX_BANDS):
+        for colour in VI.band_colors(n, VI.DEFAULT_CMAP):
+            assert _rgb_distance(colour, white) > 0.2
+
+
+def test_never_selected_still_renders_white():
+    cmap, _ = VI._band_norm([1.0, 2.0], False, VI.DEFAULT_CMAP)
+    rgba = cmap(np.ma.masked_invalid(np.array([np.nan])))[0]
+    assert tuple(np.round(rgba[:3], 6)) == (1.0, 1.0, 1.0)
+
+
+def test_plotly_band_scale_has_hard_stops():
+    scale = VI._plotly_band_scale([1.0, 2.0, 3.0], VI.DEFAULT_CMAP)
+    assert len(scale) == 6                        # two entries per band
+    assert scale[0][1] == scale[1][1]             # colour repeated => hard step
+    assert scale[0][0] == 0.0 and scale[-1][0] == 1.0
+
+
+def test_plate_band_edges_bracket_every_well(dataset, tmp_path):
+    payloads = []
+    for well in ("well000", "well001"):
+        res = _qc_for(dataset, well, Q.WindowSpec("all", None, None))
+        payloads.append(Q.load_well_qc(Q.write_well_qc(
+            res, Q.well_dir(tmp_path / "root", "CXTEST", "PLATE1", well))))
+    edges, _top = VI.plate_band_edges(payloads)
+    assert len(edges) >= 1
+    for payload in payloads:
+        frac = VI.fraction_grid(payload)
+        finite = frac[np.isfinite(frac)]
+        assert edges[0] <= finite.min() + 1e-9
+
+
+def test_thumbnail_cache_key_tracks_the_scale(dataset, tmp_path):
+    res = _qc_for(dataset, "well000", Q.WindowSpec("all", None, None))
+    out = Q.write_well_qc(res, tmp_path / "out")
+    cache = tmp_path / "cache"
+    per_well = VI._thumbnail_path(cache, out, VI.DEFAULT_CMAP, None)
+    unified = VI._thumbnail_path(cache, out, VI.DEFAULT_CMAP, [0.0, 0.2, 0.4])
+    other = VI._thumbnail_path(cache, out, VI.DEFAULT_CMAP, [0.0, 0.3, 0.6])
+    assert len({per_well, unified, other}) == 3
+
+
+def test_map_still_paints_a_white_ground(dataset, tmp_path):
+    from PIL import Image
+
+    res = _qc_for(dataset, "well000", Q.WindowSpec("all", None, None))
+    out = Q.write_well_qc(res, tmp_path / "out")
+    payload = Q.load_well_qc(out)
+    written = VI.render_count_map(payload, out / "map", formats=("png",), dpi=80)
+    im = Image.open(written[0]).convert("RGB")
+    assert im.getpixel((2, 2)) == (255, 255, 255)
+
+
+def test_linear_scale_remains_available(dataset, tmp_path):
+    res = _qc_for(dataset, "well000", Q.WindowSpec("all", None, None))
+    out = Q.write_well_qc(res, tmp_path / "out")
+    payload = Q.load_well_qc(out)
+    written = VI.render_count_map(payload, out / "lin", formats=("png",),
+                                  dpi=80, scale="linear")
+    assert written[0].exists()
+
+
+def test_thumbnail_accepts_shared_and_per_well_edges(dataset, tmp_path):
+    res = _qc_for(dataset, "well000", Q.WindowSpec("all", None, None))
+    out = Q.write_well_qc(res, tmp_path / "out")
+    payload = Q.load_well_qc(out)
+    a = VI.render_count_thumbnail(payload, out / "a.png")
+    b = VI.render_count_thumbnail(payload, out / "b.png",
+                                  edges=[0.0, 0.25, 0.5], top_open=True)
+    assert a.exists() and b.exists()
+    assert a.read_bytes() != b.read_bytes()
