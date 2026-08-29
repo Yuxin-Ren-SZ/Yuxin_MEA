@@ -210,18 +210,41 @@ def _summary_row(result: dict, window: dict) -> dict:
     return row
 
 
-def write_summary(out_root: Path, rows: list[dict]) -> Path | None:
+def write_summary(out_root: Path, rows: list[dict]) -> tuple[Path, "object"] | None:
+    """Merge this run's wells into the roll-up; return ``(path, merged_df)``.
+
+    Merged, not replaced: a run scoped to ``--sample``/``--well``, or one resumed
+    after a failure, must not drop the 143 wells an earlier full run recorded.
+    Rows are keyed on ``well_uid`` so a recomputed well replaces its old row.
+    """
     if not rows:
         return None
     import pandas as pd
 
-    df = pd.DataFrame(rows).sort_values(["sample_id", "plate_id", "well_id"])
+    fresh = pd.DataFrame(rows)
     path = out_root / SUMMARY_FILE
-    df.to_csv(path, index=False)
-    return path
+    if path.exists():
+        try:
+            prior = pd.read_csv(path)
+        except (OSError, ValueError) as exc:
+            logger.warning("could not merge %s (%s); replacing it", path, exc)
+        else:
+            kept = prior[~prior["well_uid"].isin(set(fresh["well_uid"]))]
+            fresh = pd.concat([kept, fresh], ignore_index=True)
+
+    merged = fresh.sort_values(["sample_id", "plate_id", "well_id"])
+    merged.to_csv(path, index=False)
+    # The file can legitimately straddle windows — wells whose treatment date is
+    # unknown fall back to "all" while their anchored neighbours stay on "tau" —
+    # so report the composition rather than warning about a mix that is expected.
+    composition = merged["window_kind"].value_counts().to_dict()
+    if len(composition) > 1:
+        logger.info("summary spans window kinds %s (see the window_kind and "
+                    "window_anchor columns)", composition)
+    return path, merged
 
 
-def write_index_md(out_root: Path, rows: list[dict], window_label: str) -> Path:
+def write_index_md(out_root: Path, rows: list, window_label: str) -> Path:
     """Plate-by-plate roll-up — the only view that shows whether one well is an
     outlier or the whole chip behaves the same way."""
     from yuxin_mea.analysis import electrode_selection_inspector as VI
@@ -241,8 +264,11 @@ def write_index_md(out_root: Path, rows: list[dict], window_label: str) -> Path:
             rel = f"{sample_id}/{plate_id}/{r['well_id']}/{REPORT_FILE}"
 
             def _f(v, d=3):
-                return "—" if v is None else (f"{v:.{d}f}" if isinstance(v, float)
-                                              else str(v))
+                # Values round-tripped through the merged CSV arrive as float
+                # NaN, not None, so both have to be caught.
+                if v is None or (isinstance(v, float) and v != v):
+                    return "—"
+                return f"{v:.{d}f}" if isinstance(v, float) else str(v)
 
             lines.append(
                 f"| {r['well_id']} | {VI.well_name(r['well_id'])} | "
@@ -505,9 +531,10 @@ def main(argv: list[str] | None = None) -> int:
                     logger.info("%d/%d wells in %.0fs", i, len(jobs), time.time() - t0)
 
     if summary:
-        path = write_summary(out_root, summary)
-        write_index_md(out_root, summary, spec.label())
-        logger.info("summary: %s", path)
+        path, merged = write_summary(out_root, summary)
+        # Rebuilt from the merged set so a scoped run does not shrink the index.
+        write_index_md(out_root, merged.to_dict("records"), spec.label())
+        logger.info("summary: %s (%d well(s))", path, len(merged))
 
     logger.info("done in %.0fs: %s", time.time() - t0, dict(counts))
     for f in failures[:10]:
